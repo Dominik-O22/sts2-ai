@@ -37,6 +37,9 @@ public static class Recorder
     /// Hand at the last snapshot, so a play can be logged with its hand index
     /// (the card has already left the hand when the hook fires).
     private static List<CardModel> _lastHand = new();
+    /// Enemies at the last snapshot; a killed target has already left the
+    /// combat state when the play hook fires.
+    private static List<Creature> _lastEnemies = new();
 
     public static void Initialize()
     {
@@ -67,12 +70,15 @@ public static class Recorder
             var state = cm.DebugOnlyGetState();
             var me = LocalContext.GetMe(state);
             if (state == null || me == null || cm.IsExecutingCardOrPotionEffect(me)) return;
+            // A played card sits in the play pile until its result-pile move; not a decision point yet.
+            if (me.PlayerCombatState == null || me.PlayerCombatState.PlayPile.Cards.Count > 0) return;
 
             string snap = JsonSerializer.Serialize(Snapshot(state, me), Json);
             if (snap == _lastSnapshot) return;
             if (_file == null) Open(state, me);
             _lastSnapshot = snap;
             _lastHand = me.PlayerCombatState!.Hand.Cards.ToList();
+            _lastEnemies = state.Enemies.ToList();
             Write(snap);
         }
         catch (Exception ex)
@@ -183,11 +189,8 @@ public static class Recorder
     private static int? EnemyIndex(Creature? target)
     {
         if (target == null || target.IsPlayer) return null;
-        var enemies = target.CombatState?.Enemies;
-        if (enemies == null) return null;
-        for (int i = 0; i < enemies.Count; i++)
-            if (ReferenceEquals(enemies[i], target)) return i;
-        return null;
+        int i = _lastEnemies.FindIndex(e => ReferenceEquals(e, target));
+        return i < 0 ? null : i;
     }
 
     // ---- hooks --------------------------------------------------------------

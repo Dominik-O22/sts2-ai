@@ -110,7 +110,8 @@ pub fn snapshot_of(c: &Combat) -> Value {
         "discard": pile(&c.player.discard),
         "exhaust": pile(&c.player.exhaust),
         "potions": c.potions.iter().map(|p| p.map(|p| slug(&format!("{p:?}")))).collect::<Vec<_>>(),
-        "enemies": c.enemies.iter().enumerate().map(|(i, e)| json!({
+        // The game drops dead creatures from its enemy list.
+        "enemies": c.enemies.iter().enumerate().filter(|(_, e)| e.creature.alive()).map(|(i, e)| json!({
             "id": slug(&format!("{:?}", e.monster.id)),
             "hp": e.creature.hp,
             "max_hp": e.creature.max_hp,
@@ -216,9 +217,10 @@ fn settle(c: &Combat, snap: &Value, depth: u32) -> Result<Combat, String> {
 /// Force the recorded next moves onto the sim's enemies.
 fn force_moves(c: &mut Combat, snap: &Value) -> Result<(), String> {
     let empty = vec![];
-    for (i, e) in snap["enemies"].as_array().unwrap_or(&empty).iter().enumerate() {
+    let living: Vec<usize> = c.living_enemies().collect();
+    for (e, &i) in snap["enemies"].as_array().unwrap_or(&empty).iter().zip(&living) {
         let Some(name) = e["move"].as_str() else { continue };
-        if i < c.enemies.len() && c.enemies[i].creature.alive() && !c.set_enemy_move(i, name) {
+        if !c.set_enemy_move(i, name) {
             return Err(format!("enemy {i} has no move {name}"));
         }
     }
@@ -317,6 +319,10 @@ pub fn replay_seeded(text: &str, ids: &Ids, seed: u64) -> Result<Report, String>
     for (n, rec) in records.iter().enumerate().skip(1) {
         match rec["t"].as_str().unwrap_or("") {
             "snapshot" => {
+                // The game can snapshot once more after the last enemy dies.
+                if c.is_over() && rec["enemies"].as_array().is_some_and(|a| a.is_empty()) {
+                    continue;
+                }
                 match settle(&c, rec, 0) {
                     Ok(k) => c = k,
                     Err(e) => return Ok(failed(&report, n, e)),
@@ -340,7 +346,15 @@ pub fn replay_seeded(text: &str, ids: &Ids, seed: u64) -> Result<Report, String>
                     return Ok(failed(&report, n, "card played after the sim ended combat".into()));
                 }
                 let (id, up) = card_ref(ids, rec)?;
-                let target = rec["target"].as_u64().map(|t| t as usize);
+                // Targets index the game's list of living enemies. A kill
+                // shot loses its target before the hook fires; with one
+                // enemy left that is unambiguous.
+                let living: Vec<usize> = c.living_enemies().collect();
+                let target = match rec["target"].as_u64() {
+                    Some(t) => living.get(t as usize).copied(),
+                    None if living.len() == 1 && crate::card::def(id).target == crate::types::TargetType::AnyEnemy => Some(living[0]),
+                    None => None,
+                };
                 // Prefer the recorded hand index: identical cards are
                 // interchangeable, but which one leaves the hand changes
                 // the discard order and so later random picks.
@@ -370,7 +384,8 @@ pub fn replay_seeded(text: &str, ids: &Ids, seed: u64) -> Result<Report, String>
                 let Some(slot) = c.potions.iter().position(|p| *p == Some(pid)) else {
                     return Ok(failed(&report, n, format!("game used {name}; sim has no such potion")));
                 };
-                let target = rec["target"].as_u64().map(|t| t as usize);
+                let living: Vec<usize> = c.living_enemies().collect();
+                let target = rec["target"].as_u64().and_then(|t| living.get(t as usize).copied());
                 c.step(Action::UsePotion { slot, target });
                 report.actions += 1;
             }
@@ -470,6 +485,9 @@ mod tests {
                     Action::PlayCard { hand_idx, .. } => Some((c.player.hand[hand_idx].id, c.player.hand[hand_idx].upgraded)),
                     _ => None,
                 };
+                // The recorder indexes targets into the living enemy list.
+                let living: Vec<usize> = c.living_enemies().collect();
+                let living_idx = |t: Option<usize>| t.and_then(|t| living.iter().position(|&l| l == t));
                 let turn_before = c.player.turn;
                 c.step(a);
                 steps += 1;
@@ -486,12 +504,12 @@ mod tests {
                         let mut l = card_json(id, up);
                         l["t"] = json!("play");
                         l["hand_idx"] = json!(hand_idx);
-                        l["target"] = json!(target);
+                        l["target"] = json!(living_idx(target));
                         lines.push(l);
                     }
                     Action::UsePotion { slot, target } => {
                         let id = potions[slot].map(|p| slug(&format!("{p:?}")));
-                        lines.push(json!({ "t": "potion", "id": id, "target": target }));
+                        lines.push(json!({ "t": "potion", "id": id, "target": living_idx(target) }));
                     }
                     Action::EndTurn if c.player.turn > turn_before => {
                         lines.push(json!({ "t": "turn_start", "turn": c.player.turn }));
