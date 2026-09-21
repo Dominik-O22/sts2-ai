@@ -469,7 +469,7 @@ impl Card {
             ],
             Cascade => {
                 let n = self.captured_x + if self.upgraded { 1 } else { 0 };
-                (0..n.max(0)).map(|_| Effect::AutoPlayFromDrawTop { force_exhaust: false }).collect()
+                vec![Effect::AutoPlayFromDrawTop { count: n.max(0) as u32, force_exhaust: false }]
             }
             Cinder => vec![
                 attack(1),
@@ -513,7 +513,7 @@ impl Card {
                     vec![]
                 }
             }
-            Havoc => vec![Effect::AutoPlayFromDrawTop { force_exhaust: true }],
+            Havoc => vec![Effect::AutoPlayFromDrawTop { count: 1, force_exhaust: true }],
             Headbutt => vec![
                 attack(1),
                 Effect::Choose { from: Pile::Discard, filter: CardFilter::Any, then: Then::MoveTo(Pile::DrawTop), can_skip: false },

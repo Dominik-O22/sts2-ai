@@ -932,17 +932,23 @@ impl Combat {
                 let subs = self.auto_play(uid, force_exhaust);
                 self.push_front_all(subs);
             }
-            Effect::AutoPlayFromDrawTop { force_exhaust } => {
-                if self.reshuffle_if_needed() {
-                    let subs = self.relic_after_shuffle();
-                    self.push_front_all(subs);
-                }
-                if !self.player.draw.is_empty() {
+            Effect::AutoPlayFromDrawTop { count, force_exhaust } => {
+                // All cards leave the draw pile before any is played, so a
+                // played card's draws do not eat the next one.
+                let mut subs = vec![];
+                for _ in 0..count {
+                    if self.reshuffle_if_needed() {
+                        subs.extend(self.relic_after_shuffle());
+                    }
+                    if self.player.draw.is_empty() {
+                        break;
+                    }
                     let card = self.player.draw.remove(0);
                     let uid = card.uid;
                     self.player.play.push(card);
-                    self.queue.push_front(Effect::AutoPlay { uid, force_exhaust });
+                    subs.push(Effect::AutoPlay { uid, force_exhaust });
                 }
+                self.push_front_all(subs);
             }
             Effect::AutoPlayRandomAttack => {
                 let uids: Vec<u32> =
@@ -1038,13 +1044,15 @@ impl Combat {
                         self.player.creature.block = self.player.creature.block.min(10);
                     } else if self.should_clear_block(CreatureRef::Player) {
                         self.player.creature.block = 0;
-                        // Hook.AfterBlockCleared: player powers, then relics.
-                        for p in &self.player.creature.powers {
-                            subs.extend(p.after_block_cleared(CreatureRef::Player));
-                        }
-                        subs.extend(self.relic_after_block_cleared());
                     }
                 }
+                // Hook.AfterBlockCleared runs for every creature starting its
+                // turn, even when nothing was cleared (turn 1, Barricade,
+                // Sturdy Clamp): player powers, then relics.
+                for p in &self.player.creature.powers {
+                    subs.extend(p.after_block_cleared(CreatureRef::Player));
+                }
+                subs.extend(self.relic_after_block_cleared());
                 // SetupPlayerTurn: energy, then draw (innate on top on turn 1).
                 if self.relic_should_reset_energy() {
                     self.player.energy = self.max_energy();

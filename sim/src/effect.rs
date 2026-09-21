@@ -176,8 +176,9 @@ pub enum Effect {
     /// `CardCmd.AutoPlay`: play a card from wherever it is, no energy cost,
     /// random target if needed.
     AutoPlay { uid: u32, force_exhaust: bool },
-    /// `CardPileCmd.AutoPlayFromDrawPile` for one card from the top.
-    AutoPlayFromDrawTop { force_exhaust: bool },
+    /// `CardPileCmd.AutoPlayFromDrawPile`: move `count` cards from the top
+    /// to the play pile first, then auto-play them in order.
+    AutoPlayFromDrawTop { count: u32, force_exhaust: bool },
     /// Auto-play `count` random playable attacks from hand (Stampede).
     AutoPlayRandomAttack,
     /// Aggression: move up to `count` random attacks from discard to hand, upgraded.

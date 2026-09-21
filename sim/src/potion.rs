@@ -197,7 +197,7 @@ impl PotionId {
             Clarity => vec![draw(1), self_power(PowerId::Clarity, 3)],
             CureAll => vec![Effect::GainEnergy { amount: 1 }, draw(2)],
             DexterityPotion => vec![self_power(PowerId::Dexterity, 2)],
-            DistilledChaos => vec![Effect::AutoPlayFromDrawTop { force_exhaust: false }; 3],
+            DistilledChaos => vec![Effect::AutoPlayFromDrawTop { count: 3, force_exhaust: false }],
             DropletOfPrecognition => vec![choose(Pile::DrawTop, CardFilter::Any, Then::MoveTo(Pile::Hand), false)],
             Duplicator => vec![self_power(PowerId::Duplication, 1)],
             EnergyPotion => vec![Effect::GainEnergy { amount: 2 }],
