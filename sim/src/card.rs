@@ -148,6 +148,7 @@ defs! {
     Slimed: 1, Status, Special, None, kw = [Exhaust], gen = false;
     Dazed: -1, Status, Special, None, kw = [Ethereal, Unplayable], gen = false;
     Burn: -1, Status, Special, None, kw = [Unplayable], gen = false;
+    Infection: -1, Status, Special, None, kw = [Unplayable], gen = false;
     AscendersBane: -1, Curse, Special, None, kw = [Unplayable, Ethereal], gen = false;
     GiantRock: 1, Attack, Special, AnyEnemy, gen = false;
 }
@@ -363,6 +364,7 @@ impl Card {
             Whirlwind => Vars { damage: pick(5.0, 8.0), ..d() },
             Slimed => Vars { cards: 1, ..d() },
             Burn => Vars { damage: 2.0, ..d() },
+            Infection => Vars { damage: 3.0, ..d() },
             GiantRock => Vars { damage: pick(16.0, 20.0), ..d() },
         };
         v.damage += self.extra_damage;
@@ -612,7 +614,7 @@ impl Card {
             Whirlwind => vec![aoe(self.captured_x.max(0) as u32)],
             Slimed => vec![draw(v.cards)],
             GiantRock => vec![attack(1)],
-            Wound | Dazed | Burn | AscendersBane => vec![],
+            Wound | Dazed | Burn | Infection | AscendersBane => vec![],
         }
     }
 

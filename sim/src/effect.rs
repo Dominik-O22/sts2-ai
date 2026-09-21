@@ -8,7 +8,8 @@
 //! order the call stack would. A choice effect leaves the rest of the queue
 //! waiting for the answer.
 
-use crate::ids::{CardId, PowerId};
+use crate::ids::{CardId, MonsterId, PowerId};
+use crate::monster::Flags;
 use crate::types::{CardType, CreatureRef, Side, ValueProp};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -148,6 +149,15 @@ pub enum Effect {
     AutoPlayRandomAttack,
     /// Aggression: move up to `count` random attacks from discard to hand, upgraded.
     AggressionPull { count: u32 },
+
+    /// `CreatureCmd.Add`: a monster joins the enemy side mid-combat.
+    SpawnMonster { id: MonsterId, flags: Flags },
+    /// `CreatureCmd.Stun`: replace the next move with a STUNNED move.
+    Stun { target: CreatureRef, next: Option<&'static str> },
+    /// Plow: strip every Strength-type power from the target.
+    RemoveStrength { target: CreatureRef },
+    /// Illusion's REVIVE move: heal to full.
+    Revive { target: CreatureRef },
 
     // Turn flow. `Combat/CombatManager.cs`.
     StartTurn(Side),

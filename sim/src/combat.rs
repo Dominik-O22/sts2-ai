@@ -61,6 +61,19 @@ pub struct PlayerCombat {
 pub struct Enemy {
     pub creature: Creature,
     pub monster: Monster,
+    /// Illusion: dead but will act (revive) on its next turn.
+    pub reviving: bool,
+}
+
+impl Enemy {
+    /// `Creature.IsPrimaryEnemy`: combat ends when no primary enemy lives.
+    pub fn primary(&self) -> bool {
+        self.creature.power(PowerId::Minion).is_none()
+    }
+    /// Takes part in the enemy turn.
+    fn acts(&self) -> bool {
+        self.creature.alive() || self.reviving
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -106,6 +119,8 @@ pub struct Stats {
     pub last_drawn: Option<u32>,
     /// Rupture: Strength owed once the current card play finishes.
     pub rupture_pending: i32,
+    /// Card plays started this turn (Ringing).
+    pub cards_played_this_turn: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -122,6 +137,8 @@ pub struct Combat {
     pub stats: Stats,
     queue: VecDeque<Effect>,
     next_uid: u32,
+    /// False during setup, before the first turn starts.
+    started: bool,
 }
 
 impl Combat {
@@ -150,17 +167,6 @@ impl Combat {
             .collect();
         rngs.shuffle.shuffle(&mut draw);
 
-        let mut placed: Vec<Enemy> = Vec::with_capacity(enemies.len());
-        for spec in enemies {
-            let (lo, hi) = Monster::hp_range(spec.id, asc);
-            let hp = roll_unique_hp(lo, hi, &placed, &mut rngs.niche);
-            let mut creature = Creature { hp, max_hp: hp, block: 0, powers: vec![] };
-            for (id, amount) in Monster::innate_powers(spec.id, asc) {
-                creature.powers.push(Power::new(id, amount));
-            }
-            placed.push(Enemy { creature, monster: Monster::new(spec.id, asc, spec.flags) });
-        }
-
         let mut c = Self {
             player: PlayerCombat {
                 creature: Creature { hp, max_hp, block: 0, powers: vec![] },
@@ -173,7 +179,7 @@ impl Combat {
                 base_max_energy: max_energy,
                 turn: 1,
             },
-            enemies: placed,
+            enemies: Vec::with_capacity(enemies.len()),
             round: 1,
             side: Side::Player,
             asc,
@@ -183,10 +189,36 @@ impl Combat {
             stats: Stats::default(),
             queue: VecDeque::new(),
             next_uid,
+            started: false,
         };
+        for spec in enemies {
+            c.spawn(spec.id, spec.flags);
+        }
+        c.started = true;
         c.queue.push_back(Effect::StartTurn(Side::Player));
         c.run();
         c
+    }
+
+    /// `CombatState.CreateCreature` + `MonsterModel.AfterAddedToRoom`: roll
+    /// HP, apply innate powers and block, add to the enemy list.
+    fn spawn(&mut self, id: MonsterId, flags: Flags) {
+        let (lo, hi) = Monster::hp_range(id, self.asc);
+        let hp = roll_unique_hp(lo, hi, &self.enemies, &mut self.rngs.niche);
+        let mut creature = Creature { hp, max_hp: hp, block: 0, powers: vec![] };
+        let me = CreatureRef::Enemy(self.enemies.len());
+        for (pid, amount) in Monster::innate_powers(id, self.asc) {
+            let mut p = Power::new(pid, amount);
+            p.applier = Some(me);
+            creature.powers.push(p);
+        }
+        creature.block = Monster::innate_block(id);
+        let mut monster = Monster::new(id, self.asc, flags);
+        // CombatManager.AfterCreatureAdded: roll at once during the player's turn.
+        if self.started && self.side == Side::Player {
+            monster.roll_move(&mut self.rngs.monster_ai);
+        }
+        self.enemies.push(Enemy { creature, monster, reviving: false });
     }
 
     pub fn is_over(&self) -> bool {
@@ -247,7 +279,16 @@ impl Combat {
         if self.player.creature.powers.iter().any(|p| p.free_card(card.ty())) {
             return 0;
         }
+        // TangledPower.cs: every attack is afflicted with Entangled (+amount).
+        if card.ty() == CardType::Attack {
+            return local + self.player.creature.power_amount(PowerId::Tangled);
+        }
         local
+    }
+
+    /// `Hook.ShouldPlay`: Ringing allows only the first card play each turn.
+    fn hook_allows_play(&self) -> bool {
+        !(self.player.creature.power(PowerId::Ringing).is_some() && self.stats.cards_played_this_turn > 0)
     }
 
     /// Every action the player may take right now.
@@ -281,7 +322,7 @@ impl Combat {
 
     /// `CardModel.CanPlay` for the reasons we model.
     fn can_play(&self, card: &Card) -> bool {
-        if card.has(Keyword::Unplayable) {
+        if card.has(Keyword::Unplayable) || !self.hook_allows_play() {
             return false;
         }
         if card.def().x_cost {
@@ -338,12 +379,19 @@ impl Combat {
 
     /// Drain the queue. Stops when combat ends or a choice is pending.
     fn run(&mut self) {
+        let mut resolved = 0u32;
         while self.pending.is_none() {
             let Some(e) = self.queue.pop_front() else { break };
             if self.is_over() {
                 self.queue.clear();
                 break;
             }
+            resolved += 1;
+            assert!(
+                resolved < 100_000 && self.queue.len() < 100_000,
+                "runaway effect loop: resolving {e:?}, queue front {:?}",
+                self.queue.iter().take(5).collect::<Vec<_>>()
+            );
             self.resolve(e);
         }
     }
@@ -540,6 +588,7 @@ impl Combat {
             }
             Effect::CardPlayIter { uid, target } => {
                 let Some(card) = self.find_card(uid).cloned() else { return };
+                self.stats.cards_played_this_turn += 1;
                 let mut subs = self.before_card_played(&card);
                 subs.extend(card.on_play(self, target));
                 subs.push(Effect::AfterCardPlayed { uid });
@@ -621,12 +670,31 @@ impl Combat {
                     }
                 }
             }
+            Effect::SpawnMonster { id, flags } => self.spawn(id, flags),
+            Effect::Stun { target, next } => {
+                if let CreatureRef::Enemy(i) = target {
+                    self.enemies[i].monster.stun(next);
+                }
+            }
+            Effect::RemoveStrength { target } => {
+                self.creature_mut(target).powers.retain(|p| {
+                    p.id != PowerId::Strength && crate::power::temp_strength_sign(p.id).is_none()
+                });
+            }
+            Effect::Revive { target } => {
+                if let CreatureRef::Enemy(i) = target {
+                    let e = &mut self.enemies[i];
+                    e.creature.hp = e.creature.max_hp;
+                    e.reviving = false;
+                }
+            }
             Effect::StartTurn(side) => self.start_turn(side),
             Effect::EndPlayerTurn => self.end_player_turn(),
             Effect::TurnEndInHand => self.turn_end_in_hand(),
             Effect::FlushHand => self.flush_hand(),
             Effect::EnemyAct(i) => {
-                if self.enemies[i].creature.alive() {
+                // Creature.TakeTurn skips monsters spawned since the last side switch.
+                if self.enemies[i].acts() && !self.enemies[i].monster.spawned_this_turn {
                     let subs = self.enemies[i].monster.perform(CreatureRef::Enemy(i), self.asc);
                     self.push_front_all(subs);
                 }
@@ -653,6 +721,10 @@ impl Combat {
     /// `CombatManager.StartTurn`.
     fn start_turn(&mut self, side: Side) {
         self.side = side;
+        // MonsterModel.OnSideSwitch.
+        for e in &mut self.enemies {
+            e.monster.spawned_this_turn = false;
+        }
         let mut subs = Vec::new();
         // Hook.BeforeSideTurnStart.
         subs.extend(self.collect_powers(|p, owner, c| p.before_side_turn_start(owner, side, c.round)));
@@ -660,7 +732,7 @@ impl Combat {
             Side::Player => {
                 // Enemies roll their next move (PrepareForNextTurn).
                 for i in 0..self.enemies.len() {
-                    if self.enemies[i].creature.alive() {
+                    if self.enemies[i].acts() {
                         self.enemies[i].monster.roll_move(&mut self.rngs.monster_ai);
                     }
                 }
@@ -708,6 +780,14 @@ impl Combat {
             }
         }
         // Hook.AfterSideTurnStart.
+        for p in &mut self.player.creature.powers {
+            p.reset_at_side_turn_start(CreatureRef::Player, side);
+        }
+        for (i, e) in self.enemies.iter_mut().enumerate() {
+            for p in &mut e.creature.powers {
+                p.reset_at_side_turn_start(CreatureRef::Enemy(i), side);
+            }
+        }
         let (turn, round) = (self.player.turn, self.round);
         subs.extend(self.collect_powers(|p, owner, _| p.after_side_turn_start(owner, side, turn, round)));
         if side == Side::Enemy {
@@ -737,7 +817,7 @@ impl Combat {
         let ethereal: Vec<u32> = self.player.hand.iter().filter(|c| c.has(Keyword::Ethereal)).map(|c| c.uid).collect();
         let mut subs: Vec<Effect> = ethereal.into_iter().map(|uid| Effect::Exhaust { uid, ethereal: true }).collect();
         for c in &self.player.hand {
-            if c.id == CardId::Burn {
+            if matches!(c.id, CardId::Burn | CardId::Infection) {
                 subs.push(Effect::Damage {
                     target: CreatureRef::Player,
                     amount: c.vars().damage,
@@ -772,6 +852,7 @@ impl Combat {
         self.stats.exhausted_this_turn = 0;
         self.stats.hp_lost_this_turn = false;
         self.stats.block_plays_this_turn.clear();
+        self.stats.cards_played_this_turn = 0;
         subs.push(Effect::StartTurn(Side::Player));
         self.push_front_all(subs);
     }
@@ -832,7 +913,7 @@ impl Combat {
         }
         if !self.player.creature.alive() {
             self.outcome = Some(Outcome::Lost);
-        } else if self.living_enemies().next().is_none() {
+        } else if !self.enemies.iter().any(|e| e.creature.alive() && e.primary()) {
             self.outcome = Some(Outcome::Won);
         }
     }
@@ -860,6 +941,11 @@ impl Combat {
         for p in &mut self.player.creature.powers {
             out.extend(p.after_card_played(CreatureRef::Player, card.ty(), card.id, card.upgraded));
         }
+        for (i, e) in self.enemies.iter_mut().enumerate() {
+            for p in &mut e.creature.powers {
+                out.extend(p.after_card_played(CreatureRef::Enemy(i), card.ty(), card.id, card.upgraded));
+            }
+        }
         out
     }
 
@@ -884,7 +970,7 @@ impl Combat {
         if !self.player.creature.alive() {
             return vec![];
         }
-        if card.has(Keyword::Unplayable) {
+        if card.has(Keyword::Unplayable) || !self.hook_allows_play() {
             // MoveToResultPileWithoutPlaying.
             if let Some(c) = self.take_card(uid) {
                 if c.ty() == CardType::Power {
@@ -933,6 +1019,8 @@ impl Combat {
     /// `CardPileCmd.Draw`: per card, reshuffle if needed, take the top.
     /// Returns hook effects (Hellraiser auto-plays drawn Strikes).
     fn draw(&mut self, count: u32, from_hand_draw: bool) -> Vec<Effect> {
+        // Pillage reads this after each draw; a draw that yields nothing must clear it.
+        self.stats.last_drawn = None;
         if !self.player.creature.powers.iter().all(|p| p.should_draw(from_hand_draw)) {
             return vec![];
         }
@@ -1052,10 +1140,16 @@ impl Combat {
         // truncated on the block write but not on the remainder.
         let blocked = if props.has(ValueProp::UNBLOCKABLE) { 0.0 } else { (c.block as f64).min(modified) };
         c.block -= blocked as i32;
-        let unblocked = (modified - blocked).max(0.0);
+        let mut unblocked = (modified - blocked).max(0.0);
+        // SlipperyPower.ModifyHpLostAfterOsty: at most 1 HP per hit.
+        if c.power(PowerId::Slippery).is_some() && unblocked >= 1.0 {
+            unblocked = 1.0;
+        }
         // Creature.LoseHpInternal: truncate once.
         let lost = unblocked.min(CLAMP) as i32;
+        let was_alive = c.alive();
         c.hp = (c.hp - lost).max(0);
+        let hp_after = c.hp;
         let own_turn = self.side == target.side();
         if target == CreatureRef::Player && lost > 0 {
             self.stats.hp_lost_this_turn = true;
@@ -1064,7 +1158,12 @@ impl Combat {
         // Hook.AfterDamageReceived over the target's powers.
         let mut out = vec![];
         for p in &self.creature(target).powers {
-            out.extend(p.after_damage_received(target, lost, props, dealer, own_turn));
+            out.extend(p.after_damage_received(target, lost, props, dealer, own_turn, hp_after));
+        }
+        if was_alive && !self.creature(target).alive() {
+            if let CreatureRef::Enemy(i) = target {
+                out.extend(self.on_enemy_death(i));
+            }
         }
         // Rupture: HP loss from a card you are playing is paid after the play.
         if target == CreatureRef::Player && lost > 0 && own_turn {
@@ -1082,6 +1181,29 @@ impl Combat {
                 }
             }
         }
+        out
+    }
+
+    /// `Hook.AfterDeath` for an enemy: Infested spawns Wrigglers, Illusion
+    /// schedules a revive, and powers the dead creature applied to the
+    /// player with `RemoveOnApplierDeath` semantics (Constrict, Shrink) go.
+    fn on_enemy_death(&mut self, i: usize) -> Vec<Effect> {
+        let me = CreatureRef::Enemy(i);
+        let mut out = vec![];
+        // InfestedPower.AfterDeath spawns synchronously, before any win check.
+        if self.enemies[i].creature.power(PowerId::Infested).is_some() {
+            for slot in 1..=4u8 {
+                self.spawn(MonsterId::Wriggler, Flags { start_stunned: true, slot, ..Default::default() });
+            }
+        }
+        if self.enemies[i].creature.power(PowerId::Illusion).is_some() {
+            self.enemies[i].reviving = true;
+            self.enemies[i].monster.set_revive();
+        }
+        self.player
+            .creature
+            .powers
+            .retain(|p| !(matches!(p.id, PowerId::Constrict | PowerId::Shrink) && p.applier == Some(me)));
         out
     }
 
@@ -1116,6 +1238,11 @@ impl Combat {
             return vec![];
         }
         let mut out = vec![];
+        // ArtifactPower.cs: negate a debuff and spend a charge.
+        if is_debuff(id) && amount > 0 && self.creature(target).power(PowerId::Artifact).is_some() {
+            self.modify_power(target, PowerId::Artifact, -1);
+            return vec![];
+        }
         let exists = self.creature(target).power(id).is_some();
         if exists {
             if is_single(id) {
@@ -1126,6 +1253,7 @@ impl Combat {
         } else {
             let mut p = Power::new(id, amount);
             p.skip_next_tick = target == CreatureRef::Player && is_debuff(id);
+            p.applier = applier;
             out.extend(p.on_applied(target, amount));
             self.creature_mut(target).powers.push(p);
         }

@@ -16,13 +16,15 @@ pub struct Power {
     /// player so it does not tick down the same round it was applied.
     pub skip_next_tick: bool,
     /// Per-power counter: Dark Embrace ethereal count, Juggling attacks this
-    /// turn, Crimson Mantle and Inferno self-damage.
+    /// turn, Crimson Mantle and Inferno self-damage, Slow cards played.
     pub data: i32,
+    /// `PowerModel.Applier`. Constrict and Shrink vanish when it dies.
+    pub applier: Option<CreatureRef>,
 }
 
 impl Power {
     pub fn new(id: PowerId, amount: i32) -> Self {
-        Self { id, amount, skip_next_tick: false, data: 0 }
+        Self { id, amount, skip_next_tick: false, data: 0, applier: None }
     }
 }
 
@@ -30,20 +32,39 @@ impl Power {
 pub fn is_debuff(id: PowerId) -> bool {
     matches!(
         id,
-        PowerId::Vulnerable | PowerId::Weak | PowerId::Frail | PowerId::NoDraw | PowerId::NoEnergyGain | PowerId::Mangle
+        PowerId::Vulnerable
+            | PowerId::Weak
+            | PowerId::Frail
+            | PowerId::NoDraw
+            | PowerId::NoEnergyGain
+            | PowerId::Mangle
+            | PowerId::Tangled
+            | PowerId::Slow
+            | PowerId::Shrink
+            | PowerId::Ringing
+            | PowerId::Plow
+            | PowerId::Constrict
     )
 }
 
 /// `PowerModel.AllowNegative`.
 pub fn allow_negative(id: PowerId) -> bool {
-    matches!(id, PowerId::Strength | PowerId::Dexterity)
+    matches!(id, PowerId::Strength | PowerId::Dexterity | PowerId::Shrink)
 }
 
 /// `PowerStackType.Single`: hidden amount, never stacks above 1.
 pub fn is_single(id: PowerId) -> bool {
     matches!(
         id,
-        PowerId::NoDraw | PowerId::Barricade | PowerId::Corruption | PowerId::Hellraiser | PowerId::NoEnergyGain
+        PowerId::NoDraw
+            | PowerId::Barricade
+            | PowerId::Corruption
+            | PowerId::Hellraiser
+            | PowerId::NoEnergyGain
+            | PowerId::Ringing
+            | PowerId::Minion
+            | PowerId::Infested
+            | PowerId::Illusion
     )
 }
 
@@ -96,6 +117,10 @@ impl Power {
             PowerId::Weak if dealer == Some(owner) => 0.75,
             // ColossusPower.cs: halve damage from Vulnerable dealers.
             PowerId::Colossus if target == owner && dealer.is_some() && dealer_vulnerable > 0 => 0.5,
+            // SlowPower.cs: +10% per card played this turn.
+            PowerId::Slow if target == owner => 1.0 + 0.1 * self.data as f64,
+            // ShrinkPower.cs: the owner deals 30% less.
+            PowerId::Shrink if dealer == Some(owner) => 0.7,
             _ => 1.0,
         }
     }
@@ -221,6 +246,13 @@ impl Power {
         }
     }
 
+    /// `AfterSideTurnStart` for powers that reset counters (Slow).
+    pub fn reset_at_side_turn_start(&mut self, owner: CreatureRef, side: Side) {
+        if self.id == PowerId::Slow && owner.side() == side {
+            self.data = 0;
+        }
+    }
+
     /// `AfterPlayerTurnStart`, player-side powers only.
     pub fn after_player_turn_start(&self, owner: CreatureRef) -> Vec<Effect> {
         let self_damage = || Effect::Damage {
@@ -283,7 +315,21 @@ impl Power {
                 applier: Some(owner),
             }],
             // Self-removing at the end of the owner's turn.
-            PowerId::NoDraw | PowerId::NoEnergyGain | PowerId::OneTwoPunch | PowerId::Rage if own_side => remove(),
+            PowerId::NoDraw | PowerId::NoEnergyGain | PowerId::OneTwoPunch | PowerId::Rage | PowerId::Tangled | PowerId::Ringing
+                if own_side =>
+            {
+                remove()
+            }
+            // ShrinkPower.cs: counts down unless permanent (-1).
+            PowerId::Shrink if own_side && self.amount > 0 => vec![Effect::DecrementPower { target: owner, id: self.id }],
+            // ConstrictPower.cs: HP loss at the end of the owner's turn.
+            PowerId::Constrict if own_side => vec![Effect::Damage {
+                target: owner,
+                amount: self.amount as f64,
+                props: ValueProp::UNPOWERED,
+                dealer: Some(owner),
+                card: None,
+            }],
             // FlameBarrierPower.cs: removed when the *other* side's turn ends.
             PowerId::FlameBarrier if !own_side => remove(),
             // TemporaryStrengthPower: remove self and undo the Strength.
@@ -350,6 +396,11 @@ impl Power {
 
     /// `AfterCardPlayed`. `ty` is the played card's type, `id` its id.
     pub fn after_card_played(&mut self, owner: CreatureRef, ty: CardType, card_id: crate::ids::CardId, upgraded: bool) -> Vec<Effect> {
+        // SlowPower.cs sits on a monster and counts the player's plays.
+        if self.id == PowerId::Slow {
+            self.data += 1;
+            return vec![];
+        }
         if owner != CreatureRef::Player {
             return vec![];
         }
@@ -382,6 +433,7 @@ impl Power {
         props: ValueProp,
         dealer: Option<CreatureRef>,
         own_turn: bool,
+        hp_after: i32,
     ) -> Vec<Effect> {
         match self.id {
             // FlameBarrierPower.cs: hit the attacker back.
@@ -399,6 +451,14 @@ impl Power {
             PowerId::Inferno if unblocked > 0 && own_turn => {
                 vec![Effect::DamageAllEnemies { amount: self.amount as f64, props: ValueProp::UNPOWERED, dealer: owner }]
             }
+            // SlipperyPower.cs: one charge per unblocked hit.
+            PowerId::Slippery if unblocked >= 1 => vec![Effect::DecrementPower { target: owner, id: self.id }],
+            // PlowPower.cs: `hp_after` is the owner's HP after the hit.
+            PowerId::Plow if unblocked > 0 && hp_after <= self.amount => vec![
+                Effect::RemoveStrength { target: owner },
+                Effect::Stun { target: owner, next: Some("BEAST_CRY_MOVE") },
+                Effect::RemovePower { target: owner, id: self.id },
+            ],
             _ => vec![],
         }
     }

@@ -97,6 +97,7 @@ pub enum CardId {
     Slimed,
     Dazed,
     Burn,
+    Infection,
     // Curses.
     AscendersBane,
     // Tokens.
@@ -143,10 +144,61 @@ pub enum PowerId {
     FreeAttack,
     Vicious,
     Unmovable,
+    // Monster-side powers used in act 1.
+    /// Caps HP loss at 1 per hit, one charge per hit (Vantom, Inklet).
+    Slippery,
+    /// Attacks cost 1 more this turn (Vine Shambler).
+    Tangled,
+    /// Damage taken grows 10% per card played this turn (Bygone Effigy).
+    Slow,
+    /// Player deals 30% less; `-1` amount means permanent (Shrinker Beetle).
+    Shrink,
+    /// Only the first card each turn may be played (Ceremonial Beast).
+    Ringing,
+    /// Stunned and stripped of Strength when HP drops to the amount.
+    Plow,
+    /// Secondary enemy: its death does not end combat.
+    Minion,
+    /// On death, spawns four Wrigglers (Phrog Parasite).
+    Infested,
+    /// Secondary enemy that revives to full HP the turn after dying.
+    Illusion,
+    /// HP loss at the end of the owner's turn (Slithering Strangler).
+    Constrict,
+    /// Negates the next debuff (Cubex Construct).
+    Artifact,
 }
 
 /// `Models/Monsters/<Name>.cs`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum MonsterId {
     Nibbit,
+    FuzzyWurmCrawler,
+    ShrinkerBeetle,
+    LeafSlimeS,
+    LeafSlimeM,
+    TwigSlimeS,
+    TwigSlimeM,
+    Inklet,
+    Mawler,
+    Fogmog,
+    EyeWithTeeth,
+    Flyconid,
+    SnappingJaxfruit,
+    SlitheringStrangler,
+    VineShambler,
+    CubexConstruct,
+    AxeRubyRaider,
+    AssassinRubyRaider,
+    BruteRubyRaider,
+    CrossbowRubyRaider,
+    TrackerRubyRaider,
+    Byrdonis,
+    BygoneEffigy,
+    PhrogParasite,
+    Wriggler,
+    Vantom,
+    CeremonialBeast,
+    KinFollower,
+    KinPriest,
 }

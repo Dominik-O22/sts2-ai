@@ -4,6 +4,7 @@
 pub mod card;
 pub mod combat;
 pub mod effect;
+pub mod encounter;
 pub mod ids;
 pub mod monster;
 pub mod power;
@@ -151,6 +152,148 @@ mod tests {
                 steps += 1;
                 assert!(steps < 20_000, "runaway fight at seed {seed}");
                 assert!(c.player.hand.len() <= combat::MAX_HAND);
+            }
+        }
+    }
+
+    fn fight(enemies: &[EnemySpec], seed: u64) -> Combat {
+        Combat::new(&ironclad_starter_deck(), IRONCLAD_HP, IRONCLAD_HP, IRONCLAD_ENERGY, enemies, Ascension(10), seed)
+    }
+
+    fn one(id: MonsterId) -> EnemySpec {
+        EnemySpec { id, flags: Flags::default() }
+    }
+
+    /// Play until the combat ends or `max` steps, random policy.
+    fn play_random(c: &mut Combat, rng: &mut rng::Rng, max: u32) {
+        let mut steps = 0;
+        while !c.is_over() && steps < max {
+            let acts = c.legal_actions();
+            assert!(!acts.is_empty(), "no legal actions");
+            c.step(acts[rng.next_int(acts.len())]);
+            steps += 1;
+        }
+    }
+
+    #[test]
+    fn slippery_caps_hp_loss_at_one_per_hit() {
+        let mut c = fight(&[one(MonsterId::Vantom)], 5);
+        assert_eq!(c.enemies[0].creature.power_amount(PowerId::Slippery), 9);
+        let hp0 = c.enemies[0].creature.hp;
+        c.player.creature.powers.push(Power::new(PowerId::Strength, 50));
+        let i = c.player.hand.iter().position(|k| k.ty() == crate::types::CardType::Attack).unwrap();
+        c.step(Action::PlayCard { hand_idx: i, target: Some(0) });
+        assert_eq!(c.enemies[0].creature.hp, hp0 - 1);
+        assert_eq!(c.enemies[0].creature.power_amount(PowerId::Slippery), 8);
+    }
+
+    #[test]
+    fn phrog_death_spawns_four_wrigglers_and_combat_continues() {
+        let mut c = fight(&[one(MonsterId::PhrogParasite)], 9);
+        c.player.creature.powers.push(Power::new(PowerId::Strength, 500));
+        let i = c.player.hand.iter().position(|k| k.ty() == crate::types::CardType::Attack).unwrap();
+        c.step(Action::PlayCard { hand_idx: i, target: Some(0) });
+        assert!(!c.enemies[0].creature.alive());
+        assert_eq!(c.enemies.len(), 5);
+        assert!(!c.is_over());
+        assert!(c.enemies[1..].iter().all(|e| e.monster.id == MonsterId::Wriggler && e.creature.alive()));
+        // Spawned wrigglers open stunned, then bite/wriggle by slot.
+        c.step(Action::EndTurn);
+        assert_eq!(c.enemies[1].monster.next_move_name(), Some("NASTY_BITE_MOVE"));
+        assert_eq!(c.enemies[2].monster.next_move_name(), Some("WRIGGLE_MOVE"));
+    }
+
+    #[test]
+    fn ceremonial_beast_plow_breaks_into_stun_then_cry() {
+        let mut c = fight(&[one(MonsterId::CeremonialBeast)], 2);
+        // Turn 1: Stamp applies Plow 160 at A10.
+        c.step(Action::EndTurn);
+        assert_eq!(c.enemies[0].creature.power_amount(PowerId::Plow), 160);
+        assert_eq!(c.enemies[0].monster.next_move_name(), Some("PLOW_MOVE"));
+        // Bring it to 170, then hit for 20: HP 150 <= 160 breaks the Plow.
+        c.enemies[0].creature.hp = 170;
+        c.player.creature.powers.push(Power::new(PowerId::Strength, 14));
+        let i = c.player.hand.iter().position(|k| k.id == ids::CardId::StrikeIronclad).unwrap();
+        c.step(Action::PlayCard { hand_idx: i, target: Some(0) });
+        assert_eq!(c.enemies[0].creature.hp, 150);
+        assert!(c.enemies[0].creature.power(PowerId::Plow).is_none());
+        assert!(c.enemies[0].creature.power(PowerId::Strength).is_none());
+        assert_eq!(c.enemies[0].monster.next_move_name(), Some("STUNNED"));
+        let hp = c.player.creature.hp;
+        c.step(Action::EndTurn);
+        assert_eq!(c.player.creature.hp, hp, "stunned turn deals no damage");
+        assert_eq!(c.enemies[0].monster.next_move_name(), Some("BEAST_CRY_MOVE"));
+        c.step(Action::EndTurn);
+        assert!(c.player.creature.power(PowerId::Ringing).is_some());
+        // Ringing: only one card play this turn.
+        let i = c.player.hand.iter().position(|k| k.ty() == crate::types::CardType::Attack).unwrap();
+        c.step(Action::PlayCard { hand_idx: i, target: Some(0) });
+        assert_eq!(c.legal_actions(), vec![Action::EndTurn]);
+        assert_eq!(c.enemies[0].monster.next_move_name(), Some("STOMP_MOVE"));
+    }
+
+    #[test]
+    fn eye_with_teeth_revives_and_fogmog_death_wins() {
+        let mut c = fight(&[one(MonsterId::Fogmog)], 4);
+        c.step(Action::EndTurn); // Illusion move: summon the Eye.
+        assert_eq!(c.enemies.len(), 2);
+        assert!(!c.enemies[1].primary());
+        c.player.creature.powers.push(Power::new(PowerId::Strength, 500));
+        let i = c.player.hand.iter().position(|k| k.ty() == crate::types::CardType::Attack).unwrap();
+        c.step(Action::PlayCard { hand_idx: i, target: Some(1) });
+        assert!(!c.enemies[1].creature.alive() && c.enemies[1].reviving);
+        assert!(!c.is_over());
+        c.step(Action::EndTurn);
+        assert_eq!(c.enemies[1].creature.hp, 6, "revived to full");
+        let i = c.player.hand.iter().position(|k| k.ty() == crate::types::CardType::Attack).unwrap();
+        c.step(Action::PlayCard { hand_idx: i, target: Some(0) });
+        assert_eq!(c.outcome, Some(Outcome::Won), "primary enemy dead ends combat");
+    }
+
+    #[test]
+    fn kin_priest_death_ends_the_fight() {
+        let mut rng = rng::Rng::new(1);
+        let specs = encounter::Encounter::TheKinBoss.monsters(&mut rng);
+        let mut c = fight(&specs, 8);
+        c.player.creature.powers.push(Power::new(PowerId::Strength, 500));
+        let i = c.player.hand.iter().position(|k| k.ty() == crate::types::CardType::Attack).unwrap();
+        c.step(Action::PlayCard { hand_idx: i, target: Some(1) });
+        assert_eq!(c.outcome, Some(Outcome::Won));
+    }
+
+    #[test]
+    fn cubex_artifact_blocks_first_debuff() {
+        let mut c = fight(&[one(MonsterId::CubexConstruct)], 3);
+        assert_eq!(c.enemies[0].creature.block, 13);
+        let i = c.player.hand.iter().position(|k| k.id == ids::CardId::Bash).unwrap_or_else(|| {
+            let j = c.player.draw.iter().position(|k| k.id == ids::CardId::Bash).unwrap();
+            let card = c.player.draw.remove(j);
+            c.player.hand.insert(0, card);
+            0
+        });
+        c.step(Action::PlayCard { hand_idx: i, target: Some(0) });
+        assert!(c.enemies[0].creature.power(PowerId::Vulnerable).is_none());
+        assert!(c.enemies[0].creature.power(PowerId::Artifact).is_none());
+    }
+
+    /// Every act 1 encounter, random pool decks, random policy: no panics,
+    /// no runaway fights.
+    #[test]
+    fn every_act1_encounter_runs() {
+        use crate::card::{Card, IRONCLAD_POOL};
+        for (n, enc) in encounter::ALL.iter().enumerate() {
+            for seed in 0..60u64 {
+                let seed = seed * 100 + n as u64;
+                let mut rng = rng::Rng::new(seed);
+                let specs = enc.monsters(&mut rng);
+                let mut deck = ironclad_starter_deck();
+                for _ in 0..10 {
+                    let id = *rng.pick(IRONCLAD_POOL).unwrap();
+                    deck.push(Card::new(0, id, rng.next_int(3) == 0));
+                }
+                let mut c = Combat::new(&deck, IRONCLAD_HP, IRONCLAD_HP, IRONCLAD_ENERGY, &specs, Ascension(10), seed);
+                play_random(&mut c, &mut rng, 20_000);
+                assert!(c.is_over(), "runaway fight in {enc:?} seed {seed}");
             }
         }
     }
