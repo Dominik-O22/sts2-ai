@@ -91,7 +91,7 @@ fn sort_values(mut v: Vec<Value>) -> Vec<Value> {
 pub fn snapshot_of(c: &Combat) -> Value {
     let card = |k: &Card| json!({ "id": slug(&format!("{:?}", k.id)), "up": k.upgraded });
     let hand: Vec<Value> =
-        c.player.hand.iter().map(|k| json!({ "id": slug(&format!("{:?}", k.id)), "up": k.upgraded, "cost": c.cost(k) })).collect();
+        c.player.hand.iter().map(|k| json!({ "id": slug(&format!("{:?}", k.id)), "up": k.upgraded, "cost": if k.def().x_cost { -1 } else { c.cost(k) } })).collect();
     let pile = |cards: &[Card]| cards.iter().map(card).collect::<Vec<_>>();
     let powers = |r: CreatureRef| {
         c.creature(r).powers.iter().map(|p| json!([format!("{}_POWER", slug(&format!("{:?}", p.id))), p.amount])).collect::<Vec<_>>()
@@ -235,6 +235,26 @@ fn adopt_spawn_hp(c: &mut Combat, snap: &Value, known: usize) -> Result<(), Stri
     Ok(())
 }
 
+/// Snecko Oil rolls each hand card's cost; the recording shows the
+/// results in the next snapshot. Copy them onto matching cards.
+fn adopt_hand_costs(c: &mut Combat, snap: &Value) {
+    let empty = vec![];
+    let mut taken = vec![false; c.player.hand.len()];
+    for r in snap["hand"].as_array().unwrap_or(&empty) {
+        let (Some(id), Some(cost)) = (r["id"].as_str(), r["cost"].as_i64()) else { continue };
+        let up = r["up"].as_bool().unwrap_or(false);
+        let found = c.player.hand.iter().enumerate().position(|(i, k)| {
+            !taken[i] && slug(&format!("{:?}", k.id)) == id && k.upgraded == up && k.cost_this_turn.is_some()
+        });
+        if let Some(i) = found {
+            taken[i] = true;
+            if cost >= 0 {
+                c.player.hand[i].cost_this_turn = Some(cost as i32);
+            }
+        }
+    }
+}
+
 /// Forced rolls still have to be rolls the sim could make.
 fn check_hp_range(id: MonsterId, max_hp: i32, asc: Ascension) -> Result<(), String> {
     let (lo, hi) = crate::monster::Monster::hp_range(id, asc);
@@ -363,12 +383,16 @@ pub fn replay_seeded(text: &str, ids: &Ids, seed: u64) -> Result<Report, String>
 
     let mut report = Report { snapshots: 0, actions: 0, divergence: None };
     let mut known_enemies = c.enemies.len();
+    let mut snecko_pending = false;
     for (n, rec) in records.iter().enumerate().skip(1) {
         match rec["t"].as_str().unwrap_or("") {
             "snapshot" => {
                 // The game can snapshot once more after the last enemy dies.
                 if c.is_over() && rec["enemies"].as_array().is_some_and(|a| a.is_empty()) {
                     continue;
+                }
+                if std::mem::take(&mut snecko_pending) {
+                    adopt_hand_costs(&mut c, rec);
                 }
                 if let Err(e) = adopt_spawn_hp(&mut c, rec, known_enemies) {
                     return Ok(failed(&report, n, e));
@@ -455,6 +479,7 @@ pub fn replay_seeded(text: &str, ids: &Ids, seed: u64) -> Result<Report, String>
                 c.step(Action::UsePotion { slot, target });
                 report.actions += 1;
                 clear_per_play(&mut c);
+                snecko_pending = pid == PotionId::SneckoOil;
             }
             "turn_start" => {
                 if rec["turn"].as_u64().unwrap_or(1) > 1 {

@@ -638,9 +638,11 @@ impl Card {
                 let n = c.creature(target.unwrap()).power_amount(PowerId::Vulnerable);
                 vec![Effect::ApplyPower { target: me, id: PowerId::Strength, amount: n, applier: Some(me) }]
             }
-            // Max HP if the attack killed the target.
+            // Max HP if the attack killed the target. Minions never count as
+            // Fatal (`MinionPower.ShouldOwnerDeathTriggerFatal`).
             (Feed, 1) => {
-                if !c.creature(target.unwrap()).alive() {
+                let tgt = target.unwrap();
+                if !c.creature(tgt).alive() && c.creature(tgt).power(PowerId::Minion).is_none() {
                     vec![Effect::GainMaxHp { target: me, amount: v.magic as i32 }]
                 } else {
                     vec![]
