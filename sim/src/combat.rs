@@ -311,7 +311,10 @@ impl Combat {
             p.applier = Some(me);
             creature.powers.push(p);
         }
-        creature.block = Monster::innate_block(id);
+        // AfterAddedToRoom block (Cubex) goes through CreatureCmd.GainBlock,
+        // which returns early until IsInProgress is set, and the starting
+        // monsters are added before that. Only mid-combat spawns get it.
+        creature.block = if self.started { Monster::innate_block(id) } else { 0 };
         let mut monster = Monster::new(id, self.asc, flags);
         // CombatManager.AfterCreatureAdded: roll at once during the player's turn.
         if self.started && self.side == Side::Player {

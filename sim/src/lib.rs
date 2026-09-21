@@ -269,7 +269,8 @@ mod tests {
     #[test]
     fn cubex_artifact_blocks_first_debuff() {
         let mut c = fight(&[one(MonsterId::CubexConstruct)], 3);
-        assert_eq!(c.enemies[0].creature.block, 13);
+        // Its 13 starting block never lands in the real game (recorded); see spawn().
+        assert_eq!(c.enemies[0].creature.block, 0);
         let i = c.player.hand.iter().position(|k| k.id == ids::CardId::Bash).unwrap_or_else(|| {
             let j = c.player.draw.iter().position(|k| k.id == ids::CardId::Bash).unwrap();
             let card = c.player.draw.remove(j);
