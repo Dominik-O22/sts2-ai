@@ -94,6 +94,8 @@ pub enum Effect {
     GainMaxHp { target: CreatureRef, amount: i32 },
     /// `PlayerCmd.GainEnergy`.
     GainEnergy { amount: i32 },
+    /// `PlayerCmd.LoseEnergy`.
+    LoseEnergy { amount: i32 },
     /// `PowerCmd.Apply`.
     ApplyPower {
         target: CreatureRef,
@@ -130,10 +132,11 @@ pub enum Effect {
     /// Ask the player to pick one card from those matching the filter in the
     /// given pile, then do `then` with it. Empty option lists are skipped.
     Choose { from: Pile, filter: CardFilter, then: Then },
-    /// Card play pipeline, `CardModel.OnPlayWrapper`. Energy is already spent.
-    PlayCard { uid: u32, target: Option<CreatureRef> },
+    /// Card play pipeline, `CardModel.OnPlayWrapper`. Energy is already spent;
+    /// `paid` is how much (Intimidating Helmet reads it).
+    PlayCard { uid: u32, target: Option<CreatureRef>, paid: i32 },
     /// One iteration of the play loop (`GeneratePlayCount` may make several).
-    CardPlayIter { uid: u32, target: Option<CreatureRef> },
+    CardPlayIter { uid: u32, target: Option<CreatureRef>, paid: i32 },
     /// `Hook.AfterCardPlayed` for one iteration.
     AfterCardPlayed { uid: u32 },
     /// Tail of the pipeline: move the card to its result pile.

@@ -167,6 +167,13 @@ pub enum PowerId {
     Constrict,
     /// Negates the next debuff (Cubex Construct).
     Artifact,
+    // Relic powers.
+    /// Damage back to attackers (Bronze Scales).
+    Thorns,
+    /// Next attack card deals extra damage, then it is spent (Akabeko).
+    Vigor,
+    /// Block when block is cleared next turn (Self-Forming Clay).
+    SelfFormingClay,
 }
 
 /// `Models/Monsters/<Name>.cs`.

@@ -9,6 +9,7 @@ use crate::effect::{AttackTargets, CardFilter, Effect, GenPool, Pile, Then};
 use crate::ids::{CardId, MonsterId, PowerId};
 use crate::monster::{Flags, Monster};
 use crate::power::{is_debuff, is_single, Power};
+use crate::relic::Relic;
 use crate::rng::CombatRngs;
 use crate::types::{Ascension, CardType, CreatureRef, Keyword, Side, TargetType, ValueProp};
 
@@ -106,6 +107,29 @@ pub struct EnemySpec {
     pub flags: Flags,
 }
 
+/// `Rooms/RoomType.cs`, the combat kinds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RoomKind {
+    Monster,
+    Elite,
+    Boss,
+}
+
+/// Everything a combat needs from the run.
+#[derive(Clone, Debug)]
+pub struct Setup<'a> {
+    pub deck: &'a [Card],
+    pub hp: i32,
+    pub max_hp: i32,
+    pub max_energy: i32,
+    pub relics: &'a [Relic],
+    pub potion_count: u32,
+    pub enemies: &'a [EnemySpec],
+    pub room: RoomKind,
+    pub asc: Ascension,
+    pub seed: u64,
+}
+
 /// The parts of `CombatManager.History` that cards and powers read.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Stats {
@@ -135,6 +159,10 @@ pub struct Combat {
     pub outcome: Option<Outcome>,
     pub pending: Option<Pending>,
     pub stats: Stats,
+    /// The run's relics, with counters updated in place.
+    pub relics: Vec<Relic>,
+    pub room: RoomKind,
+    pub potion_count: u32,
     queue: VecDeque<Effect>,
     next_uid: u32,
     /// False during setup, before the first turn starts.
@@ -154,6 +182,22 @@ impl Combat {
         asc: Ascension,
         seed: u64,
     ) -> Self {
+        Self::with_setup(&Setup {
+            deck,
+            hp,
+            max_hp,
+            max_energy,
+            relics: &[],
+            potion_count: 0,
+            enemies,
+            room: RoomKind::Monster,
+            asc,
+            seed,
+        })
+    }
+
+    pub fn with_setup(setup: &Setup) -> Self {
+        let Setup { deck, hp, max_hp, max_energy, enemies, asc, seed, .. } = *setup;
         let mut rngs = CombatRngs::new(seed);
         let mut next_uid = 1;
         let mut draw: Vec<Card> = deck
@@ -187,6 +231,9 @@ impl Combat {
             outcome: None,
             pending: None,
             stats: Stats::default(),
+            relics: setup.relics.to_vec(),
+            room: setup.room,
+            potion_count: setup.potion_count,
             queue: VecDeque::new(),
             next_uid,
             started: false,
@@ -195,6 +242,8 @@ impl Combat {
             c.spawn(spec.id, spec.flags);
         }
         c.started = true;
+        let pre = c.relic_before_combat_start();
+        c.queue.extend(pre);
         c.queue.push_back(Effect::StartTurn(Side::Player));
         c.run();
         c
@@ -266,7 +315,8 @@ impl Combat {
 
     /// `PlayerCombatState.MaxEnergy` through `Hook.ModifyMaxEnergy`.
     pub fn max_energy(&self) -> i32 {
-        self.player.creature.powers.iter().fold(self.player.base_max_energy, |acc, p| p.modify_max_energy(acc))
+        let n = self.player.creature.powers.iter().fold(self.player.base_max_energy, |acc, p| p.modify_max_energy(acc));
+        self.relic_modify_max_energy(n)
     }
 
     /// `CardEnergyCost.GetWithModifiers(All)`: local modifiers then global
@@ -347,16 +397,19 @@ impl Combat {
                 assert!(self.can_play(&card), "illegal card play");
                 let target = self.resolve_target(&card, target);
                 // PlayCardAction: spend energy (all of it for X cards), then play.
+                let paid;
                 if card.def().x_cost {
-                    self.player.hand[hand_idx].captured_x = self.player.energy;
+                    paid = self.player.energy;
+                    self.player.hand[hand_idx].captured_x = self.player.energy + self.relic_x_bonus();
                     self.player.energy = 0;
                 } else {
-                    self.player.energy -= self.cost(&card);
+                    paid = self.cost(&card);
+                    self.player.energy -= paid;
                 }
                 let card = self.player.hand.remove(hand_idx);
                 let uid = card.uid;
                 self.player.play.push(card);
-                self.queue.push_back(Effect::PlayCard { uid, target });
+                self.queue.push_back(Effect::PlayCard { uid, target, paid });
             }
             Action::EndTurn => {
                 assert!(self.pending.is_none() && self.side == Side::Player, "not accepting end turn");
@@ -421,6 +474,13 @@ impl Combat {
                         subs.push(Effect::Damage { target: t, amount: base, props, dealer: Some(dealer), card });
                     }
                 }
+                // VigorPower.AfterAttack: spent by the first card attack.
+                if dealer == CreatureRef::Player && card.is_some() && props.is_powered() {
+                    let v = self.player.creature.power_amount(PowerId::Vigor);
+                    if v > 0 {
+                        subs.push(Effect::ApplyPower { target: dealer, id: PowerId::Vigor, amount: -v, applier: None });
+                    }
+                }
                 self.push_front_all(subs);
             }
             Effect::Damage { target, amount, props, dealer, card } => {
@@ -445,6 +505,13 @@ impl Combat {
             Effect::Heal { target, amount } => {
                 let c = self.creature_mut(target);
                 c.hp = (c.hp + amount as i32).min(c.max_hp);
+                if target == CreatureRef::Player {
+                    let subs = self.relic_after_heal();
+                    self.push_front_all(subs);
+                }
+            }
+            Effect::LoseEnergy { amount } => {
+                self.player.energy = (self.player.energy - amount).max(0);
             }
             Effect::GainMaxHp { target, amount } => {
                 let c = self.creature_mut(target);
@@ -534,6 +601,7 @@ impl Combat {
                 if free_this_turn {
                     card.cost_this_turn = Some(0);
                 }
+                self.relic_card_entered_combat(&mut card);
                 self.put_card(card, to);
             }
             Effect::GenerateRandom { pool, count, to, free_this_turn, distinct } => {
@@ -575,21 +643,22 @@ impl Combat {
                     self.pending = Some(Pending { options, then });
                 }
             }
-            Effect::PlayCard { uid, target } => {
+            Effect::PlayCard { uid, target, paid } => {
                 let Some(card) = self.find_card(uid) else { return };
                 let plays = 1 + self.player.creature.powers.iter().map(|p| p.extra_plays(card.ty())).sum::<u32>();
                 // OneTwoPunch decrements once per modified play.
                 if plays > 1 {
                     self.modify_power(CreatureRef::Player, PowerId::OneTwoPunch, -1);
                 }
-                let mut subs: Vec<Effect> = (0..plays).map(|_| Effect::CardPlayIter { uid, target }).collect();
+                let mut subs: Vec<Effect> = (0..plays).map(|_| Effect::CardPlayIter { uid, target, paid }).collect();
                 subs.push(Effect::FinishCardPlay { uid });
                 self.push_front_all(subs);
             }
-            Effect::CardPlayIter { uid, target } => {
+            Effect::CardPlayIter { uid, target, paid } => {
                 let Some(card) = self.find_card(uid).cloned() else { return };
                 self.stats.cards_played_this_turn += 1;
                 let mut subs = self.before_card_played(&card);
+                subs.extend(self.relic_before_card_played(&card, paid));
                 subs.extend(card.on_play(self, target));
                 subs.push(Effect::AfterCardPlayed { uid });
                 self.push_front_all(subs);
@@ -631,6 +700,8 @@ impl Combat {
                         self.player.discard.push(card);
                     }
                 }
+                let subs = self.relic_after_hand_emptied();
+                self.push_front_all(subs);
             }
             Effect::CardStep { uid, target, step } => {
                 let Some(card) = self.find_card(uid).cloned() else { return };
@@ -642,7 +713,10 @@ impl Combat {
                 self.push_front_all(subs);
             }
             Effect::AutoPlayFromDrawTop { force_exhaust } => {
-                self.reshuffle_if_needed();
+                if self.reshuffle_if_needed() {
+                    let subs = self.relic_after_shuffle();
+                    self.push_front_all(subs);
+                }
                 if !self.player.draw.is_empty() {
                     let card = self.player.draw.remove(0);
                     let uid = card.uid;
@@ -728,6 +802,7 @@ impl Combat {
         let mut subs = Vec::new();
         // Hook.BeforeSideTurnStart.
         subs.extend(self.collect_powers(|p, owner, c| p.before_side_turn_start(owner, side, c.round)));
+        subs.extend(self.relic_before_side_turn_start(side));
         match side {
             Side::Player => {
                 // Enemies roll their next move (PrepareForNextTurn).
@@ -737,13 +812,33 @@ impl Combat {
                     }
                 }
                 // Creature.AfterTurnStart: block clears except on player turn 1,
-                // and unless a power (Barricade) prevents it.
-                if self.player.turn != 1 && self.should_clear_block(CreatureRef::Player) {
-                    self.player.creature.block = 0;
+                // and unless a power (Barricade) or Sturdy Clamp prevents it.
+                if self.player.turn != 1 {
+                    if self.relic_keeps_block() {
+                        self.player.creature.block = self.player.creature.block.min(10);
+                    } else if self.should_clear_block(CreatureRef::Player) {
+                        self.player.creature.block = 0;
+                        // Hook.AfterBlockCleared: relics, then Self-Forming Clay.
+                        subs.extend(self.relic_after_block_cleared());
+                        if let Some(p) = self.player.creature.power(PowerId::SelfFormingClay) {
+                            subs.push(Effect::GainBlock {
+                                target: CreatureRef::Player,
+                                amount: p.amount as f64,
+                                props: ValueProp::UNPOWERED,
+                                card: None,
+                            });
+                            subs.push(Effect::RemovePower { target: CreatureRef::Player, id: PowerId::SelfFormingClay });
+                        }
+                    }
                 }
                 // SetupPlayerTurn: energy, then draw (innate on top on turn 1).
-                self.player.energy = self.max_energy();
-                let mut draw = BASE_HAND_DRAW;
+                if self.relic_should_reset_energy() {
+                    self.player.energy = self.max_energy();
+                } else {
+                    self.player.energy += self.max_energy();
+                }
+                subs.extend(self.relic_after_energy_reset());
+                let mut draw = self.relic_modify_hand_draw(BASE_HAND_DRAW);
                 if self.player.turn == 1 {
                     let innate: Vec<usize> = self
                         .player
@@ -769,6 +864,7 @@ impl Combat {
                         vec![]
                     }
                 }));
+                subs.extend(self.relic_after_player_turn_start());
             }
             Side::Enemy => {
                 for i in 0..self.enemies.len() {
@@ -790,6 +886,7 @@ impl Combat {
         }
         let (turn, round) = (self.player.turn, self.round);
         subs.extend(self.collect_powers(|p, owner, _| p.after_side_turn_start(owner, side, turn, round)));
+        subs.extend(self.relic_after_side_turn_start(side));
         if side == Side::Enemy {
             subs.extend((0..self.enemies.len()).map(Effect::EnemyAct));
             subs.push(Effect::EndEnemyTurn);
@@ -806,8 +903,9 @@ impl Combat {
         subs.extend(self.collect_powers(|p, owner, _| if owner == CreatureRef::Player { p.after_auto_post_play() } else { vec![] }));
         let howls: Vec<u32> = self.player.exhaust.iter().filter(|c| c.id == CardId::HowlFromBeyond).map(|c| c.uid).collect();
         subs.extend(howls.into_iter().map(|uid| Effect::AutoPlay { uid, force_exhaust: false }));
-        // BeforeSideTurnEndEarly (Plating).
+        // BeforeSideTurnEndEarly (Plating), then BeforeSideTurnEnd relics.
         subs.extend(self.collect_powers(|p, owner, _| p.before_side_turn_end_early(owner, Side::Player)));
+        subs.extend(self.relic_before_side_turn_end());
         subs.push(Effect::TurnEndInHand);
         self.push_front_all(subs);
     }
@@ -834,9 +932,11 @@ impl Combat {
     /// `EndPlayerTurnPhaseTwoInternal` + `SwitchSides`: discard the hand,
     /// cleanup, end-of-turn hooks, then the enemy turn.
     fn flush_hand(&mut self) {
-        let (retain, flush): (Vec<Card>, Vec<Card>) = self.player.hand.drain(..).partition(|c| c.has(Keyword::Retain));
-        self.player.hand = retain;
-        self.player.discard.extend(flush);
+        if self.relic_should_flush() {
+            let (retain, flush): (Vec<Card>, Vec<Card>) = self.player.hand.drain(..).partition(|c| c.has(Keyword::Retain));
+            self.player.hand = retain;
+            self.player.discard.extend(flush);
+        }
         self.end_of_turn_cleanup();
         let mut subs = self.after_side_turn_end(Side::Player);
         subs.push(Effect::StartTurn(Side::Enemy));
@@ -874,6 +974,7 @@ impl Combat {
         for p in &mut self.player.creature.powers {
             out.extend(p.after_side_turn_end(CreatureRef::Player, side));
         }
+        out.extend(self.relic_after_side_turn_end(side));
         for (i, e) in self.enemies.iter_mut().enumerate() {
             if !e.creature.alive() {
                 continue;
@@ -915,6 +1016,7 @@ impl Combat {
             self.outcome = Some(Outcome::Lost);
         } else if !self.enemies.iter().any(|e| e.creature.alive() && e.primary()) {
             self.outcome = Some(Outcome::Won);
+            self.relic_after_victory();
         }
     }
 
@@ -941,6 +1043,7 @@ impl Combat {
         for p in &mut self.player.creature.powers {
             out.extend(p.after_card_played(CreatureRef::Player, card.ty(), card.id, card.upgraded));
         }
+        out.extend(self.relic_after_card_played(card));
         for (i, e) in self.enemies.iter_mut().enumerate() {
             for p in &mut e.creature.powers {
                 out.extend(p.after_card_played(CreatureRef::Enemy(i), card.ty(), card.id, card.upgraded));
@@ -956,7 +1059,8 @@ impl Combat {
         for p in &mut self.player.creature.powers {
             out.extend(p.after_card_exhausted(CreatureRef::Player, ethereal));
         }
-        if let Some(c) = self.find_card(uid) {
+        if let Some(c) = self.find_card(uid).cloned() {
+            out.extend(self.relic_after_card_exhausted(&c, ethereal));
             if c.id == CardId::DrumOfBattle {
                 out.push(Effect::GainEnergy { amount: c.vars().energy });
             }
@@ -996,24 +1100,27 @@ impl Combat {
         if let Some(c) = self.take_card(uid) {
             let mut c = c;
             if c.def().x_cost {
-                c.captured_x = self.player.energy;
+                c.captured_x = self.player.energy + self.relic_x_bonus();
             }
             c.exhaust_on_next_play = force_exhaust || c.exhaust_on_next_play;
             self.player.play.push(c);
         }
-        vec![Effect::PlayCard { uid, target }]
+        vec![Effect::PlayCard { uid, target, paid: 0 }]
     }
 
     // ---- piles -------------------------------------------------------------
 
-    fn reshuffle_if_needed(&mut self) {
+    /// Returns true when a shuffle happened.
+    fn reshuffle_if_needed(&mut self) -> bool {
         if self.player.draw.is_empty() && !self.player.discard.is_empty() {
             // CardPileCmd.Shuffle: discard becomes the draw pile.
             let mut cards = std::mem::take(&mut self.player.discard);
             cards.sort_by_key(|c| (c.id, c.upgraded));
             self.rngs.shuffle.shuffle(&mut cards);
             self.player.draw = cards;
+            return true;
         }
+        false
     }
 
     /// `CardPileCmd.Draw`: per card, reshuffle if needed, take the top.
@@ -1030,7 +1137,9 @@ impl Combat {
             if self.player.hand.len() >= MAX_HAND {
                 break;
             }
-            self.reshuffle_if_needed();
+            if self.reshuffle_if_needed() {
+                out.extend(self.relic_after_shuffle());
+            }
             if self.player.draw.is_empty() {
                 break;
             }
@@ -1103,17 +1212,31 @@ impl Combat {
     /// `Hook.ModifyDamage`: one full additive pass, one multiplicative pass,
     /// then a cap pass (none modelled yet), floored at 0.
     pub fn modify_damage(&self, target: CreatureRef, dealer: Option<CreatureRef>, amount: f64, props: ValueProp) -> f64 {
-        let (dv, dc) = match dealer {
+        self.modify_damage_from(target, dealer, amount, props, None)
+    }
+
+    /// `modify_damage` with the source card, for relics that read it.
+    fn modify_damage_from(&self, target: CreatureRef, dealer: Option<CreatureRef>, amount: f64, props: ValueProp, card: Option<u32>) -> f64 {
+        let (mut dv, mut dc) = match dealer {
             Some(d) => (self.creature(d).power_amount(PowerId::Vulnerable), self.creature(d).power_amount(PowerId::Cruelty)),
             None => (0, 0),
         };
+        // PaperPhrog.ModifyVulnerableMultiplier: +0.25 for the player's attacks.
+        if dealer == Some(CreatureRef::Player) && self.has_relic(crate::relic::RelicId::PaperPhrog) {
+            dc += 25;
+        }
+        let card = card.and_then(|u| self.find_card(u));
+        let player_card = if dealer == Some(CreatureRef::Player) { card } else { None };
         let mut num = amount;
         for (owner, p) in self.listeners() {
             num += p.modify_damage_additive(owner, dealer, props);
         }
+        num += self.relic_damage_additive(player_card, props);
         for (owner, p) in self.listeners() {
             num *= p.modify_damage_multiplicative(owner, target, dealer, props, dv, dc);
         }
+        num *= self.relic_damage_multiplicative(player_card, props);
+        let _ = &mut dv;
         num.max(0.0)
     }
 
@@ -1134,7 +1257,7 @@ impl Combat {
 
     /// `CreatureCmd.Damage` core. Returns the effects of `AfterDamageReceived` hooks.
     fn damage(&mut self, target: CreatureRef, amount: f64, props: ValueProp, dealer: Option<CreatureRef>, card: Option<u32>) -> Vec<Effect> {
-        let modified = self.modify_damage(target, dealer, amount, props);
+        let modified = self.modify_damage_from(target, dealer, amount, props, card);
         let c = self.creature_mut(target);
         // Creature.DamageBlockInternal: block absorbs min(block, amount),
         // truncated on the block write but not on the remainder.
@@ -1145,11 +1268,22 @@ impl Combat {
         if c.power(PowerId::Slippery).is_some() && unblocked >= 1.0 {
             unblocked = 1.0;
         }
+        if target == CreatureRef::Player {
+            unblocked = self.relic_modify_hp_lost(unblocked);
+        }
+        let c = self.creature_mut(target);
         // Creature.LoseHpInternal: truncate once.
-        let lost = unblocked.min(CLAMP) as i32;
+        let mut lost = unblocked.min(CLAMP) as i32;
         let was_alive = c.alive();
         c.hp = (c.hp - lost).max(0);
-        let hp_after = c.hp;
+        // LizardTail: ShouldDie false once, then heal to half.
+        if target == CreatureRef::Player && self.player.creature.hp <= 0 && was_alive {
+            if let Some(hp) = self.relic_prevent_death() {
+                lost = lost.min(self.player.creature.max_hp);
+                self.player.creature.hp = hp;
+            }
+        }
+        let hp_after = self.creature(target).hp;
         let own_turn = self.side == target.side();
         if target == CreatureRef::Player && lost > 0 {
             self.stats.hp_lost_this_turn = true;
@@ -1159,6 +1293,9 @@ impl Combat {
         let mut out = vec![];
         for p in &self.creature(target).powers {
             out.extend(p.after_damage_received(target, lost, props, dealer, own_turn, hp_after));
+        }
+        if target == CreatureRef::Player {
+            out.extend(self.relic_after_damage_received(lost, props, own_turn));
         }
         if was_alive && !self.creature(target).alive() {
             if let CreatureRef::Enemy(i) = target {
@@ -1189,7 +1326,7 @@ impl Combat {
     /// player with `RemoveOnApplierDeath` semantics (Constrict, Shrink) go.
     fn on_enemy_death(&mut self, i: usize) -> Vec<Effect> {
         let me = CreatureRef::Enemy(i);
-        let out = vec![];
+        let mut out = vec![];
         // InfestedPower.AfterDeath spawns synchronously, before any win check.
         if self.enemies[i].creature.power(PowerId::Infested).is_some() {
             for slot in 1..=4u8 {
@@ -1204,6 +1341,7 @@ impl Combat {
             .creature
             .powers
             .retain(|p| !(matches!(p.id, PowerId::Constrict | PowerId::Shrink) && p.applier == Some(me)));
+        out.extend(self.relic_after_enemy_death());
         out
     }
 
@@ -1211,7 +1349,10 @@ impl Combat {
     fn gain_block(&mut self, target: CreatureRef, amount: f64, props: ValueProp, card: Option<u32>) -> Vec<Effect> {
         // Cards are only played by the player, so the block source owner is
         // always the target itself.
-        let modified = self.modify_block(target, target, amount, props, card);
+        let mut modified = self.modify_block(target, target, amount, props, card);
+        if target == CreatureRef::Player {
+            modified *= self.relic_block_multiplicative(card, props);
+        }
         let mut out = vec![];
         if modified > 0.0 {
             let c = self.creature_mut(target);
@@ -1238,6 +1379,8 @@ impl Combat {
             return vec![];
         }
         let mut out = vec![];
+        let in_play = self.player.play.last().map(|c| c.uid);
+        let amount = self.relic_modify_power_amount(target, id, amount, in_play);
         // ArtifactPower.cs: negate a debuff and spend a charge.
         if is_debuff(id) && amount > 0 && self.creature(target).power(PowerId::Artifact).is_some() {
             self.modify_power(target, PowerId::Artifact, -1);

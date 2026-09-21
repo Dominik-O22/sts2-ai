@@ -205,6 +205,8 @@ pub struct Card {
     pub exhaust_on_next_play: bool,
     /// Damage added by the card's own plays this combat (Rampage, Thrash).
     pub extra_damage: f64,
+    /// Ethereal granted locally by Ghost Seed.
+    pub ethereal_added: bool,
 }
 
 impl Card {
@@ -218,6 +220,7 @@ impl Card {
             captured_x: 0,
             exhaust_on_next_play: false,
             extra_damage: 0.0,
+            ethereal_added: false,
         }
     }
 
@@ -258,6 +261,9 @@ impl Card {
     /// Keywords, including the ones upgrades add.
     pub fn has(&self, k: Keyword) -> bool {
         if self.def().keywords.contains(&k) {
+            return true;
+        }
+        if k == Keyword::Ethereal && self.ethereal_added {
             return true;
         }
         k == Keyword::Innate && self.upgraded && matches!(self.id, CardId::Aggression | CardId::Juggling)

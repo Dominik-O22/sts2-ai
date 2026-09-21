@@ -8,10 +8,12 @@ pub mod encounter;
 pub mod ids;
 pub mod monster;
 pub mod power;
+pub mod relic;
 pub mod rng;
 pub mod types;
 
-pub use combat::{Action, Combat, EnemySpec, Outcome};
+pub use combat::{Action, Combat, EnemySpec, Outcome, RoomKind, Setup};
+pub use relic::{Relic, RelicId};
 pub use types::Ascension;
 
 /// The Ironclad's starting deck: `Models/Characters/Ironclad.cs`.
@@ -274,6 +276,99 @@ mod tests {
         c.step(Action::PlayCard { hand_idx: i, target: Some(0) });
         assert!(c.enemies[0].creature.power(PowerId::Vulnerable).is_none());
         assert!(c.enemies[0].creature.power(PowerId::Artifact).is_none());
+    }
+
+    fn with_relics(relics: &[Relic], enemies: &[EnemySpec], seed: u64) -> Combat {
+        Combat::with_setup(&Setup {
+            deck: &ironclad_starter_deck(),
+            hp: IRONCLAD_HP,
+            max_hp: IRONCLAD_HP,
+            max_energy: IRONCLAD_ENERGY,
+            relics,
+            potion_count: 0,
+            enemies,
+            room: RoomKind::Monster,
+            asc: Ascension(10),
+            seed,
+        })
+    }
+
+    #[test]
+    fn vajra_and_anchor_apply_at_combat_start() {
+        let c = with_relics(&[Relic::new(RelicId::Vajra), Relic::new(RelicId::Anchor)], &[one(MonsterId::Nibbit)], 1);
+        assert_eq!(c.player.creature.power_amount(PowerId::Strength), 1);
+        assert_eq!(c.player.creature.block, 10);
+    }
+
+    #[test]
+    fn pen_nib_doubles_the_tenth_attack_and_counter_persists() {
+        let mut nib = Relic::new(RelicId::PenNib);
+        nib.counter = 8;
+        let mut c = with_relics(&[nib], &[one(MonsterId::Vantom)], 2);
+        // Strip Slippery so damage is visible.
+        c.enemies[0].creature.powers.clear();
+        let strike = |c: &Combat| c.player.hand.iter().position(|k| k.id == ids::CardId::StrikeIronclad);
+        if strike(&c).is_none() {
+            let j = c.player.draw.iter().position(|k| k.id == ids::CardId::StrikeIronclad).unwrap();
+            let card = c.player.draw.remove(j);
+            c.player.hand.insert(0, card);
+        }
+        let hp = c.enemies[0].creature.hp;
+        c.step(Action::PlayCard { hand_idx: strike(&c).unwrap(), target: Some(0) });
+        assert_eq!(c.enemies[0].creature.hp, hp - 6, "ninth attack is normal");
+        if strike(&c).is_none() {
+            let j = c.player.draw.iter().position(|k| k.id == ids::CardId::StrikeIronclad).unwrap();
+            let card = c.player.draw.remove(j);
+            c.player.hand.insert(0, card);
+        }
+        let hp = c.enemies[0].creature.hp;
+        c.step(Action::PlayCard { hand_idx: strike(&c).unwrap(), target: Some(0) });
+        assert_eq!(c.enemies[0].creature.hp, hp - 12, "tenth attack is doubled");
+        assert_eq!(c.relics[0].counter, 0, "counter wrapped and is readable after combat");
+    }
+
+    #[test]
+    fn lizard_tail_prevents_one_death() {
+        let alone = EnemySpec { id: MonsterId::Nibbit, flags: Flags { is_alone: true, ..Default::default() } };
+        let mut c = with_relics(&[Relic::new(RelicId::LizardTail)], &[alone], 3);
+        c.player.creature.hp = 5;
+        c.step(Action::EndTurn); // Butt for 13.
+        assert_eq!(c.player.creature.hp, 40);
+        assert!(c.relics[0].flag);
+        assert!(!c.is_over());
+    }
+
+    /// Random relic sets on random decks against every encounter.
+    #[test]
+    fn random_relic_sets_do_not_panic() {
+        use crate::card::{Card, IRONCLAD_POOL};
+        let all: Vec<RelicId> = relic::ALL.to_vec();
+        for (n, enc) in encounter::ALL.iter().enumerate() {
+            for seed in 0..25u64 {
+                let seed = seed * 1000 + n as u64;
+                let mut rng = rng::Rng::new(seed);
+                let specs = enc.monsters(&mut rng);
+                let mut deck = ironclad_starter_deck();
+                for _ in 0..8 {
+                    deck.push(Card::new(0, *rng.pick(IRONCLAD_POOL).unwrap(), rng.next_int(3) == 0));
+                }
+                let relics: Vec<Relic> = (0..6).map(|_| Relic::new(*rng.pick(&all).unwrap())).collect();
+                let mut c = Combat::with_setup(&Setup {
+                    deck: &deck,
+                    hp: IRONCLAD_HP,
+                    max_hp: IRONCLAD_HP,
+                    max_energy: IRONCLAD_ENERGY,
+                    relics: &relics,
+                    potion_count: 0,
+                    enemies: &specs,
+                    room: RoomKind::Elite,
+                    asc: Ascension(10),
+                    seed,
+                });
+                play_random(&mut c, &mut rng, 20_000);
+                assert!(c.is_over(), "runaway fight in {enc:?} seed {seed} relics {relics:?}");
+            }
+        }
     }
 
     /// Every act 1 encounter, random pool decks, random policy: no panics,

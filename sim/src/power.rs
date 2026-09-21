@@ -92,6 +92,8 @@ impl Power {
         match self.id {
             // StrengthPower.cs
             PowerId::Strength if dealer == Some(owner) && props.is_powered() => self.amount as f64,
+            // VigorPower.cs: the combat loop spends it after the attack.
+            PowerId::Vigor if dealer == Some(owner) && props.is_powered() => self.amount as f64,
             _ => 0.0,
         }
     }
@@ -451,6 +453,14 @@ impl Power {
             PowerId::Inferno if unblocked > 0 && own_turn => {
                 vec![Effect::DamageAllEnemies { amount: self.amount as f64, props: ValueProp::UNPOWERED, dealer: owner }]
             }
+            // ThornsPower.cs: hit the attacker back.
+            PowerId::Thorns if props.is_powered() && dealer.is_some() => vec![Effect::Damage {
+                target: dealer.unwrap(),
+                amount: self.amount as f64,
+                props: ValueProp::UNPOWERED,
+                dealer: Some(owner),
+                card: None,
+            }],
             // SlipperyPower.cs: one charge per unblocked hit.
             PowerId::Slippery if unblocked >= 1 => vec![Effect::DecrementPower { target: owner, id: self.id }],
             // PlowPower.cs: `hp_after` is the owner's HP after the hit.
