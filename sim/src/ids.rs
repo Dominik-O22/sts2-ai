@@ -174,6 +174,33 @@ pub enum PowerId {
     Vigor,
     /// Block when block is cleared next turn (Self-Forming Clay).
     SelfFormingClay,
+    // Potion powers.
+    /// Heal at the end of the owner's turn, then decrement (Regen Potion).
+    Regen,
+    /// Next attack card deals triple damage (Gigantification Potion).
+    Gigantification,
+    /// Next card is played twice; gone at end of turn (Duplicator).
+    Duplication,
+    /// Negates the next HP loss (Lucky Tonic).
+    Buffer,
+    /// Draw one extra card per turn, decrementing (Clarity).
+    Clarity,
+    /// Unblockable HP loss at the end of the owner's turn (Powdered Demise).
+    Demise,
+    /// Energy after each energy reset, decrementing (Radiant Tincture).
+    Radiance,
+    /// Strength at the end of the owner's turn (Mazaleth's Gift).
+    Ritual,
+    /// Hand is not discarded at end of turn (Stable Serum).
+    RetainHand,
+    /// Block once block is cleared next turn (Ship in a Bottle).
+    BlockNextTurn,
+    /// `TemporaryStrengthPower` from Flex Potion.
+    FlexPotion,
+    /// `TemporaryStrengthPower`, negative, from Shackling Potion.
+    ShacklingPotion,
+    /// `TemporaryDexterityPower` from Speed Potion.
+    SpeedPotion,
 }
 
 /// `Models/Monsters/<Name>.cs`.

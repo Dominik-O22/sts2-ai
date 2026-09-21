@@ -7,12 +7,14 @@ pub mod effect;
 pub mod encounter;
 pub mod ids;
 pub mod monster;
+pub mod potion;
 pub mod power;
 pub mod relic;
 pub mod rng;
 pub mod types;
 
 pub use combat::{Action, Combat, EnemySpec, Outcome, RoomKind, Setup};
+pub use potion::PotionId;
 pub use relic::{Relic, RelicId};
 pub use types::Ascension;
 
@@ -285,12 +287,120 @@ mod tests {
             max_hp: IRONCLAD_HP,
             max_energy: IRONCLAD_ENERGY,
             relics,
-            potion_count: 0,
+            potions: &[],
             enemies,
             room: RoomKind::Monster,
             asc: Ascension(10),
             seed,
         })
+    }
+
+    fn with_potions(potions: &[Option<PotionId>], enemies: &[EnemySpec], seed: u64) -> Combat {
+        Combat::with_setup(&Setup {
+            deck: &ironclad_starter_deck(),
+            hp: IRONCLAD_HP,
+            max_hp: IRONCLAD_HP,
+            max_energy: IRONCLAD_ENERGY,
+            relics: &[],
+            potions,
+            enemies,
+            room: RoomKind::Monster,
+            asc: Ascension(10),
+            seed,
+        })
+    }
+
+    #[test]
+    fn fire_potion_ignores_strength_and_empties_its_slot() {
+        let mut c = with_potions(&[Some(PotionId::FirePotion), None], &[one(MonsterId::Nibbit)], 1);
+        c.player.creature.powers.push(Power::new(PowerId::Strength, 5));
+        let hp = c.enemies[0].creature.hp;
+        assert!(c.legal_actions().contains(&Action::UsePotion { slot: 0, target: Some(0) }));
+        c.step(Action::UsePotion { slot: 0, target: Some(0) });
+        assert_eq!(c.enemies[0].creature.hp, hp - 20);
+        assert_eq!(c.potions, vec![None, None]);
+        assert!(!c.legal_actions().iter().any(|a| matches!(a, Action::UsePotion { .. })));
+    }
+
+    #[test]
+    fn fairy_in_a_bottle_is_automatic_and_belt_buckle_waits_for_it() {
+        let alone = EnemySpec { id: MonsterId::Nibbit, flags: Flags { is_alone: true, ..Default::default() } };
+        let mut c = Combat::with_setup(&Setup {
+            deck: &ironclad_starter_deck(),
+            hp: 5,
+            max_hp: IRONCLAD_HP,
+            max_energy: IRONCLAD_ENERGY,
+            relics: &[Relic::new(RelicId::BeltBuckle)],
+            potions: &[Some(PotionId::FairyInABottle)],
+            enemies: &[alone],
+            room: RoomKind::Monster,
+            asc: Ascension(10),
+            seed: 3,
+        });
+        assert!(!c.legal_actions().iter().any(|a| matches!(a, Action::UsePotion { .. })));
+        assert_eq!(c.player.creature.power_amount(PowerId::Dexterity), 0);
+        c.step(Action::EndTurn); // Butt for 13.
+        assert_eq!(c.player.creature.hp, 24);
+        assert_eq!(c.potions, vec![None]);
+        assert_eq!(c.player.creature.power_amount(PowerId::Dexterity), 2, "Belt Buckle fires on the automatic use");
+        assert!(!c.is_over());
+    }
+
+    #[test]
+    fn gamblers_brew_draws_one_per_discard_on_skip() {
+        let mut c = with_potions(&[Some(PotionId::GamblersBrew)], &[one(MonsterId::Nibbit)], 4);
+        c.step(Action::UsePotion { slot: 0, target: None });
+        assert!(c.legal_actions().contains(&Action::Skip));
+        c.step(Action::Choose(0));
+        c.step(Action::Choose(0));
+        assert_eq!(c.player.hand.len(), 3);
+        c.step(Action::Skip);
+        assert_eq!(c.player.hand.len(), 5);
+        assert_eq!(c.player.discard.len(), 2);
+        assert!(c.pending.is_none());
+    }
+
+    #[test]
+    fn gigantification_triples_one_attack_card() {
+        let mut c = with_potions(&[Some(PotionId::GigantificationPotion)], &[one(MonsterId::Nibbit)], 5);
+        c.step(Action::UsePotion { slot: 0, target: None });
+        let strike = |c: &Combat| c.player.hand.iter().position(|k| k.id == ids::CardId::StrikeIronclad);
+        for _ in 0..2 {
+            if strike(&c).is_none() {
+                let j = c.player.draw.iter().position(|k| k.id == ids::CardId::StrikeIronclad).unwrap();
+                let card = c.player.draw.remove(j);
+                c.player.hand.insert(0, card);
+            }
+        }
+        let hp = c.enemies[0].creature.hp;
+        c.step(Action::PlayCard { hand_idx: strike(&c).unwrap(), target: Some(0) });
+        assert_eq!(c.enemies[0].creature.hp, hp - 18);
+        assert!(c.player.creature.power(PowerId::Gigantification).is_none());
+        let hp = c.enemies[0].creature.hp;
+        c.step(Action::PlayCard { hand_idx: strike(&c).unwrap(), target: Some(0) });
+        assert_eq!(c.enemies[0].creature.hp, hp - 6);
+    }
+
+    /// Three random potions on random decks against every encounter, used
+    /// whenever the random policy feels like it.
+    #[test]
+    fn random_potions_do_not_panic() {
+        use crate::card::{Card, IRONCLAD_POOL};
+        for (n, enc) in encounter::ALL.iter().enumerate() {
+            for seed in 0..25u64 {
+                let seed = seed * 1000 + n as u64;
+                let mut rng = rng::Rng::new(seed);
+                let specs = enc.monsters(&mut rng);
+                let mut deck = ironclad_starter_deck();
+                for _ in 0..8 {
+                    deck.push(Card::new(0, *rng.pick(IRONCLAD_POOL).unwrap(), rng.next_int(3) == 0));
+                }
+                let potions: Vec<Option<PotionId>> = (0..3).map(|_| Some(*rng.pick(potion::ALL).unwrap())).collect();
+                let mut c = with_potions(&potions, &specs, seed);
+                play_random(&mut c, &mut rng, 20_000);
+                assert!(c.is_over(), "runaway fight in {enc:?} seed {seed} potions {potions:?}");
+            }
+        }
     }
 
     #[test]
@@ -359,7 +469,7 @@ mod tests {
                     max_hp: IRONCLAD_HP,
                     max_energy: IRONCLAD_ENERGY,
                     relics: &relics,
-                    potion_count: 0,
+                    potions: &[],
                     enemies: &specs,
                     room: RoomKind::Elite,
                     asc: Ascension(10),

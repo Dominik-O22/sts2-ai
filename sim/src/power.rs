@@ -44,6 +44,8 @@ pub fn is_debuff(id: PowerId) -> bool {
             | PowerId::Ringing
             | PowerId::Plow
             | PowerId::Constrict
+            | PowerId::Demise
+            | PowerId::ShacklingPotion
     )
 }
 
@@ -68,11 +70,21 @@ pub fn is_single(id: PowerId) -> bool {
     )
 }
 
-/// `TemporaryStrengthPower` subclasses: (is one, sign).
-pub fn temp_strength_sign(id: PowerId) -> Option<i32> {
+/// `TemporaryStrengthPower` / `TemporaryDexterityPower` subclasses: the
+/// real power they apply and the sign.
+pub fn temp_power(id: PowerId) -> Option<(PowerId, i32)> {
     match id {
-        PowerId::SetupStrike => Some(1),
-        PowerId::Mangle => Some(-1),
+        PowerId::SetupStrike | PowerId::FlexPotion => Some((PowerId::Strength, 1)),
+        PowerId::Mangle | PowerId::ShacklingPotion => Some((PowerId::Strength, -1)),
+        PowerId::SpeedPotion => Some((PowerId::Dexterity, 1)),
+        _ => None,
+    }
+}
+
+/// `TemporaryStrengthPower` subclasses only, with their sign.
+pub fn temp_strength_sign(id: PowerId) -> Option<i32> {
+    match temp_power(id) {
+        Some((PowerId::Strength, sign)) => Some(sign),
         _ => None,
     }
 }
@@ -178,6 +190,38 @@ impl Power {
         }
     }
 
+    /// `ModifyHandDraw`: Clarity draws one more each turn.
+    pub fn modify_hand_draw(&self, count: u32) -> u32 {
+        match self.id {
+            PowerId::Clarity => count + 1,
+            _ => count,
+        }
+    }
+
+    /// `AfterEnergyReset`: Radiance grants energy, then decrements.
+    pub fn after_energy_reset(&self, owner: CreatureRef) -> Vec<Effect> {
+        match self.id {
+            PowerId::Radiance => vec![Effect::GainEnergy { amount: 1 }, Effect::DecrementPower { target: owner, id: self.id }],
+            _ => vec![],
+        }
+    }
+
+    /// `AfterBlockCleared` on the owner: Self-Forming Clay and Block Next Turn.
+    pub fn after_block_cleared(&self, owner: CreatureRef) -> Vec<Effect> {
+        match self.id {
+            PowerId::SelfFormingClay | PowerId::BlockNextTurn => vec![
+                Effect::GainBlock { target: owner, amount: self.amount as f64, props: ValueProp::UNPOWERED, card: None },
+                Effect::RemovePower { target: owner, id: self.id },
+            ],
+            _ => vec![],
+        }
+    }
+
+    /// `ShouldFlush`: Retain Hand keeps the hand.
+    pub fn should_flush(&self) -> bool {
+        self.id != PowerId::RetainHand
+    }
+
     /// `ShouldClearBlock`.
     pub fn should_clear_block(&self, owner: CreatureRef, creature: CreatureRef) -> bool {
         !(self.id == PowerId::Barricade && owner == creature)
@@ -198,10 +242,12 @@ impl Power {
         }
     }
 
-    /// `ModifyCardPlayCount`.
+    /// `ModifyCardPlayCount`. Powers that add plays are decremented once
+    /// per modified play (`AfterModifyingCardPlayCount`).
     pub fn extra_plays(&self, ty: CardType) -> u32 {
         match self.id {
             PowerId::OneTwoPunch if ty == CardType::Attack => 1,
+            PowerId::Duplication => 1,
             _ => 0,
         }
     }
@@ -232,6 +278,8 @@ impl Power {
                 amount: self.amount,
                 applier: Some(owner),
             }],
+            // ClarityPower.cs
+            PowerId::Clarity => vec![Effect::DecrementPower { target: owner, id: self.id }],
             // PlatingPower.cs: decrement each turn after the first.
             PowerId::Plating => {
                 let first = match owner {
@@ -334,14 +382,39 @@ impl Power {
             }],
             // FlameBarrierPower.cs: removed when the *other* side's turn ends.
             PowerId::FlameBarrier if !own_side => remove(),
-            // TemporaryStrengthPower: remove self and undo the Strength.
-            PowerId::SetupStrike | PowerId::Mangle if own_side => {
-                let sign = temp_strength_sign(self.id).unwrap();
+            // TemporaryStrengthPower / TemporaryDexterityPower: remove self
+            // and undo the real power.
+            PowerId::SetupStrike | PowerId::Mangle | PowerId::FlexPotion | PowerId::ShacklingPotion | PowerId::SpeedPotion
+                if own_side =>
+            {
+                let (real, sign) = temp_power(self.id).unwrap();
                 vec![
                     Effect::RemovePower { target: owner, id: self.id },
-                    Effect::ApplyPower { target: owner, id: PowerId::Strength, amount: -sign * self.amount, applier: Some(owner) },
+                    Effect::ApplyPower { target: owner, id: real, amount: -sign * self.amount, applier: Some(owner) },
                 ]
             }
+            // RegenPower.cs
+            PowerId::Regen if own_side => vec![
+                Effect::Heal { target: owner, amount: self.amount as f64 },
+                Effect::DecrementPower { target: owner, id: self.id },
+            ],
+            // DemisePower.cs
+            PowerId::Demise if own_side => vec![Effect::Damage {
+                target: owner,
+                amount: self.amount as f64,
+                props: ValueProp::UNBLOCKABLE.or(ValueProp::UNPOWERED),
+                dealer: None,
+                card: None,
+            }],
+            // RitualPower.cs (the enemy-applied skip does not apply to potions).
+            PowerId::Ritual if own_side => vec![Effect::ApplyPower {
+                target: owner,
+                id: PowerId::Strength,
+                amount: self.amount,
+                applier: Some(owner),
+            }],
+            PowerId::RetainHand if own_side => vec![Effect::DecrementPower { target: owner, id: self.id }],
+            PowerId::Duplication if own_side => remove(),
             // DarkEmbracePower.cs: draw for ethereal exhausts at end of turn.
             PowerId::DarkEmbrace if own_side => {
                 let n = self.amount * self.data;
@@ -360,12 +433,12 @@ impl Power {
         }
     }
 
-    /// `BeforeApplied` for temporary strength: apply the real Strength.
+    /// `BeforeApplied` for temporary powers: apply the real one.
     pub fn on_applied(&self, owner: CreatureRef, applied_amount: i32) -> Vec<Effect> {
-        match temp_strength_sign(self.id) {
-            Some(sign) => vec![Effect::ApplyPower {
+        match temp_power(self.id) {
+            Some((real, sign)) => vec![Effect::ApplyPower {
                 target: owner,
-                id: PowerId::Strength,
+                id: real,
                 amount: sign * applied_amount,
                 applier: Some(owner),
             }],

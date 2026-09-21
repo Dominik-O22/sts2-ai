@@ -207,6 +207,8 @@ pub struct Card {
     pub extra_damage: f64,
     /// Ethereal granted locally by Ghost Seed.
     pub ethereal_added: bool,
+    /// `BaseReplayCount`: extra plays per play (Soldier's Stew).
+    pub replay: u32,
 }
 
 impl Card {
@@ -221,6 +223,7 @@ impl Card {
             exhaust_on_next_play: false,
             extra_damage: 0.0,
             ethereal_added: false,
+            replay: 0,
         }
     }
 
@@ -427,7 +430,7 @@ impl Card {
                 if self.upgraded {
                     e.push(Effect::UpgradeHand);
                 } else {
-                    e.push(Effect::Choose { from: Pile::Hand, filter: CardFilter::Any, then: Then::Upgrade });
+                    e.push(Effect::Choose { from: Pile::Hand, filter: CardFilter::Any, then: Then::Upgrade, can_skip: false });
                 }
                 e
             }
@@ -446,7 +449,7 @@ impl Card {
             BodySlam => vec![hit(v.magic * c.player.creature.block as f64, 1, AttackTargets::One(t()))],
             Brand => vec![
                 lose_hp(v.hp_loss),
-                Effect::Choose { from: Pile::Hand, filter: CardFilter::Any, then: Then::Exhaust },
+                Effect::Choose { from: Pile::Hand, filter: CardFilter::Any, then: Then::Exhaust, can_skip: false },
                 self_power(PowerId::Strength, m),
             ],
             Break => vec![attack(1), power(t(), PowerId::Vulnerable, m)],
@@ -457,7 +460,7 @@ impl Card {
                 vec![hit(v.damage + v.magic * vuln, 1, AttackTargets::One(t()))]
             }
             BurningPact => vec![
-                Effect::Choose { from: Pile::Hand, filter: CardFilter::Any, then: Then::Exhaust },
+                Effect::Choose { from: Pile::Hand, filter: CardFilter::Any, then: Then::Exhaust, can_skip: false },
                 draw(v.cards),
             ],
             Cascade => {
@@ -509,7 +512,7 @@ impl Card {
             Havoc => vec![Effect::AutoPlayFromDrawTop { force_exhaust: true }],
             Headbutt => vec![
                 attack(1),
-                Effect::Choose { from: Pile::Discard, filter: CardFilter::Any, then: Then::MoveTo(Pile::DrawTop) },
+                Effect::Choose { from: Pile::Discard, filter: CardFilter::Any, then: Then::MoveTo(Pile::DrawTop), can_skip: false },
             ],
             Hellraiser => vec![self_power(PowerId::Hellraiser, 1)],
             Hemokinesis => vec![lose_hp(v.hp_loss), attack(1)],
@@ -606,7 +609,7 @@ impl Card {
             TrueGrit => {
                 let mut e = vec![block()];
                 if self.upgraded {
-                    e.push(Effect::Choose { from: Pile::Hand, filter: CardFilter::Any, then: Then::Exhaust });
+                    e.push(Effect::Choose { from: Pile::Hand, filter: CardFilter::Any, then: Then::Exhaust, can_skip: false });
                 } else {
                     e.push(Effect::ExhaustRandomFromHand { filter: CardFilter::Any, then_add_damage_to: None });
                 }

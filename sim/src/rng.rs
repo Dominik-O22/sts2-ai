@@ -78,6 +78,8 @@ pub struct CombatRngs {
     pub card_generation: Rng,
     /// `CombatCardSelection`: random picks among existing cards.
     pub card_selection: Rng,
+    /// `CombatEnergyCosts`: Snecko Oil costs.
+    pub energy_costs: Rng,
 }
 
 impl CombatRngs {
@@ -89,6 +91,7 @@ impl CombatRngs {
             niche: Rng::new(seed ^ 0x04),
             card_generation: Rng::new(seed ^ 0x05),
             card_selection: Rng::new(seed ^ 0x06),
+            energy_costs: Rng::new(seed ^ 0x07),
         }
     }
 }

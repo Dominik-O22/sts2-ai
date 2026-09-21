@@ -39,6 +39,8 @@ pub enum CardFilter {
     NotType(CardType),
     /// Playable attacks (Stampede).
     PlayableAttack,
+    /// Cards whose cost is above zero (Touch of Insanity).
+    CostsEnergy,
 }
 
 /// What to do with the card the player picks.
@@ -47,6 +49,18 @@ pub enum Then {
     Exhaust,
     Upgrade,
     MoveTo(Pile),
+    /// Cost 0 for the rest of combat (Touch of Insanity).
+    FreeThisCombat,
+    /// To hand at cost 0 this turn (Liquid Memories).
+    ToHandFreeThisTurn,
+    /// Take one card from the offer pile into hand, free this turn; the
+    /// rest of the offer vanishes (Attack/Skill/Power Potion).
+    TakeOffer,
+    /// Exhaust it and ask again (Ashwater).
+    ExhaustMany,
+    /// Discard it and ask again; on skip, draw one per discarded card
+    /// (Gambler's Brew).
+    DiscardThenDraw { picked: u32 },
 }
 
 /// What a random generator draws from.
@@ -56,6 +70,8 @@ pub enum GenPool {
     Ironclad,
     /// Ironclad attacks only.
     IroncladAttacks,
+    IroncladSkills,
+    IroncladPowers,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -131,7 +147,21 @@ pub enum Effect {
     GenerateRandom { pool: GenPool, count: u32, to: Pile, free_this_turn: bool, distinct: bool },
     /// Ask the player to pick one card from those matching the filter in the
     /// given pile, then do `then` with it. Empty option lists are skipped.
-    Choose { from: Pile, filter: CardFilter, then: Then },
+    /// `can_skip` adds `Action::Skip` to the choice.
+    Choose { from: Pile, filter: CardFilter, then: Then, can_skip: bool },
+    /// Generate `count` distinct cards into the offer pile and let the player
+    /// take one (`CardSelectCmd.FromChooseACardScreen`).
+    OfferRandom { pool: GenPool, count: u32 },
+    /// `Then::TakeOffer` for the picked uid.
+    TakeOffer { uid: u32 },
+    /// `CardPileCmd.Shuffle`: discard and draw piles merged and shuffled.
+    Shuffle,
+    /// Snecko Oil: every non-X hand card costs a random 0-3 this turn.
+    SneckoCosts,
+    /// Soldier's Stew: every Strike in combat gains one replay.
+    StrikeReplay,
+    /// `Hook.AfterPotionUsed` plus the empty-hand check.
+    AfterPotionUsed,
     /// Card play pipeline, `CardModel.OnPlayWrapper`. Energy is already spent;
     /// `paid` is how much (Intimidating Helmet reads it).
     PlayCard { uid: u32, target: Option<CreatureRef>, paid: i32 },

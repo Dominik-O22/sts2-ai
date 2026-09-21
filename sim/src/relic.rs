@@ -138,7 +138,7 @@ impl Combat {
         use RelicId::*;
         let mut out = vec![];
         let room = self.room;
-        let no_potions = self.potion_count == 0;
+        let no_potions = self.potions.iter().all(|p| p.is_none());
         let hp_low = self.player.creature.hp * 2 <= self.player.creature.max_hp;
         let deck_upgradable: Vec<u32> = vec![];
         let _ = deck_upgradable;
@@ -736,6 +736,19 @@ impl Combat {
             vec![draw(1)]
         } else {
             vec![]
+        }
+    }
+
+    /// `AfterPotionUsed`: Belt Buckle grants its Dexterity once the last
+    /// potion is gone.
+    pub(crate) fn relic_after_potion_used(&mut self) -> Vec<Effect> {
+        let no_potions = self.potions.iter().all(|p| p.is_none());
+        match self.relic_mut(RelicId::BeltBuckle) {
+            Some(r) if no_potions && !r.used => {
+                r.used = true;
+                vec![self_power(PowerId::Dexterity, 2)]
+            }
+            _ => vec![],
         }
     }
 
