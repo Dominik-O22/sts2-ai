@@ -40,6 +40,10 @@ public static class Recorder
     /// Enemies at the last snapshot; a killed target has already left the
     /// combat state when the play hook fires.
     private static List<Creature> _lastEnemies = new();
+    /// Potion slots when the last potion event was logged (or the file
+    /// opened). A slot emptied since then means a potion is in flight: it
+    /// leaves the belt a frame before its effect runs.
+    private static List<PotionModel?> _potionBaseline = new();
 
     public static void Initialize()
     {
@@ -47,6 +51,9 @@ public static class Recorder
         {
             var model = new RecorderModel();
             ModHelper.SubscribeForCombatStateHooks("sts2ai", _ => new[] { model });
+            // The end-of-combat hook is not dispatched to mod subscribers
+            // once the combat state is gone; the event fires regardless.
+            CombatManager.Instance.CombatEnded += room => Guard(() => OnCombatEnd(room));
             var tree = (SceneTree)Engine.GetMainLoop();
             tree.Connect(SceneTree.SignalName.ProcessFrame, Callable.From(Poll));
             GD.Print("[sts2ai] recorder ready");
@@ -73,6 +80,7 @@ public static class Recorder
             if (state == null || me == null || cm.IsExecutingCardOrPotionEffect(me)) return;
             // A played card sits in the play pile until its result-pile move; not a decision point yet.
             if (me.PlayerCombatState == null || me.PlayerCombatState.PlayPile.Cards.Count > 0) return;
+            if (_file != null && PotionInFlight(me)) return;
 
             string snap = JsonSerializer.Serialize(Snapshot(state, me), Json);
             if (snap == _lastSnapshot) return;
@@ -97,6 +105,7 @@ public static class Recorder
         string path = Path.Combine(dir, $"{DateTime.Now:yyyyMMdd-HHmmss}-{encounter}.jsonl");
         _file = new StreamWriter(path, false);
         _lastSnapshot = "";
+        _potionBaseline = me.PotionSlots.ToList();
         GD.Print($"[sts2ai] recording {path}");
         Write(JsonSerializer.Serialize(new Dictionary<string, object?>
         {
@@ -187,6 +196,20 @@ public static class Recorder
         };
     }
 
+    private static bool PotionInFlight(Player me)
+    {
+        var now = me.PotionSlots;
+        for (int i = 0; i < _potionBaseline.Count && i < now.Count; i++)
+            if (_potionBaseline[i] != null && now[i] == null) return true;
+        return false;
+    }
+
+    internal static void Guard(Action a)
+    {
+        try { a(); }
+        catch (Exception ex) { GD.PrintErr($"[sts2ai] hook failed: {ex.Message}"); }
+    }
+
     private static int? EnemyIndex(Creature? target)
     {
         if (target == null || target.IsPlayer) return null;
@@ -213,6 +236,7 @@ public static class Recorder
     internal static void OnPotionUsed(PotionModel potion, Creature? target)
     {
         Event(new() { ["t"] = "potion", ["id"] = potion.Id.Entry, ["target"] = EnemyIndex(target) });
+        _potionBaseline = potion.Owner.PotionSlots.ToList();
     }
 
     internal static void OnShuffle(List<CardModel> cards, bool isInitialShuffle)
@@ -230,7 +254,8 @@ public static class Recorder
 
     internal static void OnCombatEnd(CombatRoom room)
     {
-        var me = LocalContext.GetMe(room.CombatState);
+        if (_file == null) return;
+        var me = LocalContext.GetMe(RunManager.Instance.DebugOnlyGetState());
         Event(new() { ["t"] = "end", ["won"] = me?.Creature.IsAlive ?? false, ["hp"] = me?.Creature.CurrentHp });
         Close();
     }
@@ -265,15 +290,5 @@ public sealed class RecorderModel : AbstractModel
         return Task.CompletedTask;
     }
 
-    public override Task AfterCombatEnd(CombatRoom room)
-    {
-        Guard(() => Recorder.OnCombatEnd(room));
-        return Task.CompletedTask;
-    }
-
-    private static void Guard(Action a)
-    {
-        try { a(); }
-        catch (Exception ex) { GD.PrintErr($"[sts2ai] hook failed: {ex.Message}"); }
-    }
+    private static void Guard(Action a) => Recorder.Guard(a);
 }
