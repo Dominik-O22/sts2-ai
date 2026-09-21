@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <OutputType>Library</OutputType>
+    <AssemblyName>sts2ai</AssemblyName>
+    <RootNamespace>Sts2Ai</RootNamespace>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>12.0</LangVersion>
+    <!-- Override with: dotnet build -p:STS2GameDir="..." -->
+    <STS2GameDir Condition="'$(STS2GameDir)' == ''">$(HOME)/.local/share/Steam/steamapps/common/Slay the Spire 2</STS2GameDir>
+    <STS2DataDir>$(STS2GameDir)/data_sts2_linuxbsd_x86_64</STS2DataDir>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="sts2">
+      <HintPath>$(STS2DataDir)/sts2.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="GodotSharp">
+      <HintPath>$(STS2DataDir)/GodotSharp.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="0Harmony">
+      <HintPath>$(STS2DataDir)/0Harmony.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+</Project>

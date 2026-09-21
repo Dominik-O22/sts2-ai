@@ -140,6 +140,17 @@ pub struct Setup<'a> {
     pub seed: u64,
 }
 
+/// Recorded outcomes the replay harness forces instead of rolling:
+/// shuffle results and starting enemy HP. Each shuffle consumes one entry;
+/// once the queue is empty the RNG takes over again.
+#[derive(Clone, Debug, Default)]
+pub struct Script {
+    /// Draw pile orders, top first, as (id, upgraded).
+    pub shuffles: VecDeque<Vec<(CardId, bool)>>,
+    /// Max HP per starting enemy, by index.
+    pub enemy_hp: Vec<i32>,
+}
+
 /// The parts of `CombatManager.History` that cards and powers read.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Stats {
@@ -174,6 +185,9 @@ pub struct Combat {
     pub room: RoomKind,
     /// Potion slots. Using a potion empties its slot.
     pub potions: Vec<Option<PotionId>>,
+    pub script: Script,
+    /// Every shuffle result this combat, top first (the recorder's view).
+    pub shuffle_log: Vec<Vec<(CardId, bool)>>,
     queue: VecDeque<Effect>,
     next_uid: u32,
     /// False during setup, before the first turn starts.
@@ -208,6 +222,11 @@ impl Combat {
     }
 
     pub fn with_setup(setup: &Setup) -> Self {
+        Self::with_script(setup, Script::default())
+    }
+
+    /// `with_setup` with forced shuffles and enemy HP.
+    pub fn with_script(setup: &Setup, mut script: Script) -> Self {
         let Setup { deck, hp, max_hp, max_energy, enemies, asc, seed, .. } = *setup;
         let mut rngs = CombatRngs::new(seed);
         let mut next_uid = 1;
@@ -220,7 +239,8 @@ impl Combat {
                 c
             })
             .collect();
-        rngs.shuffle.shuffle(&mut draw);
+        let mut shuffle_log = vec![];
+        shuffle_cards(&mut draw, &mut script, &mut rngs.shuffle, &mut shuffle_log);
 
         let mut c = Self {
             player: PlayerCombat {
@@ -246,12 +266,19 @@ impl Combat {
             relics: setup.relics.to_vec(),
             room: setup.room,
             potions: setup.potions.to_vec(),
+            script,
+            shuffle_log,
             queue: VecDeque::new(),
             next_uid,
             started: false,
         };
-        for spec in enemies {
+        for (i, spec) in enemies.iter().enumerate() {
             c.spawn(spec.id, spec.flags);
+            if let Some(&hp) = c.script.enemy_hp.get(i) {
+                let e = &mut c.enemies[i].creature;
+                e.max_hp = hp;
+                e.hp = hp;
+            }
         }
         c.started = true;
         let pre = c.relic_before_combat_start();
@@ -284,6 +311,12 @@ impl Combat {
 
     pub fn is_over(&self) -> bool {
         self.outcome.is_some()
+    }
+
+    /// Replace an enemy's rolled move with a named one from its state graph.
+    /// Returns false when the graph has no such move.
+    pub fn set_enemy_move(&mut self, i: usize, name: &str) -> bool {
+        self.enemies[i].monster.force_named_move(name)
     }
 
     pub fn creature(&self, r: CreatureRef) -> &Creature {
@@ -730,8 +763,7 @@ impl Combat {
                 // CardPileCmd.Shuffle: discard then draw, shuffled together.
                 let mut cards = std::mem::take(&mut self.player.discard);
                 cards.append(&mut self.player.draw);
-                cards.sort_by_key(|c| (c.id, c.upgraded));
-                self.rngs.shuffle.shuffle(&mut cards);
+                shuffle_cards(&mut cards, &mut self.script, &mut self.rngs.shuffle, &mut self.shuffle_log);
                 self.player.draw = cards;
                 let subs = self.relic_after_shuffle();
                 self.push_front_all(subs);
@@ -1240,8 +1272,7 @@ impl Combat {
         if self.player.draw.is_empty() && !self.player.discard.is_empty() {
             // CardPileCmd.Shuffle: discard becomes the draw pile.
             let mut cards = std::mem::take(&mut self.player.discard);
-            cards.sort_by_key(|c| (c.id, c.upgraded));
-            self.rngs.shuffle.shuffle(&mut cards);
+            shuffle_cards(&mut cards, &mut self.script, &mut self.rngs.shuffle, &mut self.shuffle_log);
             self.player.draw = cards;
             return true;
         }
@@ -1609,6 +1640,30 @@ fn filter_ok(f: CardFilter, c: &Card) -> bool {
         CardFilter::PlayableAttack => c.ty() == CardType::Attack && !c.has(Keyword::Unplayable),
         CardFilter::CostsEnergy => c.local_cost() > 0 || c.def().x_cost,
     }
+}
+
+/// Shuffle in place, or impose the next scripted order. Scripted orders
+/// match cards by (id, upgraded); cards the script does not mention go to
+/// the bottom in their existing order.
+fn shuffle_cards(cards: &mut Vec<Card>, script: &mut Script, rng: &mut crate::rng::Rng, log: &mut Vec<Vec<(CardId, bool)>>) {
+    cards.sort_by_key(|c| (c.id, c.upgraded));
+    match script.shuffles.pop_front() {
+        Some(order) => {
+            // Advance the stream as a real shuffle would, so later draws from
+            // it (Stampede's pick) stay aligned with an unscripted run.
+            let mut scratch: Vec<usize> = (0..cards.len()).collect();
+            rng.shuffle(&mut scratch);
+            let mut rest = std::mem::take(cards);
+            for (id, up) in order {
+                if let Some(i) = rest.iter().position(|c| c.id == id && c.upgraded == up) {
+                    cards.push(rest.remove(i));
+                }
+            }
+            cards.append(&mut rest);
+        }
+        None => rng.shuffle(cards),
+    }
+    log.push(cards.iter().map(|c| (c.id, c.upgraded)).collect());
 }
 
 /// Generatable Ironclad cards for a `GenPool`.

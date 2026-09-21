@@ -258,6 +258,18 @@ impl Monster {
         self.force_move("REVIVE_MOVE", vec![Intent::Heal], follow);
     }
 
+    /// Replay: make `name` the next move as if the graph had rolled it.
+    pub fn force_named_move(&mut self, name: &str) -> bool {
+        let Some(idx) = self.states.iter().position(|s| s.is_move() && s.name() == name) else { return false };
+        self.current = idx;
+        self.performed_current = false;
+        self.next_move = Some(idx);
+        if self.states[idx].logged() && self.log.last() != Some(&idx) {
+            self.log.push(idx);
+        }
+        true
+    }
+
     fn force_move(&mut self, name: &'static str, intents: Vec<Intent>, follow_up: Option<usize>) {
         self.states.push(State::Move { name, intents, follow_up, must_perform_once: true });
         let idx = self.states.len() - 1;

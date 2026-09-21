@@ -10,6 +10,7 @@ pub mod monster;
 pub mod potion;
 pub mod power;
 pub mod relic;
+pub mod replay;
 pub mod rng;
 pub mod types;
 
