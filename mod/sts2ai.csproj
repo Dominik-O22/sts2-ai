@@ -21,9 +21,5 @@
       <HintPath>$(STS2DataDir)/GodotSharp.dll</HintPath>
       <Private>false</Private>
     </Reference>
-    <Reference Include="0Harmony">
-      <HintPath>$(STS2DataDir)/0Harmony.dll</HintPath>
-      <Private>false</Private>
-    </Reference>
   </ItemGroup>
 </Project>

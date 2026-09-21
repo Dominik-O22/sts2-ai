@@ -6,20 +6,21 @@
 //     the player's turn to act and nothing is resolving. Consecutive
 //     identical snapshots are dropped, so each written snapshot is a
 //     decision point.
-//   - Harmony postfixes on the game's static Hook dispatchers for the
-//     events the sim must replay verbatim: card plays, potion uses,
-//     shuffles (the resulting order), turn starts, and combat end.
+//   - A model subscribed through ModHelper.SubscribeForCombatStateHooks,
+//     which receives the same hooks as relics and powers, for the events
+//     the sim must replay verbatim: card plays, potion uses, shuffles (the
+//     resulting order), turn starts, and combat end. No Harmony: its native
+//     patch helper does not load on every Linux setup.
 
 using System.Text.Json;
 using Godot;
-using HarmonyLib;
 using MegaCrit.Sts2.Core.Combat;
 using MegaCrit.Sts2.Core.Context;
 using MegaCrit.Sts2.Core.Entities.Cards;
 using MegaCrit.Sts2.Core.Entities.Creatures;
 using MegaCrit.Sts2.Core.Entities.Multiplayer;
 using MegaCrit.Sts2.Core.Entities.Players;
-using MegaCrit.Sts2.Core.Hooks;
+using MegaCrit.Sts2.Core.GameActions.Multiplayer;
 using MegaCrit.Sts2.Core.Modding;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Rooms;
@@ -41,7 +42,8 @@ public static class Recorder
     {
         try
         {
-            new Harmony("sts2ai").PatchAll();
+            var model = new RecorderModel();
+            ModHelper.SubscribeForCombatStateHooks("sts2ai", _ => new[] { model });
             var tree = (SceneTree)Engine.GetMainLoop();
             tree.Connect(SceneTree.SignalName.ProcessFrame, Callable.From(Poll));
             GD.Print("[sts2ai] recorder ready");
@@ -188,64 +190,86 @@ public static class Recorder
         return null;
     }
 
-    // ---- hook patches -----------------------------------------------------
+    // ---- hooks --------------------------------------------------------------
 
-    [HarmonyPatch(typeof(Hook), nameof(Hook.AfterCardPlayed))]
-    private static class AfterCardPlayedPatch
+    internal static void OnCardPlayed(CardPlay cardPlay)
     {
-        private static void Postfix(CardPlay cardPlay)
+        if (cardPlay.IsAutoPlay || cardPlay.PlayIndex != 0) return;
+        int idx = _lastHand.FindIndex(c => ReferenceEquals(c, cardPlay.Card));
+        Event(new()
         {
-            if (cardPlay.IsAutoPlay || cardPlay.PlayIndex != 0) return;
-            int idx = _lastHand.FindIndex(c => ReferenceEquals(c, cardPlay.Card));
-            Event(new()
-            {
-                ["t"] = "play",
-                ["id"] = cardPlay.Card.Id.Entry,
-                ["up"] = cardPlay.Card.IsUpgraded,
-                ["hand_idx"] = idx < 0 ? null : idx,
-                ["target"] = EnemyIndex(cardPlay.Target),
-            });
-        }
+            ["t"] = "play",
+            ["id"] = cardPlay.Card.Id.Entry,
+            ["up"] = cardPlay.Card.IsUpgraded,
+            ["hand_idx"] = idx < 0 ? null : idx,
+            ["target"] = EnemyIndex(cardPlay.Target),
+        });
     }
 
-    [HarmonyPatch(typeof(Hook), nameof(Hook.AfterPotionUsed))]
-    private static class AfterPotionUsedPatch
+    internal static void OnPotionUsed(PotionModel potion, Creature? target)
     {
-        private static void Postfix(PotionModel potion, Creature? target)
-        {
-            Event(new() { ["t"] = "potion", ["id"] = potion.Id.Entry, ["target"] = EnemyIndex(target) });
-        }
+        Event(new() { ["t"] = "potion", ["id"] = potion.Id.Entry, ["target"] = EnemyIndex(target) });
     }
 
-    [HarmonyPatch(typeof(Hook), nameof(Hook.ModifyShuffleOrder))]
-    private static class ShufflePatch
+    internal static void OnShuffle(List<CardModel> cards, bool isInitialShuffle)
     {
-        private static void Postfix(List<CardModel> cards, bool isInitialShuffle)
-        {
-            // The initial shuffle happens before the file opens; the first
-            // snapshot carries that order in its draw pile.
-            if (isInitialShuffle) return;
-            Event(new() { ["t"] = "shuffle", ["cards"] = cards.Select(CardRef).ToList() });
-        }
+        // The initial shuffle happens before the file opens; the first
+        // snapshot carries that order in its draw pile.
+        if (isInitialShuffle) return;
+        Event(new() { ["t"] = "shuffle", ["cards"] = cards.Select(CardRef).ToList() });
     }
 
-    [HarmonyPatch(typeof(Hook), nameof(Hook.AfterPlayerTurnStart))]
-    private static class TurnStartPatch
+    internal static void OnTurnStart(Player player)
     {
-        private static void Postfix(Player player)
-        {
-            Event(new() { ["t"] = "turn_start", ["turn"] = player.PlayerCombatState?.TurnNumber });
-        }
+        Event(new() { ["t"] = "turn_start", ["turn"] = player.PlayerCombatState?.TurnNumber });
     }
 
-    [HarmonyPatch(typeof(Hook), nameof(Hook.AfterCombatEnd))]
-    private static class CombatEndPatch
+    internal static void OnCombatEnd(CombatRoom room)
     {
-        private static void Postfix(CombatRoom room)
-        {
-            var me = LocalContext.GetMe(room.CombatState);
-            Event(new() { ["t"] = "end", ["won"] = me?.Creature.IsAlive ?? false, ["hp"] = me?.Creature.CurrentHp });
-            Close();
-        }
+        var me = LocalContext.GetMe(room.CombatState);
+        Event(new() { ["t"] = "end", ["won"] = me?.Creature.IsAlive ?? false, ["hp"] = me?.Creature.CurrentHp });
+        Close();
+    }
+}
+
+/// The hook listener. Registered once; the game calls these after its own
+/// listeners for every combat.
+public sealed class RecorderModel : AbstractModel
+{
+    public override bool ShouldReceiveCombatHooks => true;
+
+    public override Task AfterCardPlayed(PlayerChoiceContext choiceContext, CardPlay cardPlay)
+    {
+        Guard(() => Recorder.OnCardPlayed(cardPlay));
+        return Task.CompletedTask;
+    }
+
+    public override Task AfterPotionUsed(PotionModel potion, Creature? target)
+    {
+        Guard(() => Recorder.OnPotionUsed(potion, target));
+        return Task.CompletedTask;
+    }
+
+    public override void ModifyShuffleOrder(Player player, List<CardModel> cards, bool isInitialShuffle)
+    {
+        Guard(() => Recorder.OnShuffle(cards, isInitialShuffle));
+    }
+
+    public override Task AfterPlayerTurnStart(PlayerChoiceContext choiceContext, Player player)
+    {
+        Guard(() => Recorder.OnTurnStart(player));
+        return Task.CompletedTask;
+    }
+
+    public override Task AfterCombatEnd(CombatRoom room)
+    {
+        Guard(() => Recorder.OnCombatEnd(room));
+        return Task.CompletedTask;
+    }
+
+    private static void Guard(Action a)
+    {
+        try { a(); }
+        catch (Exception ex) { GD.PrintErr($"[sts2ai] hook failed: {ex.Message}"); }
     }
 }
