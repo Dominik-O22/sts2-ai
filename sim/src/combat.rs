@@ -177,7 +177,11 @@ pub struct Stats {
 #[derive(Clone, Debug)]
 pub struct Combat {
     pub player: PlayerCombat,
+    /// Indexed by `CreatureRef::Enemy`; indices are stable for the combat.
     pub enemies: Vec<Enemy>,
+    /// Enemy indices in the game's slot order (`SortEnemiesBySlotName`):
+    /// turn order and the order the player sees them in.
+    pub order: Vec<usize>,
     /// `CombatState.RoundNumber`, starts at 1.
     pub round: u32,
     pub side: Side,
@@ -262,6 +266,7 @@ impl Combat {
                 turn: 1,
             },
             enemies: Vec::with_capacity(enemies.len()),
+            order: vec![],
             round: 1,
             side: Side::Player,
             asc,
@@ -313,6 +318,14 @@ impl Combat {
             monster.roll_move(&mut self.rngs.monster_ai);
         }
         self.enemies.push(Enemy { creature, monster, reviving: false });
+        // The Eye's "illusion" slot precedes Fogmog's; every other spawn
+        // takes a later slot.
+        let idx = self.enemies.len() - 1;
+        if id == MonsterId::EyeWithTeeth {
+            self.order.insert(0, idx);
+        } else {
+            self.order.push(idx);
+        }
     }
 
     pub fn is_over(&self) -> bool {
@@ -339,8 +352,15 @@ impl Combat {
         }
     }
 
+    /// Enemies still in the game's list, in slot order: alive, or dead but
+    /// about to revive (Illusion).
+    pub fn present_enemies(&self) -> impl Iterator<Item = usize> + '_ {
+        self.order.iter().copied().filter(|&i| self.enemies[i].acts())
+    }
+
+    /// Living enemies in slot order.
     pub fn living_enemies(&self) -> impl Iterator<Item = usize> + '_ {
-        self.enemies.iter().enumerate().filter(|(_, e)| e.creature.alive()).map(|(i, _)| i)
+        self.order.iter().copied().filter(|&i| self.enemies[i].creature.alive())
     }
 
     /// Every card the player has in combat, all piles.
@@ -1084,7 +1104,7 @@ impl Combat {
         subs.extend(self.collect_powers(|p, owner, _| p.after_side_turn_start(owner, side, turn, round)));
         subs.extend(self.relic_after_side_turn_start(side));
         if side == Side::Enemy {
-            subs.extend((0..self.enemies.len()).map(Effect::EnemyAct));
+            subs.extend(self.order.iter().map(|&i| Effect::EnemyAct(i)));
             subs.push(Effect::EndEnemyTurn);
         }
         self.push_front_all(subs);
@@ -1171,7 +1191,8 @@ impl Combat {
             out.extend(p.after_side_turn_end(CreatureRef::Player, side));
         }
         out.extend(self.relic_after_side_turn_end(side));
-        for (i, e) in self.enemies.iter_mut().enumerate() {
+        for &i in &self.order {
+            let e = &mut self.enemies[i];
             if !e.creature.alive() {
                 continue;
             }
@@ -1188,7 +1209,8 @@ impl Combat {
         for p in &self.player.creature.powers {
             out.extend(f(p, CreatureRef::Player, self));
         }
-        for (i, e) in self.enemies.iter().enumerate() {
+        for &i in &self.order {
+            let e = &self.enemies[i];
             if e.creature.alive() {
                 for p in &e.creature.powers {
                     out.extend(f(p, CreatureRef::Enemy(i), self));
@@ -1401,10 +1423,9 @@ impl Combat {
     fn listeners(&self) -> impl Iterator<Item = (CreatureRef, &Power)> {
         let player = self.player.creature.powers.iter().map(|p| (CreatureRef::Player, p));
         let enemies = self
-            .enemies
+            .order
             .iter()
-            .enumerate()
-            .flat_map(|(i, e)| e.creature.powers.iter().map(move |p| (CreatureRef::Enemy(i), p)));
+            .flat_map(|&i| self.enemies[i].creature.powers.iter().map(move |p| (CreatureRef::Enemy(i), p)));
         player.chain(enemies)
     }
 

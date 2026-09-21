@@ -110,8 +110,9 @@ pub fn snapshot_of(c: &Combat) -> Value {
         "discard": pile(&c.player.discard),
         "exhaust": pile(&c.player.exhaust),
         "potions": c.potions.iter().map(|p| p.map(|p| slug(&format!("{p:?}")))).collect::<Vec<_>>(),
-        // The game drops dead creatures from its enemy list.
-        "enemies": c.enemies.iter().enumerate().filter(|(_, e)| e.creature.alive()).map(|(i, e)| json!({
+        // The game drops dead creatures from its enemy list (except reviving
+        // ones) and keeps it in slot order.
+        "enemies": c.present_enemies().map(|i| (i, &c.enemies[i])).map(|(i, e)| json!({
             "id": slug(&format!("{:?}", e.monster.id)),
             "hp": e.creature.hp,
             "max_hp": e.creature.max_hp,
@@ -219,7 +220,7 @@ fn settle(c: &Combat, snap: &Value, depth: u32) -> Result<Combat, String> {
 /// undamaged, which is when the roll is the only difference.
 fn adopt_spawn_hp(c: &mut Combat, snap: &Value, known: usize) -> Result<(), String> {
     let empty = vec![];
-    let living: Vec<usize> = c.living_enemies().collect();
+    let living: Vec<usize> = c.present_enemies().collect();
     for (e, &i) in snap["enemies"].as_array().unwrap_or(&empty).iter().zip(&living) {
         let asc = c.asc;
         let cr = &mut c.enemies[i].creature;
@@ -276,7 +277,7 @@ fn clear_per_play(c: &mut Combat) {
 /// Force the recorded next moves onto the sim's enemies.
 fn force_moves(c: &mut Combat, snap: &Value) -> Result<(), String> {
     let empty = vec![];
-    let living: Vec<usize> = c.living_enemies().collect();
+    let living: Vec<usize> = c.present_enemies().collect();
     for (e, &i) in snap["enemies"].as_array().unwrap_or(&empty).iter().zip(&living) {
         let Some(name) = e["move"].as_str() else { continue };
         if !c.set_enemy_move(i, name) {
@@ -438,7 +439,7 @@ pub fn replay_seeded(text: &str, ids: &Ids, seed: u64) -> Result<Report, String>
                 // Targets index the game's list of living enemies. A kill
                 // shot loses its target before the hook fires; with one
                 // enemy left that is unambiguous.
-                let living: Vec<usize> = c.living_enemies().collect();
+                let living: Vec<usize> = c.present_enemies().collect();
                 let target = match rec["target"].as_u64() {
                     Some(t) => living.get(t as usize).copied(),
                     None if living.len() == 1 && crate::card::def(id).target == crate::types::TargetType::AnyEnemy => Some(living[0]),
@@ -474,7 +475,7 @@ pub fn replay_seeded(text: &str, ids: &Ids, seed: u64) -> Result<Report, String>
                 let Some(slot) = c.potions.iter().position(|p| *p == Some(pid)) else {
                     return Ok(failed(&report, n, format!("game used {name}; sim has no such potion")));
                 };
-                let living: Vec<usize> = c.living_enemies().collect();
+                let living: Vec<usize> = c.present_enemies().collect();
                 let target = rec["target"].as_u64().and_then(|t| living.get(t as usize).copied());
                 c.step(Action::UsePotion { slot, target });
                 report.actions += 1;
@@ -579,7 +580,7 @@ mod tests {
                     _ => None,
                 };
                 // The recorder indexes targets into the living enemy list.
-                let living: Vec<usize> = c.living_enemies().collect();
+                let living: Vec<usize> = c.present_enemies().collect();
                 let living_idx = |t: Option<usize>| t.and_then(|t| living.iter().position(|&l| l == t));
                 let turn_before = c.player.turn;
                 c.step(a);

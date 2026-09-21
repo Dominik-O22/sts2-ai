@@ -102,6 +102,8 @@ pub enum CardId {
     AscendersBane,
     // Tokens.
     GiantRock,
+    // Colorless (Models/CardPools/ColorlessCardPool.cs), as met in recordings.
+    MindBlast,
 }
 
 /// `Models/Powers/<Name>Power.cs`.
@@ -331,6 +333,7 @@ pub const ALL_CARDS: &[CardId] = &[
     CardId::Infection,
     CardId::AscendersBane,
     CardId::GiantRock,
+    CardId::MindBlast,
 ];
 
 pub const ALL_POWERS: &[PowerId] = &[

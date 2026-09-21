@@ -151,6 +151,7 @@ defs! {
     Infection: -1, Status, Special, None, kw = [Unplayable], gen = false;
     AscendersBane: -1, Curse, Special, None, kw = [Unplayable, Ethereal], gen = false;
     GiantRock: 1, Attack, Special, AnyEnemy, gen = false;
+    MindBlast: 1, Attack, Uncommon, AnyEnemy, kw = [Innate], gen = false;
 }
 
 /// The Ironclad card pool in `IroncladCardPool.cs` order, for generation.
@@ -241,7 +242,7 @@ impl Card {
         let c = self.def().cost;
         let cheaper_when_upgraded = matches!(
             self.id,
-            Barricade | BodySlam | Corruption | DarkEmbrace | ExpectAFight | Havoc | Hellraiser
+            Barricade | BodySlam | Corruption | DarkEmbrace | ExpectAFight | Havoc | Hellraiser | MindBlast
                 | InfernalBlade | Stampede | Unmovable
         );
         if self.upgraded && cheaper_when_upgraded {
@@ -375,6 +376,7 @@ impl Card {
             Burn => Vars { damage: 2.0, ..d() },
             Infection => Vars { damage: 3.0, ..d() },
             GiantRock => Vars { damage: pick(16.0, 20.0), ..d() },
+            MindBlast => Vars { magic: 1.0, ..d() },
         };
         v.damage += self.extra_damage;
         v
@@ -447,6 +449,8 @@ impl Card {
             Bludgeon => vec![attack(1)],
             // Damage equal to current block (0 base + 1 x block).
             BodySlam => vec![hit(v.magic * c.player.creature.block as f64, 1, AttackTargets::One(t()))],
+            // MindBlast.cs: damage per card in the draw pile.
+            MindBlast => vec![hit(v.magic * c.player.draw.len() as f64, 1, AttackTargets::One(t()))],
             Brand => vec![
                 lose_hp(v.hp_loss),
                 Effect::Choose { from: Pile::Hand, filter: CardFilter::Any, then: Then::Exhaust, can_skip: false },
