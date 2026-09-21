@@ -1,0 +1,11 @@
+[workspace]
+resolver = "2"
+members = ["sim"]
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
