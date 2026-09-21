@@ -46,6 +46,15 @@ impl Rng {
         unit * max
     }
 
+    /// `rng.NextItem(list)`: a uniform pick, or `None` when empty.
+    pub fn pick<'a, T>(&mut self, items: &'a [T]) -> Option<&'a T> {
+        if items.is_empty() {
+            None
+        } else {
+            Some(&items[self.next_int(items.len())])
+        }
+    }
+
     /// Fisher-Yates, descending index, matching `ListExtensions.UnstableShuffle`.
     pub fn shuffle<T>(&mut self, v: &mut [T]) {
         let mut i = v.len();
@@ -65,6 +74,10 @@ pub struct CombatRngs {
     pub targets: Rng,
     /// Monster HP rolls. The game calls this stream `Niche`.
     pub niche: Rng,
+    /// `CombatCardGeneration`: random cards created in combat.
+    pub card_generation: Rng,
+    /// `CombatCardSelection`: random picks among existing cards.
+    pub card_selection: Rng,
 }
 
 impl CombatRngs {
@@ -74,6 +87,8 @@ impl CombatRngs {
             monster_ai: Rng::new(seed ^ 0x02),
             targets: Rng::new(seed ^ 0x03),
             niche: Rng::new(seed ^ 0x04),
+            card_generation: Rng::new(seed ^ 0x05),
+            card_selection: Rng::new(seed ^ 0x06),
         }
     }
 }

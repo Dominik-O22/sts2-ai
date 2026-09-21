@@ -1,16 +1,16 @@
 //! Combat state and the loop that resolves effects. `Combat/CombatState.cs`,
-//! `Combat/CombatManager.cs`, `Commands/CreatureCmd.cs`, `Commands/CardPileCmd.cs`.
+//! `Combat/CombatManager.cs`, `Commands/CreatureCmd.cs`, `Commands/CardPileCmd.cs`,
+//! `Commands/CardCmd.cs`, `Commands/PowerCmd.cs`.
 
 use std::collections::VecDeque;
 
-use crate::card::Card;
-use crate::effect::{AttackTargets, Effect};
-use crate::ids::{MonsterId, PowerId};
+use crate::card::{Card, Tag, IRONCLAD_POOL};
+use crate::effect::{AttackTargets, CardFilter, Effect, GenPool, Pile, Then};
+use crate::ids::{CardId, MonsterId, PowerId};
 use crate::monster::{Flags, Monster};
-use crate::power::{is_debuff, Power};
+use crate::power::{is_debuff, is_single, Power};
 use crate::rng::CombatRngs;
-use crate::types::{Ascension, CardType, CreatureRef, Keyword, Side, TargetType};
-use crate::types::ValueProp;
+use crate::types::{Ascension, CardType, CreatureRef, Keyword, Side, TargetType, ValueProp};
 
 pub const MAX_HAND: usize = 10;
 pub const BASE_HAND_DRAW: u32 = 5;
@@ -40,7 +40,7 @@ impl Creature {
 }
 
 /// `Entities/Players/PlayerCombatState.cs` plus the player's `Creature`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct PlayerCombat {
     pub creature: Creature,
     pub hand: Vec<Card>,
@@ -48,10 +48,11 @@ pub struct PlayerCombat {
     pub draw: Vec<Card>,
     pub discard: Vec<Card>,
     pub exhaust: Vec<Card>,
-    /// `PileType.Play`: limbo for the card currently resolving.
+    /// `PileType.Play`: limbo for cards currently resolving.
     pub play: Vec<Card>,
     pub energy: i32,
-    pub max_energy: i32,
+    /// `Player.MaxEnergy` before power modifiers.
+    pub base_max_energy: i32,
     /// `PlayerCombatState.TurnNumber`, starts at 1.
     pub turn: u32,
 }
@@ -68,11 +69,21 @@ pub enum Outcome {
     Lost,
 }
 
-/// Player inputs. `GameActions/PlayCardAction.cs`, `EndPlayerTurnAction.cs`.
+/// Player inputs. `GameActions/PlayCardAction.cs`, `EndPlayerTurnAction.cs`,
+/// plus answering a pending card choice.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
     PlayCard { hand_idx: usize, target: Option<usize> },
     EndTurn,
+    /// Index into `Pending::options`.
+    Choose(usize),
+}
+
+/// A suspended card selection (`CardSelectCmd`), waiting for `Action::Choose`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Pending {
+    pub options: Vec<u32>,
+    pub then: Then,
 }
 
 /// A monster to place in the encounter.
@@ -80,6 +91,21 @@ pub enum Action {
 pub struct EnemySpec {
     pub id: MonsterId,
     pub flags: Flags,
+}
+
+/// The parts of `CombatManager.History` that cards and powers read.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Stats {
+    pub exhausted_this_turn: u32,
+    /// Player took unblocked damage this turn.
+    pub hp_lost_this_turn: bool,
+    /// Unblocked hits the player has taken this combat (Tear Asunder).
+    pub unblocked_hits_taken: u32,
+    /// Uids of cards that gained the player block this turn (Unmovable).
+    pub block_plays_this_turn: Vec<u32>,
+    pub last_drawn: Option<u32>,
+    /// Rupture: Strength owed once the current card play finishes.
+    pub rupture_pending: i32,
 }
 
 #[derive(Clone, Debug)]
@@ -92,6 +118,8 @@ pub struct Combat {
     pub asc: Ascension,
     pub rngs: CombatRngs,
     pub outcome: Option<Outcome>,
+    pub pending: Option<Pending>,
+    pub stats: Stats,
     queue: VecDeque<Effect>,
     next_uid: u32,
 }
@@ -114,8 +142,8 @@ impl Combat {
         let mut draw: Vec<Card> = deck
             .iter()
             .map(|c| {
-                let mut c = c.clone();
-                c.uid = next_uid;
+                let mut c = Card::new(next_uid, c.id, c.upgraded);
+                c.extra_damage = 0.0;
                 next_uid += 1;
                 c
             })
@@ -128,7 +156,7 @@ impl Combat {
             let hp = roll_unique_hp(lo, hi, &placed, &mut rngs.niche);
             let mut creature = Creature { hp, max_hp: hp, block: 0, powers: vec![] };
             for (id, amount) in Monster::innate_powers(spec.id, asc) {
-                creature.powers.push(Power { id, amount, skip_next_tick: false });
+                creature.powers.push(Power::new(id, amount));
             }
             placed.push(Enemy { creature, monster: Monster::new(spec.id, asc, spec.flags) });
         }
@@ -142,7 +170,7 @@ impl Combat {
                 exhaust: vec![],
                 play: vec![],
                 energy: 0,
-                max_energy,
+                base_max_energy: max_energy,
                 turn: 1,
             },
             enemies: placed,
@@ -151,6 +179,8 @@ impl Combat {
             asc,
             rngs,
             outcome: None,
+            pending: None,
+            stats: Stats::default(),
             queue: VecDeque::new(),
             next_uid,
         };
@@ -181,10 +211,55 @@ impl Combat {
         self.enemies.iter().enumerate().filter(|(_, e)| e.creature.alive()).map(|(i, _)| i)
     }
 
+    /// Every card the player has in combat, all piles.
+    pub fn all_cards(&self) -> impl Iterator<Item = &Card> {
+        let p = &self.player;
+        p.hand.iter().chain(&p.draw).chain(&p.discard).chain(&p.exhaust).chain(&p.play)
+    }
+
+    pub fn find_card(&self, uid: u32) -> Option<&Card> {
+        self.all_cards().find(|c| c.uid == uid)
+    }
+
+    fn find_card_mut(&mut self, uid: u32) -> Option<&mut Card> {
+        let p = &mut self.player;
+        p.hand
+            .iter_mut()
+            .chain(&mut p.draw)
+            .chain(&mut p.discard)
+            .chain(&mut p.exhaust)
+            .chain(&mut p.play)
+            .find(|c| c.uid == uid)
+    }
+
+    /// `PlayerCombatState.MaxEnergy` through `Hook.ModifyMaxEnergy`.
+    pub fn max_energy(&self) -> i32 {
+        self.player.creature.powers.iter().fold(self.player.base_max_energy, |acc, p| p.modify_max_energy(acc))
+    }
+
+    /// `CardEnergyCost.GetWithModifiers(All)`: local modifiers then global
+    /// ones (Corruption, Free Attack). X-cost cards report `-1`.
+    pub fn cost(&self, card: &Card) -> i32 {
+        let local = card.local_cost();
+        if local < 0 || card.def().x_cost {
+            return local;
+        }
+        if self.player.creature.powers.iter().any(|p| p.free_card(card.ty())) {
+            return 0;
+        }
+        local
+    }
+
     /// Every action the player may take right now.
     pub fn legal_actions(&self) -> Vec<Action> {
         let mut out = vec![];
-        if self.is_over() || self.side != Side::Player {
+        if self.is_over() {
+            return out;
+        }
+        if let Some(p) = &self.pending {
+            return (0..p.options.len()).map(Action::Choose).collect();
+        }
+        if self.side != Side::Player {
             return out;
         }
         for (i, card) in self.player.hand.iter().enumerate() {
@@ -206,42 +281,65 @@ impl Combat {
 
     /// `CardModel.CanPlay` for the reasons we model.
     fn can_play(&self, card: &Card) -> bool {
-        if card.has(Keyword::Unplayable) || card.def().cost < 0 {
+        if card.has(Keyword::Unplayable) {
             return false;
         }
-        self.player.energy >= card.cost()
+        if card.def().x_cost {
+            return true;
+        }
+        let cost = self.cost(card);
+        cost >= 0 && self.player.energy >= cost
     }
 
     /// Apply one player action and resolve everything it triggers.
     pub fn step(&mut self, action: Action) {
         assert!(!self.is_over(), "step after combat ended");
-        assert_eq!(self.side, Side::Player, "not the player's turn");
         match action {
+            Action::Choose(i) => {
+                let p = self.pending.take().expect("no pending choice");
+                let uid = p.options[i];
+                self.queue.push_front(then_effect(p.then, uid));
+            }
             Action::PlayCard { hand_idx, target } => {
+                assert!(self.pending.is_none() && self.side == Side::Player, "not accepting card plays");
                 let card = self.player.hand[hand_idx].clone();
                 assert!(self.can_play(&card), "illegal card play");
-                let target = match card.def().target {
-                    TargetType::AnyEnemy => {
-                        let t = target.expect("target required");
-                        assert!(self.enemies[t].creature.alive(), "dead target");
-                        Some(CreatureRef::Enemy(t))
-                    }
-                    _ => None,
-                };
-                // PlayCardAction: spend energy, then run the play pipeline.
-                self.player.energy -= card.cost();
+                let target = self.resolve_target(&card, target);
+                // PlayCardAction: spend energy (all of it for X cards), then play.
+                if card.def().x_cost {
+                    self.player.hand[hand_idx].captured_x = self.player.energy;
+                    self.player.energy = 0;
+                } else {
+                    self.player.energy -= self.cost(&card);
+                }
                 let card = self.player.hand.remove(hand_idx);
-                self.player.play.push(card.clone());
-                self.queue.push_back(Effect::PlayCard { uid: card.uid, target });
+                let uid = card.uid;
+                self.player.play.push(card);
+                self.queue.push_back(Effect::PlayCard { uid, target });
             }
-            Action::EndTurn => self.queue.push_back(Effect::EndPlayerTurn),
+            Action::EndTurn => {
+                assert!(self.pending.is_none() && self.side == Side::Player, "not accepting end turn");
+                self.queue.push_back(Effect::EndPlayerTurn);
+            }
         }
         self.run();
     }
 
-    /// Drain the queue. Stops when combat ends.
+    fn resolve_target(&self, card: &Card, target: Option<usize>) -> Option<CreatureRef> {
+        match card.def().target {
+            TargetType::AnyEnemy => {
+                let t = target.expect("target required");
+                assert!(self.enemies[t].creature.alive(), "dead target");
+                Some(CreatureRef::Enemy(t))
+            }
+            _ => None,
+        }
+    }
+
+    /// Drain the queue. Stops when combat ends or a choice is pending.
     fn run(&mut self) {
-        while let Some(e) = self.queue.pop_front() {
+        while self.pending.is_none() {
+            let Some(e) = self.queue.pop_front() else { break };
             if self.is_over() {
                 self.queue.clear();
                 break;
@@ -268,72 +366,265 @@ impl Combat {
                         AttackTargets::AllOpponents => self.opponents_of(dealer),
                         AttackTargets::RandomOpponent => {
                             let opts = self.opponents_of(dealer);
-                            if opts.is_empty() {
-                                vec![]
-                            } else {
-                                vec![opts[self.rngs.targets.next_int(opts.len())]]
-                            }
+                            self.rngs.targets.pick(&opts).copied().into_iter().collect()
                         }
                     };
                     for t in ts {
-                        subs.push(Effect::Damage { target: t, amount: base, props, dealer: Some(dealer) });
+                        subs.push(Effect::Damage { target: t, amount: base, props, dealer: Some(dealer), card });
                     }
                 }
-                let _ = card;
                 self.push_front_all(subs);
             }
-            Effect::Damage { target, amount, props, dealer } => {
+            Effect::Damage { target, amount, props, dealer, card } => {
                 if !self.creature(target).alive() {
                     return;
                 }
-                self.damage(target, amount, props, dealer);
+                let subs = self.damage(target, amount, props, dealer, card);
+                self.push_front_all(subs);
                 self.check_win();
             }
-            Effect::GainBlock { target, amount, props, card: _ } => {
-                self.gain_block(target, amount, props, CreatureRef::Player);
+            Effect::DamageAllEnemies { amount, props, dealer } => {
+                let subs: Vec<Effect> = self
+                    .living_enemies()
+                    .map(|i| Effect::Damage { target: CreatureRef::Enemy(i), amount, props, dealer: Some(dealer), card: None })
+                    .collect();
+                self.push_front_all(subs);
+            }
+            Effect::GainBlock { target, amount, props, card } => {
+                let subs = self.gain_block(target, amount, props, card);
+                self.push_front_all(subs);
+            }
+            Effect::Heal { target, amount } => {
+                let c = self.creature_mut(target);
+                c.hp = (c.hp + amount as i32).min(c.max_hp);
+            }
+            Effect::GainMaxHp { target, amount } => {
+                let c = self.creature_mut(target);
+                c.max_hp += amount;
+                c.hp += amount;
+            }
+            Effect::GainEnergy { amount } => {
+                // PlayerCmd.GainEnergy through Hook.ModifyEnergyGain.
+                if amount > 0 {
+                    let n = self.player.creature.powers.iter().fold(amount, |acc, p| p.modify_energy_gain(acc));
+                    if n > 0 {
+                        self.player.energy += n;
+                    }
+                }
             }
             Effect::ApplyPower { target, id, amount, applier } => {
-                self.apply_power(target, id, amount, applier);
+                let subs = self.apply_power(target, id, amount, applier);
+                self.push_front_all(subs);
+            }
+            Effect::RemovePower { target, id } => {
+                self.creature_mut(target).powers.retain(|p| p.id != id);
             }
             Effect::TickDuration { target, id } => {
                 let c = self.creature_mut(target);
                 if let Some(p) = c.powers.iter_mut().find(|p| p.id == id) {
                     if p.skip_next_tick {
                         p.skip_next_tick = false;
-                    } else {
-                        p.amount -= 1;
-                        if p.should_remove() {
-                            c.powers.retain(|p| p.id != id);
+                        return;
+                    }
+                }
+                self.modify_power(target, id, -1);
+            }
+            Effect::DecrementPower { target, id } => self.modify_power(target, id, -1),
+            Effect::Draw { count, from_hand_draw } => {
+                let subs = self.draw(count, from_hand_draw);
+                self.push_front_all(subs);
+            }
+            Effect::Exhaust { uid, ethereal } => {
+                let subs = self.exhaust(uid, ethereal);
+                self.push_front_all(subs);
+            }
+            Effect::ExhaustHand { filter } => {
+                let uids: Vec<u32> = self.player.hand.iter().filter(|c| filter_ok(filter, c)).map(|c| c.uid).collect();
+                self.push_front_all(uids.into_iter().map(|uid| Effect::Exhaust { uid, ethereal: false }).collect());
+            }
+            Effect::ExhaustRandomFromHand { filter, then_add_damage_to } => {
+                let uids: Vec<u32> = self.player.hand.iter().filter(|c| filter_ok(filter, c)).map(|c| c.uid).collect();
+                if let Some(&uid) = self.rngs.card_selection.pick(&uids) {
+                    // Thrash: absorb the exhausted attack's damage first.
+                    if let Some(thrash) = then_add_damage_to {
+                        let dmg = self.find_card(uid).map_or(0.0, |k| k.vars().damage);
+                        if let Some(t) = self.find_card_mut(thrash) {
+                            t.extra_damage += dmg;
                         }
+                    }
+                    self.queue.push_front(Effect::Exhaust { uid, ethereal: false });
+                }
+            }
+            Effect::MoveCard { uid, to } => {
+                if let Some(card) = self.take_card(uid) {
+                    self.put_card(card, to);
+                }
+            }
+            Effect::Upgrade { uid } => {
+                if let Some(c) = self.find_card_mut(uid) {
+                    if c.upgradable() {
+                        c.upgraded = true;
                     }
                 }
             }
-            Effect::Draw { count } => self.draw(count),
-            Effect::Exhaust { uid } => {
-                if let Some(card) = self.take_card(uid) {
-                    self.player.exhaust.push(card);
+            Effect::UpgradeHand => {
+                for c in &mut self.player.hand {
+                    if c.upgradable() {
+                        c.upgraded = true;
+                    }
+                }
+            }
+            Effect::TransformHand { filter, into, upgraded } => {
+                for c in &mut self.player.hand {
+                    if filter_ok(filter, c) {
+                        *c = Card::new(c.uid, into, upgraded);
+                    }
+                }
+            }
+            Effect::GenerateCard { id, upgraded, to, free_this_turn } => {
+                let mut card = Card::new(self.new_uid(), id, upgraded);
+                if free_this_turn {
+                    card.cost_this_turn = Some(0);
+                }
+                self.put_card(card, to);
+            }
+            Effect::GenerateRandom { pool, count, to, free_this_turn, distinct } => {
+                let options: Vec<CardId> = IRONCLAD_POOL
+                    .iter()
+                    .copied()
+                    .filter(|id| {
+                        let d = crate::card::def(*id);
+                        d.generatable && (pool != GenPool::IroncladAttacks || d.ty == CardType::Attack)
+                    })
+                    .collect();
+                let mut chosen = Vec::new();
+                if distinct {
+                    let mut opts = options.clone();
+                    self.rngs.card_generation.shuffle(&mut opts);
+                    chosen.extend(opts.into_iter().take(count as usize));
+                } else {
+                    for _ in 0..count {
+                        if let Some(&id) = self.rngs.card_generation.pick(&options) {
+                            chosen.push(id);
+                        }
+                    }
+                }
+                let subs = chosen
+                    .into_iter()
+                    .map(|id| Effect::GenerateCard { id, upgraded: false, to, free_this_turn })
+                    .collect();
+                self.push_front_all(subs);
+            }
+            Effect::Choose { from, filter, then } => {
+                let pile = match from {
+                    Pile::Hand => &self.player.hand,
+                    Pile::Discard => &self.player.discard,
+                    Pile::Exhaust => &self.player.exhaust,
+                    Pile::DrawTop | Pile::DrawBottom => &self.player.draw,
+                };
+                let options: Vec<u32> = pile.iter().filter(|c| filter_ok(filter, c)).map(|c| c.uid).collect();
+                if !options.is_empty() {
+                    self.pending = Some(Pending { options, then });
                 }
             }
             Effect::PlayCard { uid, target } => {
-                let card = self.player.play.iter().find(|c| c.uid == uid).cloned().expect("card in play");
-                let mut subs = card.on_play(target);
+                let Some(card) = self.find_card(uid) else { return };
+                let plays = 1 + self.player.creature.powers.iter().map(|p| p.extra_plays(card.ty())).sum::<u32>();
+                // OneTwoPunch decrements once per modified play.
+                if plays > 1 {
+                    self.modify_power(CreatureRef::Player, PowerId::OneTwoPunch, -1);
+                }
+                let mut subs: Vec<Effect> = (0..plays).map(|_| Effect::CardPlayIter { uid, target }).collect();
                 subs.push(Effect::FinishCardPlay { uid });
                 self.push_front_all(subs);
             }
+            Effect::CardPlayIter { uid, target } => {
+                let Some(card) = self.find_card(uid).cloned() else { return };
+                let mut subs = self.before_card_played(&card);
+                subs.extend(card.on_play(self, target));
+                subs.push(Effect::AfterCardPlayed { uid });
+                self.push_front_all(subs);
+            }
+            Effect::AfterCardPlayed { uid } => {
+                let Some(card) = self.find_card(uid).cloned() else { return };
+                let subs = self.after_card_played(&card);
+                self.push_front_all(subs);
+            }
             Effect::FinishCardPlay { uid } => {
-                // CardModel.GetResultPileTypeForCardPlay.
+                // Rampage/Thrash growth after the play, Rupture's deferred Strength.
+                if let Some(c) = self.find_card_mut(uid) {
+                    if c.id == CardId::Rampage {
+                        c.extra_damage += c.vars().magic;
+                    }
+                }
+                let owed = std::mem::take(&mut self.stats.rupture_pending);
+                if owed > 0 {
+                    self.queue.push_front(Effect::ApplyPower {
+                        target: CreatureRef::Player,
+                        id: PowerId::Strength,
+                        amount: owed,
+                        applier: Some(CreatureRef::Player),
+                    });
+                }
+                // CardModel.GetResultPileTypeForCardPlay + Corruption.
                 if let Some(card) = self.take_card(uid) {
-                    if card.def().ty == CardType::Power {
+                    let corruption = self.player.creature.power(PowerId::Corruption).is_some();
+                    if card.ty() == CardType::Power {
                         // Powers leave combat (PileType.None).
-                    } else if card.has(Keyword::Exhaust) {
+                    } else if card.has(Keyword::Exhaust)
+                        || card.exhaust_on_next_play
+                        || (corruption && card.ty() == CardType::Skill)
+                    {
                         self.player.exhaust.push(card);
+                        let subs = self.after_card_exhausted(uid, false);
+                        self.push_front_all(subs);
                     } else {
                         self.player.discard.push(card);
                     }
                 }
             }
+            Effect::CardStep { uid, target, step } => {
+                let Some(card) = self.find_card(uid).cloned() else { return };
+                let subs = card.step(self, target, step);
+                self.push_front_all(subs);
+            }
+            Effect::AutoPlay { uid, force_exhaust } => {
+                let subs = self.auto_play(uid, force_exhaust);
+                self.push_front_all(subs);
+            }
+            Effect::AutoPlayFromDrawTop { force_exhaust } => {
+                self.reshuffle_if_needed();
+                if !self.player.draw.is_empty() {
+                    let card = self.player.draw.remove(0);
+                    let uid = card.uid;
+                    self.player.play.push(card);
+                    self.queue.push_front(Effect::AutoPlay { uid, force_exhaust });
+                }
+            }
+            Effect::AutoPlayRandomAttack => {
+                let uids: Vec<u32> =
+                    self.player.hand.iter().filter(|c| filter_ok(CardFilter::PlayableAttack, c)).map(|c| c.uid).collect();
+                if let Some(&uid) = self.rngs.shuffle.pick(&uids) {
+                    self.queue.push_front(Effect::AutoPlay { uid, force_exhaust: false });
+                }
+            }
+            Effect::AggressionPull { count } => {
+                let mut uids: Vec<u32> =
+                    self.player.discard.iter().filter(|c| c.ty() == CardType::Attack).map(|c| c.uid).collect();
+                self.rngs.card_selection.shuffle(&mut uids);
+                for uid in uids.into_iter().take(count as usize) {
+                    if let Some(mut card) = self.take_card(uid) {
+                        if card.upgradable() {
+                            card.upgraded = true;
+                        }
+                        self.player.hand.push(card);
+                    }
+                }
+            }
             Effect::StartTurn(side) => self.start_turn(side),
             Effect::EndPlayerTurn => self.end_player_turn(),
+            Effect::TurnEndInHand => self.turn_end_in_hand(),
+            Effect::FlushHand => self.flush_hand(),
             Effect::EnemyAct(i) => {
                 if self.enemies[i].creature.alive() {
                     let subs = self.enemies[i].monster.perform(CreatureRef::Enemy(i), self.asc);
@@ -362,6 +653,9 @@ impl Combat {
     /// `CombatManager.StartTurn`.
     fn start_turn(&mut self, side: Side) {
         self.side = side;
+        let mut subs = Vec::new();
+        // Hook.BeforeSideTurnStart.
+        subs.extend(self.collect_powers(|p, owner, c| p.before_side_turn_start(owner, side, c.round)));
         match side {
             Side::Player => {
                 // Enemies roll their next move (PrepareForNextTurn).
@@ -370,45 +664,101 @@ impl Combat {
                         self.enemies[i].monster.roll_move(&mut self.rngs.monster_ai);
                     }
                 }
-                // Creature.AfterTurnStart: block clears except on player turn 1.
-                if self.player.turn != 1 {
+                // Creature.AfterTurnStart: block clears except on player turn 1,
+                // and unless a power (Barricade) prevents it.
+                if self.player.turn != 1 && self.should_clear_block(CreatureRef::Player) {
                     self.player.creature.block = 0;
                 }
-                // SetupPlayerTurn: energy, then draw.
-                self.player.energy = self.player.max_energy;
-                self.queue.push_front(Effect::Draw { count: BASE_HAND_DRAW });
+                // SetupPlayerTurn: energy, then draw (innate on top on turn 1).
+                self.player.energy = self.max_energy();
+                let mut draw = BASE_HAND_DRAW;
+                if self.player.turn == 1 {
+                    let innate: Vec<usize> = self
+                        .player
+                        .draw
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, c)| c.has(Keyword::Innate))
+                        .map(|(i, _)| i)
+                        .collect();
+                    let n = innate.len() as u32;
+                    for (k, i) in innate.into_iter().enumerate() {
+                        let c = self.player.draw.remove(i);
+                        self.player.draw.insert(k, c);
+                    }
+                    draw = draw.max(n).min(MAX_HAND as u32);
+                }
+                subs.push(Effect::Draw { count: draw, from_hand_draw: true });
+                // Hook.AfterPlayerTurnStart.
+                subs.extend(self.collect_powers(|p, owner, _| {
+                    if owner == CreatureRef::Player {
+                        p.after_player_turn_start(owner)
+                    } else {
+                        vec![]
+                    }
+                }));
             }
             Side::Enemy => {
-                for e in &mut self.enemies {
-                    if e.creature.alive() {
-                        e.creature.block = 0;
+                for i in 0..self.enemies.len() {
+                    let r = CreatureRef::Enemy(i);
+                    if self.enemies[i].creature.alive() && self.should_clear_block(r) {
+                        self.enemies[i].creature.block = 0;
                     }
                 }
-                let mut subs: Vec<Effect> = (0..self.enemies.len()).map(Effect::EnemyAct).collect();
-                subs.push(Effect::EndEnemyTurn);
-                self.push_front_all(subs);
             }
         }
+        // Hook.AfterSideTurnStart.
+        let (turn, round) = (self.player.turn, self.round);
+        subs.extend(self.collect_powers(|p, owner, _| p.after_side_turn_start(owner, side, turn, round)));
+        if side == Side::Enemy {
+            subs.extend((0..self.enemies.len()).map(Effect::EnemyAct));
+            subs.push(Effect::EndEnemyTurn);
+        }
+        self.push_front_all(subs);
     }
 
-    /// `EndPlayerTurnPhaseOneInternal` + `PhaseTwoInternal` + `SwitchSides`.
+    /// `EndPlayerTurnPhaseOneInternal`, first half: the AutoPostPlay phase
+    /// and pre-flush hooks. The rest continues in `TurnEndInHand` and
+    /// `FlushHand`, queued after these effects so they fully resolve first.
     fn end_player_turn(&mut self) {
-        // Ethereal cards exhaust first.
-        let ethereal: Vec<u32> =
-            self.player.hand.iter().filter(|c| c.has(Keyword::Ethereal)).map(|c| c.uid).collect();
-        for uid in ethereal {
-            if let Some(card) = self.take_card(uid) {
-                self.player.exhaust.push(card);
+        let mut subs = Vec::new();
+        // AutoPostPlay phase: Stampede, Howl From Beyond in the exhaust pile.
+        subs.extend(self.collect_powers(|p, owner, _| if owner == CreatureRef::Player { p.after_auto_post_play() } else { vec![] }));
+        let howls: Vec<u32> = self.player.exhaust.iter().filter(|c| c.id == CardId::HowlFromBeyond).map(|c| c.uid).collect();
+        subs.extend(howls.into_iter().map(|uid| Effect::AutoPlay { uid, force_exhaust: false }));
+        // BeforeSideTurnEndEarly (Plating).
+        subs.extend(self.collect_powers(|p, owner, _| p.before_side_turn_end_early(owner, Side::Player)));
+        subs.push(Effect::TurnEndInHand);
+        self.push_front_all(subs);
+    }
+
+    /// `DoTurnEnd`: ethereal cards exhaust, then turn-end-in-hand effects.
+    fn turn_end_in_hand(&mut self) {
+        let ethereal: Vec<u32> = self.player.hand.iter().filter(|c| c.has(Keyword::Ethereal)).map(|c| c.uid).collect();
+        let mut subs: Vec<Effect> = ethereal.into_iter().map(|uid| Effect::Exhaust { uid, ethereal: true }).collect();
+        for c in &self.player.hand {
+            if c.id == CardId::Burn {
+                subs.push(Effect::Damage {
+                    target: CreatureRef::Player,
+                    amount: c.vars().damage,
+                    props: ValueProp::UNPOWERED.or(ValueProp::MOVE),
+                    dealer: None,
+                    card: Some(c.uid),
+                });
             }
         }
-        // FlushPlayerHand: discard everything not retained.
-        let (retain, flush): (Vec<Card>, Vec<Card>) =
-            self.player.hand.drain(..).partition(|c| c.has(Keyword::Retain));
+        subs.push(Effect::FlushHand);
+        self.push_front_all(subs);
+    }
+
+    /// `EndPlayerTurnPhaseTwoInternal` + `SwitchSides`: discard the hand,
+    /// cleanup, end-of-turn hooks, then the enemy turn.
+    fn flush_hand(&mut self) {
+        let (retain, flush): (Vec<Card>, Vec<Card>) = self.player.hand.drain(..).partition(|c| c.has(Keyword::Retain));
         self.player.hand = retain;
         self.player.discard.extend(flush);
         self.end_of_turn_cleanup();
-        let hooks = self.after_side_turn_end(Side::Player);
-        let mut subs = hooks;
+        let mut subs = self.after_side_turn_end(Side::Player);
         subs.push(Effect::StartTurn(Side::Enemy));
         self.push_front_all(subs);
     }
@@ -419,6 +769,9 @@ impl Combat {
         let mut subs = self.after_side_turn_end(Side::Enemy);
         self.round += 1;
         self.player.turn += 1;
+        self.stats.exhausted_this_turn = 0;
+        self.stats.hp_lost_this_turn = false;
+        self.stats.block_plays_this_turn.clear();
         subs.push(Effect::StartTurn(Side::Player));
         self.push_front_all(subs);
     }
@@ -435,20 +788,40 @@ impl Combat {
 
     /// `Hook.AfterTurnEnd` dispatching `AfterSideTurnEnd` to every listener
     /// in the game's iteration order: player powers, then each enemy's powers.
-    fn after_side_turn_end(&self, side: Side) -> Vec<Effect> {
+    fn after_side_turn_end(&mut self, side: Side) -> Vec<Effect> {
         let mut out = vec![];
-        for p in &self.player.creature.powers {
+        for p in &mut self.player.creature.powers {
             out.extend(p.after_side_turn_end(CreatureRef::Player, side));
         }
-        for (i, e) in self.enemies.iter().enumerate() {
+        for (i, e) in self.enemies.iter_mut().enumerate() {
             if !e.creature.alive() {
                 continue;
             }
-            for p in &e.creature.powers {
+            for p in &mut e.creature.powers {
                 out.extend(p.after_side_turn_end(CreatureRef::Enemy(i), side));
             }
         }
         out
+    }
+
+    /// Collect effects from a read-only power hook, in listener order.
+    fn collect_powers(&self, f: impl Fn(&Power, CreatureRef, &Combat) -> Vec<Effect>) -> Vec<Effect> {
+        let mut out = vec![];
+        for p in &self.player.creature.powers {
+            out.extend(f(p, CreatureRef::Player, self));
+        }
+        for (i, e) in self.enemies.iter().enumerate() {
+            if e.creature.alive() {
+                for p in &e.creature.powers {
+                    out.extend(f(p, CreatureRef::Enemy(i), self));
+                }
+            }
+        }
+        out
+    }
+
+    fn should_clear_block(&self, r: CreatureRef) -> bool {
+        self.creature(r).powers.iter().all(|p| p.should_clear_block(r, r))
     }
 
     /// `CombatManager.CheckWinCondition` / `IsEnding` plus the loss branch of
@@ -464,27 +837,132 @@ impl Combat {
         }
     }
 
+    // ---- card play hooks ----------------------------------------------------
+
+    /// `Hook.BeforeCardPlayed`: Free Attack decrement, Stomp cost reduction.
+    fn before_card_played(&mut self, card: &Card) -> Vec<Effect> {
+        let mut out = vec![];
+        if card.ty() == CardType::Attack {
+            if self.player.creature.power(PowerId::FreeAttack).is_some() {
+                out.push(Effect::DecrementPower { target: CreatureRef::Player, id: PowerId::FreeAttack });
+            }
+            for c in self.player.hand.iter_mut().filter(|c| c.id == CardId::Stomp) {
+                let cur = c.cost_this_turn.unwrap_or(c.base_cost());
+                c.cost_this_turn = Some((cur - 1).max(0));
+            }
+        }
+        out
+    }
+
+    /// `Hook.AfterCardPlayed`.
+    fn after_card_played(&mut self, card: &Card) -> Vec<Effect> {
+        let mut out = vec![];
+        for p in &mut self.player.creature.powers {
+            out.extend(p.after_card_played(CreatureRef::Player, card.ty(), card.id, card.upgraded));
+        }
+        out
+    }
+
+    /// `Hook.AfterCardExhausted`: powers, then cards with self-hooks (Drum of Battle).
+    fn after_card_exhausted(&mut self, uid: u32, ethereal: bool) -> Vec<Effect> {
+        self.stats.exhausted_this_turn += 1;
+        let mut out = vec![];
+        for p in &mut self.player.creature.powers {
+            out.extend(p.after_card_exhausted(CreatureRef::Player, ethereal));
+        }
+        if let Some(c) = self.find_card(uid) {
+            if c.id == CardId::DrumOfBattle {
+                out.push(Effect::GainEnergy { amount: c.vars().energy });
+            }
+        }
+        out
+    }
+
+    /// `CardCmd.AutoPlay`.
+    fn auto_play(&mut self, uid: u32, force_exhaust: bool) -> Vec<Effect> {
+        let Some(card) = self.find_card(uid).cloned() else { return vec![] };
+        if !self.player.creature.alive() {
+            return vec![];
+        }
+        if card.has(Keyword::Unplayable) {
+            // MoveToResultPileWithoutPlaying.
+            if let Some(c) = self.take_card(uid) {
+                if c.ty() == CardType::Power {
+                    self.player.discard.push(c);
+                } else if c.has(Keyword::Exhaust) {
+                    self.player.exhaust.push(c);
+                } else {
+                    self.player.discard.push(c);
+                }
+            }
+            return vec![];
+        }
+        let target = match card.def().target {
+            TargetType::AnyEnemy => {
+                let opts: Vec<usize> = self.living_enemies().collect();
+                match self.rngs.targets.pick(&opts) {
+                    Some(&i) => Some(CreatureRef::Enemy(i)),
+                    None => return vec![],
+                }
+            }
+            _ => None,
+        };
+        if let Some(c) = self.take_card(uid) {
+            let mut c = c;
+            if c.def().x_cost {
+                c.captured_x = self.player.energy;
+            }
+            c.exhaust_on_next_play = force_exhaust || c.exhaust_on_next_play;
+            self.player.play.push(c);
+        }
+        vec![Effect::PlayCard { uid, target }]
+    }
+
     // ---- piles -------------------------------------------------------------
 
+    fn reshuffle_if_needed(&mut self) {
+        if self.player.draw.is_empty() && !self.player.discard.is_empty() {
+            // CardPileCmd.Shuffle: discard becomes the draw pile.
+            let mut cards = std::mem::take(&mut self.player.discard);
+            cards.sort_by_key(|c| (c.id, c.upgraded));
+            self.rngs.shuffle.shuffle(&mut cards);
+            self.player.draw = cards;
+        }
+    }
+
     /// `CardPileCmd.Draw`: per card, reshuffle if needed, take the top.
-    fn draw(&mut self, count: u32) {
+    /// Returns hook effects (Hellraiser auto-plays drawn Strikes).
+    fn draw(&mut self, count: u32, from_hand_draw: bool) -> Vec<Effect> {
+        if !self.player.creature.powers.iter().all(|p| p.should_draw(from_hand_draw)) {
+            return vec![];
+        }
+        let hellraiser = self.player.creature.power(PowerId::Hellraiser).is_some();
+        let mut out = vec![];
         for _ in 0..count {
             if self.player.hand.len() >= MAX_HAND {
                 break;
             }
+            self.reshuffle_if_needed();
             if self.player.draw.is_empty() {
-                if self.player.discard.is_empty() {
-                    break;
-                }
-                // CardPileCmd.Shuffle: discard becomes the draw pile.
-                let mut cards = std::mem::take(&mut self.player.discard);
-                cards.sort_by_key(|c| (c.id, c.upgraded));
-                self.rngs.shuffle.shuffle(&mut cards);
-                self.player.draw = cards;
+                break;
             }
             let card = self.player.draw.remove(0);
+            let uid = card.uid;
+            let strike = card.has_tag(Tag::Strike);
             self.player.hand.push(card);
+            self.stats.last_drawn = Some(uid);
+            if hellraiser && strike {
+                out.push(Effect::AutoPlay { uid, force_exhaust: false });
+            }
         }
+        out
+    }
+
+    /// `CardCmd.Exhaust`.
+    fn exhaust(&mut self, uid: u32, ethereal: bool) -> Vec<Effect> {
+        let Some(card) = self.take_card(uid) else { return vec![] };
+        self.player.exhaust.push(card);
+        self.after_card_exhausted(uid, ethereal)
     }
 
     /// Remove a card from whichever combat pile holds it.
@@ -498,7 +976,22 @@ impl Combat {
         None
     }
 
-    #[allow(dead_code)]
+    fn put_card(&mut self, card: Card, to: Pile) {
+        match to {
+            Pile::Hand => {
+                if self.player.hand.len() < MAX_HAND {
+                    self.player.hand.push(card);
+                } else {
+                    self.player.discard.push(card);
+                }
+            }
+            Pile::DrawTop => self.player.draw.insert(0, card),
+            Pile::DrawBottom => self.player.draw.push(card),
+            Pile::Discard => self.player.discard.push(card),
+            Pile::Exhaust => self.player.exhaust.push(card),
+        }
+    }
+
     fn new_uid(&mut self) -> u32 {
         let u = self.next_uid;
         self.next_uid += 1;
@@ -521,45 +1014,38 @@ impl Combat {
 
     /// `Hook.ModifyDamage`: one full additive pass, one multiplicative pass,
     /// then a cap pass (none modelled yet), floored at 0.
-    pub fn modify_damage(
-        &self,
-        target: CreatureRef,
-        dealer: Option<CreatureRef>,
-        amount: f64,
-        props: ValueProp,
-    ) -> f64 {
+    pub fn modify_damage(&self, target: CreatureRef, dealer: Option<CreatureRef>, amount: f64, props: ValueProp) -> f64 {
+        let (dv, dc) = match dealer {
+            Some(d) => (self.creature(d).power_amount(PowerId::Vulnerable), self.creature(d).power_amount(PowerId::Cruelty)),
+            None => (0, 0),
+        };
         let mut num = amount;
         for (owner, p) in self.listeners() {
             num += p.modify_damage_additive(owner, dealer, props);
         }
         for (owner, p) in self.listeners() {
-            num *= p.modify_damage_multiplicative(owner, target, dealer, props);
+            num *= p.modify_damage_multiplicative(owner, target, dealer, props, dv, dc);
         }
         num.max(0.0)
     }
 
     /// `Hook.ModifyBlock`.
-    pub fn modify_block(
-        &self,
-        target: CreatureRef,
-        source_owner: CreatureRef,
-        amount: f64,
-        props: ValueProp,
-    ) -> f64 {
+    pub fn modify_block(&self, target: CreatureRef, source_owner: CreatureRef, amount: f64, props: ValueProp, card: Option<u32>) -> f64 {
+        let plays = self.stats.block_plays_this_turn.iter().filter(|&&u| Some(u) != card).count();
         let mut num = amount;
         for (owner, p) in self.listeners() {
             num += p.modify_block_additive(owner, source_owner, props);
         }
         for (owner, p) in self.listeners() {
-            num *= p.modify_block_multiplicative(owner, target, props);
+            num *= p.modify_block_multiplicative(owner, target, props, plays);
         }
         num.max(0.0)
     }
 
     // ---- commands ------------------------------------------------------------
 
-    /// `CreatureCmd.Damage` core. Returns HP actually lost.
-    fn damage(&mut self, target: CreatureRef, amount: f64, props: ValueProp, dealer: Option<CreatureRef>) -> i32 {
+    /// `CreatureCmd.Damage` core. Returns the effects of `AfterDamageReceived` hooks.
+    fn damage(&mut self, target: CreatureRef, amount: f64, props: ValueProp, dealer: Option<CreatureRef>, card: Option<u32>) -> Vec<Effect> {
         let modified = self.modify_damage(target, dealer, amount, props);
         let c = self.creature_mut(target);
         // Creature.DamageBlockInternal: block absorbs min(block, amount),
@@ -569,40 +1055,116 @@ impl Combat {
         let unblocked = (modified - blocked).max(0.0);
         // Creature.LoseHpInternal: truncate once.
         let lost = unblocked.min(CLAMP) as i32;
-        let before = c.hp;
         c.hp = (c.hp - lost).max(0);
-        before - c.hp
+        let own_turn = self.side == target.side();
+        if target == CreatureRef::Player && lost > 0 {
+            self.stats.hp_lost_this_turn = true;
+            self.stats.unblocked_hits_taken += 1;
+        }
+        // Hook.AfterDamageReceived over the target's powers.
+        let mut out = vec![];
+        for p in &self.creature(target).powers {
+            out.extend(p.after_damage_received(target, lost, props, dealer, own_turn));
+        }
+        // Rupture: HP loss from a card you are playing is paid after the play.
+        if target == CreatureRef::Player && lost > 0 && own_turn {
+            if let Some(r) = self.player.creature.power(PowerId::Rupture) {
+                let in_play = card.is_some_and(|u| self.player.play.iter().any(|c| c.uid == u));
+                if in_play {
+                    self.stats.rupture_pending += r.amount;
+                } else {
+                    out.push(Effect::ApplyPower {
+                        target: CreatureRef::Player,
+                        id: PowerId::Strength,
+                        amount: r.amount,
+                        applier: Some(CreatureRef::Player),
+                    });
+                }
+            }
+        }
+        out
     }
 
-    /// `CreatureCmd.GainBlock`.
-    fn gain_block(&mut self, target: CreatureRef, amount: f64, props: ValueProp, source_owner: CreatureRef) {
-        let source_owner = match target {
-            CreatureRef::Player => source_owner,
-            e => e,
-        };
-        let modified = self.modify_block(target, source_owner, amount, props);
+    /// `CreatureCmd.GainBlock`. Returns `AfterBlockGained` hook effects.
+    fn gain_block(&mut self, target: CreatureRef, amount: f64, props: ValueProp, card: Option<u32>) -> Vec<Effect> {
+        // Cards are only played by the player, so the block source owner is
+        // always the target itself.
+        let modified = self.modify_block(target, target, amount, props, card);
+        let mut out = vec![];
         if modified > 0.0 {
             let c = self.creature_mut(target);
             c.block = ((c.block as f64 + modified).min(CLAMP)) as i32;
+            if target == CreatureRef::Player && props.has(ValueProp::MOVE) {
+                if let Some(u) = card {
+                    if !self.stats.block_plays_this_turn.contains(&u) {
+                        self.stats.block_plays_this_turn.push(u);
+                    }
+                }
+            }
+            for p in &self.creature(target).powers {
+                out.extend(p.after_block_gained(target, modified));
+            }
         }
+        out
     }
 
-    /// `PowerCmd.Apply` + `ModifyAmount`. Stacks onto an existing instance,
-    /// otherwise creates one. Debuffs landing on the player skip their next tick.
-    fn apply_power(&mut self, target: CreatureRef, id: PowerId, amount: i32, _applier: Option<CreatureRef>) {
+    /// `PowerCmd.Apply`. Stacks onto an existing instance, otherwise creates
+    /// one. Debuffs landing on the player skip their next tick. Returns
+    /// `BeforeApplied` / `AfterPowerAmountChanged` hook effects.
+    fn apply_power(&mut self, target: CreatureRef, id: PowerId, amount: i32, applier: Option<CreatureRef>) -> Vec<Effect> {
         if amount == 0 || !self.creature(target).alive() {
-            return;
+            return vec![];
         }
+        let mut out = vec![];
+        let exists = self.creature(target).power(id).is_some();
+        if exists {
+            if is_single(id) {
+                return vec![];
+            }
+            out.extend(Power::new(id, 0).on_applied(target, amount));
+            self.modify_power(target, id, amount);
+        } else {
+            let mut p = Power::new(id, amount);
+            p.skip_next_tick = target == CreatureRef::Player && is_debuff(id);
+            out.extend(p.on_applied(target, amount));
+            self.creature_mut(target).powers.push(p);
+        }
+        // Hook.AfterPowerAmountChanged: Vicious watches Vulnerable the player applied.
+        if applier == Some(CreatureRef::Player) {
+            for p in &self.player.creature.powers {
+                out.extend(p.after_power_applied_by_owner(id, amount));
+            }
+        }
+        out
+    }
+
+    /// `PowerCmd.ModifyAmount`, including removal at zero.
+    fn modify_power(&mut self, target: CreatureRef, id: PowerId, delta: i32) {
         let c = self.creature_mut(target);
         if let Some(p) = c.powers.iter_mut().find(|p| p.id == id) {
-            p.amount += amount;
+            p.amount += delta;
             if p.should_remove() {
                 c.powers.retain(|p| p.id != id);
             }
-        } else {
-            let skip = target == CreatureRef::Player && is_debuff(id);
-            c.powers.push(Power { id, amount, skip_next_tick: skip });
         }
+    }
+}
+
+/// What to do with a chosen card.
+fn then_effect(then: Then, uid: u32) -> Effect {
+    match then {
+        Then::Exhaust => Effect::Exhaust { uid, ethereal: false },
+        Then::Upgrade => Effect::Upgrade { uid },
+        Then::MoveTo(p) => Effect::MoveCard { uid, to: p },
+    }
+}
+
+fn filter_ok(f: CardFilter, c: &Card) -> bool {
+    match f {
+        CardFilter::Any => true,
+        CardFilter::Type(t) => c.ty() == t,
+        CardFilter::NotType(t) => c.ty() != t,
+        CardFilter::PlayableAttack => c.ty() == CardType::Attack && !c.has(Keyword::Unplayable),
     }
 }
 

@@ -61,9 +61,9 @@ mod tests {
     fn damage_formula_matches_game_truncation() {
         // Strength 3 + base 6 = 9, x1.5 Vulnerable, x0.75 Weak = 10.125 -> 10.
         let mut c = nibbit_fight(1);
-        c.player.creature.powers.push(Power { id: PowerId::Strength, amount: 3, skip_next_tick: false });
-        c.player.creature.powers.push(Power { id: PowerId::Weak, amount: 1, skip_next_tick: true });
-        c.enemies[0].creature.powers.push(Power { id: PowerId::Vulnerable, amount: 1, skip_next_tick: false });
+        c.player.creature.powers.push(Power::new(PowerId::Strength, 3));
+        c.player.creature.powers.push(Power::new(PowerId::Weak, 1));
+        c.enemies[0].creature.powers.push(Power::new(PowerId::Vulnerable, 1));
         let d = c.modify_damage(CreatureRef::Enemy(0), Some(CreatureRef::Player), 6.0, ValueProp::MOVE);
         assert_eq!(d, 10.125);
         // Unpowered damage (potions) ignores all of it.
@@ -117,6 +117,42 @@ mod tests {
         c.step(Action::EndTurn);
         assert_eq!(c.enemies[0].creature.power_amount(PowerId::Vulnerable), 0);
         assert!(c.enemies[0].creature.power(PowerId::Vulnerable).is_none());
+    }
+
+    /// Random decks from the whole Ironclad pool, random policy, many seeds.
+    /// Exists to catch panics and runaway loops in card ports, not to check
+    /// any specific rule.
+    #[test]
+    fn random_pool_decks_do_not_panic() {
+        use crate::card::{Card, IRONCLAD_POOL};
+        for seed in 0..400u64 {
+            let mut rng = rng::Rng::new(seed);
+            let mut deck = ironclad_starter_deck();
+            for _ in 0..8 {
+                let id = *rng.pick(IRONCLAD_POOL).unwrap();
+                deck.push(Card::new(0, id, rng.next_int(3) == 0));
+            }
+            deck.push(Card::new(0, ids::CardId::AscendersBane, false));
+            let mut c = Combat::new(
+                &deck,
+                IRONCLAD_HP,
+                IRONCLAD_HP,
+                IRONCLAD_ENERGY,
+                &[EnemySpec { id: MonsterId::Nibbit, flags: Flags { is_alone: true, ..Default::default() } }],
+                Ascension(10),
+                seed,
+            );
+            let mut steps = 0;
+            while !c.is_over() {
+                let acts = c.legal_actions();
+                assert!(!acts.is_empty(), "no legal actions at seed {seed}");
+                let a = acts[rng.next_int(acts.len())];
+                c.step(a);
+                steps += 1;
+                assert!(steps < 20_000, "runaway fight at seed {seed}");
+                assert!(c.player.hand.len() <= combat::MAX_HAND);
+            }
+        }
     }
 
     #[test]
