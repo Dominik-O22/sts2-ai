@@ -214,6 +214,23 @@ fn settle(c: &Combat, snap: &Value, depth: u32) -> Result<Combat, String> {
     Err(first_err.map_or("no choice matched".into(), |e| format!("no choice matched; first branch: {e}")))
 }
 
+/// Enemies spawned since the last snapshot rolled their HP in the sim; the
+/// recording only shows the game's roll now. Adopt it while they are still
+/// undamaged, which is when the roll is the only difference.
+fn adopt_spawn_hp(c: &mut Combat, snap: &Value, known: usize) {
+    let empty = vec![];
+    let living: Vec<usize> = c.living_enemies().collect();
+    for (e, &i) in snap["enemies"].as_array().unwrap_or(&empty).iter().zip(&living) {
+        let cr = &mut c.enemies[i].creature;
+        if i >= known && cr.hp == cr.max_hp {
+            if let (Some(hp), Some(max)) = (e["hp"].as_i64(), e["max_hp"].as_i64()) {
+                cr.max_hp = max as i32;
+                cr.hp = hp as i32;
+            }
+        }
+    }
+}
+
 /// Force the recorded next moves onto the sim's enemies.
 fn force_moves(c: &mut Combat, snap: &Value) -> Result<(), String> {
     let empty = vec![];
@@ -292,6 +309,7 @@ pub fn replay_seeded(text: &str, ids: &Ids, seed: u64) -> Result<Report, String>
     let script = Script {
         shuffles: VecDeque::from(vec![opening]),
         enemy_hp: start["enemies"].as_array().unwrap().iter().map(|e| e["max_hp"].as_i64().unwrap_or(1) as i32).collect(),
+        random_targets: VecDeque::new(),
     };
     let mut c = Combat::with_script(
         &Setup {
@@ -316,6 +334,7 @@ pub fn replay_seeded(text: &str, ids: &Ids, seed: u64) -> Result<Report, String>
     }
 
     let mut report = Report { snapshots: 0, actions: 0, divergence: None };
+    let mut known_enemies = c.enemies.len();
     for (n, rec) in records.iter().enumerate().skip(1) {
         match rec["t"].as_str().unwrap_or("") {
             "snapshot" => {
@@ -323,6 +342,8 @@ pub fn replay_seeded(text: &str, ids: &Ids, seed: u64) -> Result<Report, String>
                 if c.is_over() && rec["enemies"].as_array().is_some_and(|a| a.is_empty()) {
                     continue;
                 }
+                adopt_spawn_hp(&mut c, rec, known_enemies);
+                known_enemies = c.enemies.len();
                 match settle(&c, rec, 0) {
                     Ok(k) => c = k,
                     Err(e) => return Ok(failed(&report, n, e)),
@@ -331,6 +352,16 @@ pub fn replay_seeded(text: &str, ids: &Ids, seed: u64) -> Result<Report, String>
                     return Ok(failed(&report, n, e));
                 }
                 report.snapshots += 1;
+            }
+            "hit" => {
+                // Hits precede the play that dealt them; queue the targets of
+                // random-target cards for the sim to consume.
+                let random = rec["card"].as_str().and_then(|s| ids.cards.get(s)).is_some_and(|&id| {
+                    crate::card::def(id).target == crate::types::TargetType::RandomEnemy
+                });
+                if let (true, Some(t)) = (random, rec["target"].as_u64()) {
+                    c.script.random_targets.push_back(t as usize);
+                }
             }
             "shuffle" => {
                 let order = rec["cards"]

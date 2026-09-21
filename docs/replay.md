@@ -50,8 +50,9 @@ work and is diffed at every snapshot. Card choices (Armaments, exhaust
 picks) are not logged; the replay tries each option and keeps the one whose
 result matches the next snapshot.
 
-Not forced yet: random targets, random exhausts, and random card
-generation. Decks using those can diverge without a sim bug. Logging those
+Not forced yet: random exhausts and random card
+generation. Decks using those can diverge without a sim bug. Random targets
+are scripted from the recorded hits. Logging the other
 outcomes is the next step for the harness.
 
 ## Scripting setups from outside the game

@@ -25,6 +25,7 @@ using MegaCrit.Sts2.Core.Modding;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Rooms;
 using MegaCrit.Sts2.Core.Runs;
+using MegaCrit.Sts2.Core.ValueProps;
 
 namespace Sts2Ai;
 
@@ -233,6 +234,20 @@ public static class Recorder
         });
     }
 
+    /// Damage the player dealt to an enemy, so the replay can script random
+    /// targets (Sword Boomerang). Index is into the live enemy list.
+    internal static void OnDamage(Creature target, DamageResult result, Creature? dealer, CardModel? card)
+    {
+        if (dealer == null || !dealer.IsPlayer || target.IsPlayer) return;
+        var enemies = target.CombatState?.Enemies;
+        if (enemies == null) return;
+        int idx = -1;
+        for (int i = 0; i < enemies.Count; i++)
+            if (ReferenceEquals(enemies[i], target)) { idx = i; break; }
+        if (idx < 0) return;
+        Event(new() { ["t"] = "hit", ["target"] = idx, ["amount"] = result.TotalDamage, ["card"] = card?.Id.Entry });
+    }
+
     internal static void OnPotionUsed(PotionModel potion, Creature? target)
     {
         Event(new() { ["t"] = "potion", ["id"] = potion.Id.Entry, ["target"] = EnemyIndex(target) });
@@ -270,6 +285,12 @@ public sealed class RecorderModel : AbstractModel
     public override Task AfterCardPlayed(PlayerChoiceContext choiceContext, CardPlay cardPlay)
     {
         Guard(() => Recorder.OnCardPlayed(cardPlay));
+        return Task.CompletedTask;
+    }
+
+    public override Task AfterDamageReceived(PlayerChoiceContext choiceContext, Creature target, DamageResult result, ValueProp props, Creature? dealer, CardModel? cardSource)
+    {
+        Guard(() => Recorder.OnDamage(target, result, dealer, cardSource));
         return Task.CompletedTask;
     }
 

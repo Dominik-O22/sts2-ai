@@ -149,6 +149,8 @@ pub struct Script {
     pub shuffles: VecDeque<Vec<(CardId, bool)>>,
     /// Max HP per starting enemy, by index.
     pub enemy_hp: Vec<i32>,
+    /// Targets for random-target hits, as indices into the living enemies.
+    pub random_targets: VecDeque<usize>,
 }
 
 /// The parts of `CombatManager.History` that cards and powers read.
@@ -559,7 +561,10 @@ impl Combat {
                         AttackTargets::AllOpponents => self.opponents_of(dealer),
                         AttackTargets::RandomOpponent => {
                             let opts = self.opponents_of(dealer);
-                            self.rngs.targets.pick(&opts).copied().into_iter().collect()
+                            match self.script.random_targets.pop_front() {
+                                Some(t) if t < opts.len() => vec![opts[t]],
+                                _ => self.rngs.targets.pick(&opts).copied().into_iter().collect(),
+                            }
                         }
                     };
                     for t in ts {
