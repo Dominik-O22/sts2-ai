@@ -248,6 +248,20 @@ public static class Recorder
         Event(new() { ["t"] = "hit", ["target"] = idx, ["amount"] = result.TotalDamage, ["card"] = card?.Id.Entry });
     }
 
+    /// A card created mid-combat (Infernal Blade), so random generation can be scripted.
+    internal static void OnGenerated(CardModel card)
+    {
+        Event(new() { ["t"] = "gen", ["id"] = card.Id.Entry, ["up"] = card.IsUpgraded });
+    }
+
+    /// Any exhaust, with the hand index at the last snapshot when known, so
+    /// random exhausts (Thrash) can be scripted.
+    internal static void OnExhausted(CardModel card, bool ethereal)
+    {
+        int idx = _lastHand.FindIndex(c => ReferenceEquals(c, card));
+        Event(new() { ["t"] = "exhaust", ["id"] = card.Id.Entry, ["up"] = card.IsUpgraded, ["hand_idx"] = idx < 0 ? null : idx, ["ethereal"] = ethereal });
+    }
+
     internal static void OnPotionUsed(PotionModel potion, Creature? target)
     {
         Event(new() { ["t"] = "potion", ["id"] = potion.Id.Entry, ["target"] = EnemyIndex(target) });
@@ -291,6 +305,18 @@ public sealed class RecorderModel : AbstractModel
     public override Task AfterDamageReceived(PlayerChoiceContext choiceContext, Creature target, DamageResult result, ValueProp props, Creature? dealer, CardModel? cardSource)
     {
         Guard(() => Recorder.OnDamage(target, result, dealer, cardSource));
+        return Task.CompletedTask;
+    }
+
+    public override Task AfterCardGeneratedForCombat(CardModel card, Player? creator)
+    {
+        Guard(() => Recorder.OnGenerated(card));
+        return Task.CompletedTask;
+    }
+
+    public override Task AfterCardExhausted(PlayerChoiceContext choiceContext, CardModel card, bool causedByEthereal)
+    {
+        Guard(() => Recorder.OnExhausted(card, causedByEthereal));
         return Task.CompletedTask;
     }
 

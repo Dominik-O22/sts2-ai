@@ -217,18 +217,40 @@ fn settle(c: &Combat, snap: &Value, depth: u32) -> Result<Combat, String> {
 /// Enemies spawned since the last snapshot rolled their HP in the sim; the
 /// recording only shows the game's roll now. Adopt it while they are still
 /// undamaged, which is when the roll is the only difference.
-fn adopt_spawn_hp(c: &mut Combat, snap: &Value, known: usize) {
+fn adopt_spawn_hp(c: &mut Combat, snap: &Value, known: usize) -> Result<(), String> {
     let empty = vec![];
     let living: Vec<usize> = c.living_enemies().collect();
     for (e, &i) in snap["enemies"].as_array().unwrap_or(&empty).iter().zip(&living) {
+        let asc = c.asc;
         let cr = &mut c.enemies[i].creature;
         if i >= known && cr.hp == cr.max_hp {
             if let (Some(hp), Some(max)) = (e["hp"].as_i64(), e["max_hp"].as_i64()) {
+                check_hp_range(c.enemies[i].monster.id, max as i32, asc)?;
+                let cr = &mut c.enemies[i].creature;
                 cr.max_hp = max as i32;
                 cr.hp = hp as i32;
             }
         }
     }
+    Ok(())
+}
+
+/// Forced rolls still have to be rolls the sim could make.
+fn check_hp_range(id: MonsterId, max_hp: i32, asc: Ascension) -> Result<(), String> {
+    let (lo, hi) = crate::monster::Monster::hp_range(id, asc);
+    if (lo..=hi).contains(&max_hp) {
+        Ok(())
+    } else {
+        Err(format!("{id:?} max HP {max_hp} outside the sim's range {lo}..={hi}"))
+    }
+}
+
+/// Recorded random outcomes are logged before the play that caused them
+/// and belong to it alone; anything left after the play is stale.
+fn clear_per_play(c: &mut Combat) {
+    c.script.random_targets.clear();
+    c.script.generated.clear();
+    c.script.random_exhausts.clear();
 }
 
 /// Force the recorded next moves onto the sim's enemies.
@@ -292,6 +314,10 @@ pub fn replay_seeded(text: &str, ids: &Ids, seed: u64) -> Result<Report, String>
         })
         .collect::<Result<_, _>>()?;
     let specs = specs_for(enc, &monsters);
+    let asc = Ascension(start["ascension"].as_i64().unwrap_or(0) as u8);
+    for (e, &id) in start["enemies"].as_array().unwrap().iter().zip(&monsters) {
+        check_hp_range(id, e["max_hp"].as_i64().unwrap_or(0) as i32, asc)?;
+    }
     let room = match start["room"].as_str() {
         Some("Elite") => RoomKind::Elite,
         Some("Boss") => RoomKind::Boss,
@@ -310,6 +336,8 @@ pub fn replay_seeded(text: &str, ids: &Ids, seed: u64) -> Result<Report, String>
         shuffles: VecDeque::from(vec![opening]),
         enemy_hp: start["enemies"].as_array().unwrap().iter().map(|e| e["max_hp"].as_i64().unwrap_or(1) as i32).collect(),
         random_targets: VecDeque::new(),
+        generated: VecDeque::new(),
+        random_exhausts: vec![],
     };
     let mut c = Combat::with_script(
         &Setup {
@@ -321,7 +349,7 @@ pub fn replay_seeded(text: &str, ids: &Ids, seed: u64) -> Result<Report, String>
             potions: &potions,
             enemies: &specs,
             room,
-            asc: Ascension(start["ascension"].as_i64().unwrap_or(0) as u8),
+            asc,
             seed,
         },
         script,
@@ -342,7 +370,9 @@ pub fn replay_seeded(text: &str, ids: &Ids, seed: u64) -> Result<Report, String>
                 if c.is_over() && rec["enemies"].as_array().is_some_and(|a| a.is_empty()) {
                     continue;
                 }
-                adopt_spawn_hp(&mut c, rec, known_enemies);
+                if let Err(e) = adopt_spawn_hp(&mut c, rec, known_enemies) {
+                    return Ok(failed(&report, n, e));
+                }
                 known_enemies = c.enemies.len();
                 match settle(&c, rec, 0) {
                     Ok(k) => c = k,
@@ -355,14 +385,18 @@ pub fn replay_seeded(text: &str, ids: &Ids, seed: u64) -> Result<Report, String>
             }
             "hit" => {
                 // Hits precede the play that dealt them; queue the targets of
-                // random-target cards for the sim to consume.
-                let random = rec["card"].as_str().and_then(|s| ids.cards.get(s)).is_some_and(|&id| {
-                    crate::card::def(id).target == crate::types::TargetType::RandomEnemy
+                // enemy-targeting cards for the sim's random picks (random-
+                // target cards, and auto-played cards choosing a target).
+                let targeted = rec["card"].as_str().and_then(|s| ids.cards.get(s)).is_some_and(|&id| {
+                    use crate::types::TargetType::*;
+                    matches!(crate::card::def(id).target, RandomEnemy | AnyEnemy)
                 });
-                if let (true, Some(t)) = (random, rec["target"].as_u64()) {
+                if let (true, Some(t)) = (targeted, rec["target"].as_u64()) {
                     c.script.random_targets.push_back(t as usize);
                 }
             }
+            "gen" => c.script.generated.push_back(card_ref(ids, rec)?.0),
+            "exhaust" => c.script.random_exhausts.push(card_ref(ids, rec)?),
             "shuffle" => {
                 let order = rec["cards"]
                     .as_array()
@@ -408,6 +442,7 @@ pub fn replay_seeded(text: &str, ids: &Ids, seed: u64) -> Result<Report, String>
                 };
                 c.step(action);
                 report.actions += 1;
+                clear_per_play(&mut c);
             }
             "potion" => {
                 let name = rec["id"].as_str().unwrap_or("");
@@ -419,6 +454,7 @@ pub fn replay_seeded(text: &str, ids: &Ids, seed: u64) -> Result<Report, String>
                 let target = rec["target"].as_u64().and_then(|t| living.get(t as usize).copied());
                 c.step(Action::UsePotion { slot, target });
                 report.actions += 1;
+                clear_per_play(&mut c);
             }
             "turn_start" => {
                 if rec["turn"].as_u64().unwrap_or(1) > 1 {
@@ -427,6 +463,7 @@ pub fn replay_seeded(text: &str, ids: &Ids, seed: u64) -> Result<Report, String>
                     }
                     c.step(Action::EndTurn);
                     report.actions += 1;
+                    clear_per_play(&mut c);
                 }
             }
             "end" => {

@@ -151,6 +151,10 @@ pub struct Script {
     pub enemy_hp: Vec<i32>,
     /// Targets for random-target hits, as indices into the living enemies.
     pub random_targets: VecDeque<usize>,
+    /// Cards random generation should produce, in order.
+    pub generated: VecDeque<CardId>,
+    /// Cards a random exhaust may pick, by (id, upgraded); matched, not ordered.
+    pub random_exhausts: Vec<(CardId, bool)>,
 }
 
 /// The parts of `CombatManager.History` that cards and powers read.
@@ -660,7 +664,19 @@ impl Combat {
             }
             Effect::ExhaustRandomFromHand { filter, then_add_damage_to } => {
                 let uids: Vec<u32> = self.player.hand.iter().filter(|c| filter_ok(filter, c)).map(|c| c.uid).collect();
-                if let Some(&uid) = self.rngs.card_selection.pick(&uids) {
+                // Scripted: the first hand card matching a recorded exhaust.
+                let scripted = self.player.hand.iter().find_map(|c| {
+                    let i = self.script.random_exhausts.iter().position(|&(id, up)| c.id == id && c.upgraded == up)?;
+                    uids.contains(&c.uid).then_some((c.uid, i))
+                });
+                let pick = match scripted {
+                    Some((uid, i)) => {
+                        self.script.random_exhausts.remove(i);
+                        Some(uid)
+                    }
+                    None => self.rngs.card_selection.pick(&uids).copied(),
+                };
+                if let Some(uid) = pick {
                     // Thrash: absorb the exhausted attack's damage first.
                     if let Some(thrash) = then_add_damage_to {
                         let dmg = self.find_card(uid).map_or(0.0, |k| k.vars().damage);
@@ -711,10 +727,22 @@ impl Combat {
                 if distinct {
                     let mut opts = options.clone();
                     self.rngs.card_generation.shuffle(&mut opts);
-                    chosen.extend(opts.into_iter().take(count as usize));
+                    for _ in 0..count {
+                        let scripted = self.script.generated.pop_front().filter(|id| opts.contains(id));
+                        let id = match scripted {
+                            Some(id) => id,
+                            None => match opts.first() {
+                                Some(&id) => id,
+                                None => break,
+                            },
+                        };
+                        opts.retain(|&o| o != id);
+                        chosen.push(id);
+                    }
                 } else {
                     for _ in 0..count {
-                        if let Some(&id) = self.rngs.card_generation.pick(&options) {
+                        let scripted = self.script.generated.pop_front().filter(|id| options.contains(id));
+                        if let Some(id) = scripted.or_else(|| self.rngs.card_generation.pick(&options).copied()) {
                             chosen.push(id);
                         }
                     }
@@ -1252,8 +1280,9 @@ impl Combat {
         let target = match card.def().target {
             TargetType::AnyEnemy => {
                 let opts: Vec<usize> = self.living_enemies().collect();
-                match self.rngs.targets.pick(&opts) {
-                    Some(&i) => Some(CreatureRef::Enemy(i)),
+                let scripted = self.script.random_targets.pop_front().filter(|&t| t < opts.len()).map(|t| opts[t]);
+                match scripted.or_else(|| self.rngs.targets.pick(&opts).copied()) {
+                    Some(i) => Some(CreatureRef::Enemy(i)),
                     None => return vec![],
                 }
             }
@@ -1284,34 +1313,37 @@ impl Combat {
         false
     }
 
-    /// `CardPileCmd.Draw`: per card, reshuffle if needed, take the top.
-    /// Returns hook effects (Hellraiser auto-plays drawn Strikes).
+    /// `CardPileCmd.Draw`, one card per call: reshuffle if needed, take the
+    /// top, then the per-card hooks (Hellraiser auto-plays a drawn Strike).
+    /// The game awaits those hooks inside its draw loop, so the auto-played
+    /// card is already in the discard pile if the next draw reshuffles. The
+    /// remaining draws are queued after the hooks for the same reason.
     fn draw(&mut self, count: u32, from_hand_draw: bool) -> Vec<Effect> {
         // Pillage reads this after each draw; a draw that yields nothing must clear it.
         self.stats.last_drawn = None;
-        if !self.player.creature.powers.iter().all(|p| p.should_draw(from_hand_draw)) {
+        if count == 0 || !self.player.creature.powers.iter().all(|p| p.should_draw(from_hand_draw)) {
             return vec![];
         }
-        let hellraiser = self.player.creature.power(PowerId::Hellraiser).is_some();
+        if self.player.hand.len() >= MAX_HAND {
+            return vec![];
+        }
         let mut out = vec![];
-        for _ in 0..count {
-            if self.player.hand.len() >= MAX_HAND {
-                break;
-            }
-            if self.reshuffle_if_needed() {
-                out.extend(self.relic_after_shuffle());
-            }
-            if self.player.draw.is_empty() {
-                break;
-            }
-            let card = self.player.draw.remove(0);
-            let uid = card.uid;
-            let strike = card.has_tag(Tag::Strike);
-            self.player.hand.push(card);
-            self.stats.last_drawn = Some(uid);
-            if hellraiser && strike {
-                out.push(Effect::AutoPlay { uid, force_exhaust: false });
-            }
+        if self.reshuffle_if_needed() {
+            out.extend(self.relic_after_shuffle());
+        }
+        if self.player.draw.is_empty() {
+            return out;
+        }
+        let card = self.player.draw.remove(0);
+        let uid = card.uid;
+        let strike = card.has_tag(Tag::Strike);
+        self.player.hand.push(card);
+        self.stats.last_drawn = Some(uid);
+        if strike && self.player.creature.power(PowerId::Hellraiser).is_some() {
+            out.push(Effect::AutoPlay { uid, force_exhaust: false });
+        }
+        if count > 1 {
+            out.push(Effect::Draw { count: count - 1, from_hand_draw });
         }
         out
     }
