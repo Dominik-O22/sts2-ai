@@ -773,6 +773,12 @@ impl Combat {
             Effect::OfferRandom { pool, count } => {
                 let mut opts = pool_cards(pool);
                 self.rngs.card_generation.shuffle(&mut opts);
+                // Scripted: the recording only shows the card taken, so make
+                // sure it is on offer.
+                if let Some(id) = self.script.generated.pop_front().filter(|id| opts.contains(id)) {
+                    opts.retain(|&o| o != id);
+                    opts.insert(0, id);
+                }
                 self.player.offer.clear();
                 for id in opts.into_iter().take(count as usize) {
                     let uid = self.new_uid();
