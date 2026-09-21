@@ -1189,7 +1189,7 @@ impl Combat {
     /// player with `RemoveOnApplierDeath` semantics (Constrict, Shrink) go.
     fn on_enemy_death(&mut self, i: usize) -> Vec<Effect> {
         let me = CreatureRef::Enemy(i);
-        let mut out = vec![];
+        let out = vec![];
         // InfestedPower.AfterDeath spawns synchronously, before any win check.
         if self.enemies[i].creature.power(PowerId::Infested).is_some() {
             for slot in 1..=4u8 {
