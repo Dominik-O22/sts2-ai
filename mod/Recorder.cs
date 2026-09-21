@@ -63,6 +63,7 @@ public static class Recorder
     {
         try
         {
+            Commands.Poll();
             var cm = CombatManager.Instance;
             if (!cm.IsInProgress) return;
             var sync = RunManager.Instance.ActionQueueSynchronizer;

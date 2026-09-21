@@ -53,3 +53,20 @@ result matches the next snapshot.
 Not forced yet: random targets, random exhausts, and random card
 generation. Decks using those can diverge without a sim bug. Logging those
 outcomes is the next step for the harness.
+
+## Scripting setups from outside the game
+
+The mod also runs dev console commands from a file, so fights can be set
+up without touching the in-game console. With a run open:
+
+```
+scripts/game.sh "fight NIBBITS_NORMAL"
+scripts/game.sh "card BODY_SLAM Deck" "relic add VAJRA" "potion FIRE_POTION"
+```
+
+Useful commands: `fight <ENCOUNTER>`, `card <CARD> [Hand|Deck|Draw|Discard]`,
+`remove_card <CARD> [pile]`, `relic add|remove <RELIC>`, `potion <POTION>`,
+`power <POWER> <amount> <target>`, `energy <n>`, `draw <n>`, `heal <n>`,
+`upgrade <hand-index>`, `win`, `unlock all`. Ids are the class names in
+screaming snake case. Encounter ids match `sim/src/encounter.rs`.
+Ascension is fixed at run start, so start the run at the level you want.
