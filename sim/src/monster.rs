@@ -8,6 +8,18 @@ use crate::ids::{CardId, MonsterId, PowerId};
 use crate::rng::Rng;
 use crate::types::{Ascension, AscensionLevel, CreatureRef, ValueProp};
 
+/// `Effect::MonsterStep` codes: move continuations that need the combat state.
+/// Bowlbug Rock staggers if its headbutt was fully blocked.
+pub const STEP_STAGGER: u8 = 0;
+/// Thieving Hopper's last Flutter charge is gone: it drops, skipping a move.
+pub const STEP_FLUTTER_DOWN: u8 = 1;
+/// Thieving Hopper takes a card from your draw or discard pile.
+pub const STEP_STEAL: u8 = 2;
+/// Entomancer grows its hive, or its Strength once the hive is full.
+pub const STEP_PHEROMONE: u8 = 3;
+/// The Obscura's Sail: Strength to its whole side.
+pub const STEP_SAIL: u8 = 4;
+
 /// What the intent display promises. `MonsterMoves/Intents/*.cs`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Intent {
@@ -101,6 +113,18 @@ pub enum Cond {
     /// `Creature.HasPower<AsleepPower>` (Lagavulin Matriarch's sleep branch).
     Asleep,
     NotAsleep,
+    /// `BowlbugRock.IsOffBalance`.
+    OffBalance,
+    Balanced,
+    /// `Creature.HasPower<SlumberPower>` (Slumbering Beetle).
+    Slumbering,
+    Awake,
+    /// `Ovicopter.CanLay`: three or fewer of its side alive, itself included.
+    CanLay,
+    CannotLay,
+    /// Knowledge Demon still has a Curse of Knowledge set left to hand out.
+    CursesLeft,
+    CursesDone,
 }
 
 /// What a branch predicate may read outside the monster itself. The game's
@@ -113,6 +137,10 @@ pub struct RollCtx {
     /// `TwoTailedRat.CanSummon()`, which folds together its own counters, the
     /// free encounter slots, and whether a peer is already calling.
     pub can_summon: bool,
+    /// `Creature.HasPower<SlumberPower>()`.
+    pub slumbering: bool,
+    /// Living creatures on the monster's side, itself included.
+    pub living_allies: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -155,8 +183,10 @@ pub struct Flags {
     /// 1-based slot number for monsters whose behaviour depends on it.
     pub slot: u8,
     /// `CorpseSlug.StarterMoveIdx` / `TwoTailedRat.StarterMoveIndex`: which
-    /// move of three the monster opens on.
+    /// move of three the monster opens on. Also `DecimillipedeSegment.StarterMoveIdx`.
     pub starter_move: u8,
+    /// `Chomper.ScreamFirst`: the second chomper opens on Screech.
+    pub scream_first: bool,
 }
 
 /// Counters a monster keeps across its own moves, each named after the field
@@ -171,6 +201,10 @@ pub struct Vars {
     pub pressure_gun_damage: i32,
     /// `WaterfallGiant.SteamEruptionDamage`, the pressure the blast carries.
     pub steam_eruption_damage: i32,
+    /// `BowlbugRock.IsOffBalance`: its last headbutt was fully blocked.
+    pub off_balance: bool,
+    /// `KnowledgeDemon.CurseOfKnowledgeCounter`: sets handed out so far.
+    pub curses_given: i32,
 }
 
 #[derive(Clone, Debug)]
@@ -277,6 +311,31 @@ impl Monster {
             LagavulinMatriarch => flat(222, 233),
             SoulFysh => flat(211, 221),
             WaterfallGiant => flat(240, 250),
+
+            BowlbugEgg => r(21, 22, 23, 24),
+            BowlbugNectar => r(35, 38, 36, 39),
+            BowlbugRock => r(45, 48, 46, 49),
+            BowlbugSilk => r(40, 43, 41, 44),
+            Chomper => r(60, 64, 63, 67),
+            Crusher => flat(209, 219),
+            Rocket => flat(199, 209),
+            DecimillipedeSegmentFront | DecimillipedeSegmentMiddle | DecimillipedeSegmentBack => r(40, 46, 46, 52),
+            Entomancer => flat(145, 155),
+            Exoskeleton => r(24, 28, 25, 29),
+            HunterKiller => flat(121, 126),
+            InfestedPrism => flat(161, 171),
+            KnowledgeDemon => flat(379, 399),
+            LouseProgenitor => r(134, 136, 138, 141),
+            Myte => r(61, 67, 64, 69),
+            Ovicopter => r(124, 130, 126, 132),
+            ToughEgg => r(14, 18, 15, 19),
+            SlumberingBeetle => flat(86, 89),
+            SpinyToad => r(116, 119, 121, 124),
+            TheInsatiable => flat(321, 341),
+            TheObscura => flat(123, 129),
+            Parafright => (21, 21),
+            ThievingHopper => flat(79, 84),
+            Tunneler => flat(87, 92),
         }
     }
 
@@ -305,6 +364,20 @@ impl Monster {
             TerrorEel => vec![(PowerId::Shriek, asc.pick(AscensionLevel::ToughEnemies, 75, 70))],
             // LagavulinMatriarch.Sleep: shell first, then the nap counter.
             LagavulinMatriarch => vec![(PowerId::Plating, 12), (PowerId::Asleep, 3)],
+
+            BowlbugRock => vec![(PowerId::Imbalanced, 1)],
+            Chomper => vec![(PowerId::Artifact, 2)],
+            Crusher => vec![(PowerId::BackAttackLeft, 1), (PowerId::CrabRage, 1)],
+            Rocket => vec![(PowerId::BackAttackRight, 1), (PowerId::CrabRage, 1)],
+            DecimillipedeSegmentFront | DecimillipedeSegmentMiddle | DecimillipedeSegmentBack => vec![(PowerId::Reattach, 25)],
+            Entomancer => vec![(PowerId::PersonalHive, 1)],
+            Exoskeleton => vec![(PowerId::HardToKill, 9)],
+            InfestedPrism => vec![(PowerId::VitalSpark, asc.pick(AscensionLevel::DeadlyEnemies, 3, 2))],
+            LouseProgenitor => vec![(PowerId::CurlUp, asc.pick(AscensionLevel::ToughEnemies, 18, 14))],
+            SlumberingBeetle => vec![(PowerId::Plating, asc.pick(AscensionLevel::ToughEnemies, 18, 15)), (PowerId::Slumber, 3)],
+            // IllusionPower.AfterApplied also applies Minion.
+            Parafright => vec![(PowerId::Illusion, 1), (PowerId::Minion, 1)],
+            ThievingHopper => vec![(PowerId::EscapeArtist, 5)],
             _ => vec![],
         }
     }
@@ -379,6 +452,19 @@ impl Monster {
             Some(n) => self.states.iter().position(|s| s.name() == n),
             None => self.log.last().copied(),
         };
+        self.force_move("STUNNED", vec![Intent::Stun], follow);
+    }
+
+    /// `FlutterPower`'s knock-down: a stun whose follow-up is the move after
+    /// the one it had queued (`StateLog.Last().GetNextState`).
+    pub fn stun_past_next(&mut self) {
+        if !self.can_transition_away() {
+            return;
+        }
+        let follow = self.log.last().and_then(|&i| match &self.states[i] {
+            State::Move { follow_up, .. } => Some(follow_up.unwrap_or(self.initial)),
+            _ => None,
+        });
         self.force_move("STUNNED", vec![Intent::Stun], follow);
     }
 
@@ -460,6 +546,14 @@ impl Monster {
             Cond::Slot(n) => self.flags.slot == n,
             Cond::Asleep => ctx.asleep,
             Cond::NotAsleep => !ctx.asleep,
+            Cond::OffBalance => self.vars.off_balance,
+            Cond::Balanced => !self.vars.off_balance,
+            Cond::Slumbering => ctx.slumbering,
+            Cond::Awake => !ctx.slumbering,
+            Cond::CanLay => ctx.living_allies <= 3,
+            Cond::CannotLay => ctx.living_allies > 3,
+            Cond::CursesLeft => self.vars.curses_given < 3,
+            Cond::CursesDone => self.vars.curses_given >= 3,
         }
     }
 
@@ -502,10 +596,25 @@ impl Monster {
         self.performed_first = true;
         self.performed_current = true;
         match name {
-            "STUNNED" => vec![],
+            "STUNNED" => stunned(self.id, me, &mut self.vars),
             "REVIVE_MOVE" => vec![Effect::Revive { target: me }],
             _ => moves(self.id, name, me, asc, &mut self.vars),
         }
+    }
+}
+
+/// What a monster does on the turn a stun took: the `stunMove` its
+/// `CreatureCmd.Stun` call passed.
+fn stunned(id: MonsterId, me: CreatureRef, vars: &mut Vars) -> Vec<Effect> {
+    match id {
+        // BowlbugRock.DizzyMove.
+        MonsterId::BowlbugRock => {
+            vars.off_balance = false;
+            vec![]
+        }
+        // SlumberingBeetle.WakeUpMove sheds the Plating.
+        MonsterId::SlumberingBeetle => vec![Effect::RemovePower { target: me, id: PowerId::Plating }],
+        _ => vec![],
     }
 }
 
@@ -776,6 +885,147 @@ fn moves(id: MonsterId, name: &str, me: CreatureRef, asc: Ascension, vars: &mut 
         (WaterfallGiant, "EXPLODE_MOVE") => {
             vec![attack(me, vars.steam_eruption_damage, 1), Effect::Kill { target: me }]
         }
+
+        // Act 2 (Hive).
+        (BowlbugEgg, "BITE_MOVE") => vec![attack(me, d(7, 8), 1), block(me, d(7, 8))],
+        (BowlbugNectar, "THRASH_MOVE" | "THRASH2_MOVE") => vec![attack(me, 3, 1)],
+        (BowlbugNectar, "BUFF_MOVE") => vec![buff(me, PowerId::Strength, d(15, 16))],
+        // Imbalanced may leave it off balance once the hit has landed.
+        (BowlbugRock, "HEADBUTT_MOVE") => vec![attack(me, d(15, 16), 1), Effect::MonsterStep { me, step: STEP_STAGGER }],
+        (BowlbugRock, "DIZZY_MOVE") => {
+            vars.off_balance = false;
+            vec![]
+        }
+        (BowlbugSilk, "THRASH_MOVE") => vec![attack(me, d(4, 5), 2)],
+        (BowlbugSilk, "TOXIC_SPIT_MOVE") => vec![debuff(me, PowerId::Weak, 1)],
+
+        (Chomper, "CLAMP_MOVE") => vec![attack(me, d(8, 9), 2)],
+        (Chomper, "SCREECH_MOVE") => statuses(CardId::Dazed, 3).collect(),
+
+        (Crusher, "THRASH_MOVE") => vec![attack(me, d(12, 14), 1)],
+        (Crusher, "ENLARGING_STRIKE_MOVE") => vec![attack(me, 4, 1)],
+        (Crusher, "BUG_STING_MOVE") => {
+            vec![attack(me, d(6, 7), 2), debuff(me, PowerId::Weak, 2), debuff(me, PowerId::Frail, 2)]
+        }
+        (Crusher, "ADAPT_MOVE") => vec![buff(me, PowerId::Strength, d(2, 3))],
+        (Crusher, "GUARDED_STRIKE_MOVE") => vec![attack(me, d(12, 14), 1), block(me, 18)],
+        (Rocket, "TARGETING_RETICLE_MOVE") => vec![attack(me, d(3, 4), 1)],
+        (Rocket, "PRECISION_BEAM_MOVE") => vec![attack(me, d(18, 20), 1)],
+        (Rocket, "CHARGE_UP_MOVE") => vec![buff(me, PowerId::Strength, d(2, 3))],
+        (Rocket, "LASER_MOVE") => vec![attack(me, d(31, 35), 1)],
+        (Rocket, "RECHARGE_MOVE") => vec![],
+
+        (DecimillipedeSegmentFront | DecimillipedeSegmentMiddle | DecimillipedeSegmentBack, "WRITHE_MOVE") => {
+            vec![attack(me, d(5, 6), 2)]
+        }
+        (DecimillipedeSegmentFront | DecimillipedeSegmentMiddle | DecimillipedeSegmentBack, "BULK_MOVE") => {
+            vec![attack(me, d(6, 7), 1), buff(me, PowerId::Strength, 2)]
+        }
+        (DecimillipedeSegmentFront | DecimillipedeSegmentMiddle | DecimillipedeSegmentBack, "CONSTRICT_MOVE") => {
+            vec![attack(me, d(8, 9), 1), debuff(me, PowerId::Weak, 1)]
+        }
+        (DecimillipedeSegmentFront | DecimillipedeSegmentMiddle | DecimillipedeSegmentBack, "DEAD_MOVE") => vec![],
+        // ReattachPower.DoReattach: back with the power's amount as HP.
+        (DecimillipedeSegmentFront | DecimillipedeSegmentMiddle | DecimillipedeSegmentBack, "REATTACH_MOVE") => {
+            vec![Effect::Reattach { target: me, hp: 25 }]
+        }
+
+        (Entomancer, "PHEROMONE_SPIT_MOVE") => vec![Effect::MonsterStep { me, step: STEP_PHEROMONE }],
+        (Entomancer, "BEES_MOVE") => vec![attack(me, 3, d(7, 8) as u32)],
+        (Entomancer, "SPEAR_MOVE") => vec![attack(me, d(18, 20), 1)],
+
+        (Exoskeleton, "SKITTER_MOVE") => vec![attack(me, 1, d(3, 4) as u32)],
+        (Exoskeleton, "MANDIBLES_MOVE") => vec![attack(me, d(8, 9), 1)],
+        (Exoskeleton, "ENRAGE_MOVE") => vec![buff(me, PowerId::Strength, 2)],
+
+        (HunterKiller, "TENDERIZING_GOOP_MOVE") => vec![debuff(me, PowerId::Tender, 1)],
+        (HunterKiller, "BITE_MOVE") => vec![attack(me, d(17, 19), 1)],
+        (HunterKiller, "PUNCTURE_MOVE") => vec![attack(me, d(7, 8), 3)],
+
+        (InfestedPrism, "JAB_MOVE") => vec![attack(me, d(15, 17), 1)],
+        (InfestedPrism, "RADIATE_MOVE") => vec![attack(me, d(11, 13), 1), block(me, d(11, 13))],
+        (InfestedPrism, "WHIRLWIND_MOVE") => vec![attack(me, d(5, 6), 3)],
+        (InfestedPrism, "PULSATE_MOVE") => {
+            vec![attack(me, d(8, 10), 1), block(me, t(20, 22)), buff(me, PowerId::VitalSpark, d(2, 3))]
+        }
+
+        // Three sets, each Disintegration against a harsher alternative.
+        (KnowledgeDemon, "CURSE_OF_KNOWLEDGE_MOVE") => {
+            let n = vars.curses_given.clamp(0, 2) as usize;
+            vars.curses_given += 1;
+            let other = [CardId::MindRot, CardId::Sloth, CardId::WasteAway][n];
+            vec![Effect::OfferCurse { cards: [CardId::Disintegration, other], disintegration: [6, 7, 8][n] }]
+        }
+        (KnowledgeDemon, "SLAP_MOVE") => vec![attack(me, d(17, 18), 1)],
+        (KnowledgeDemon, "KNOWLEDGE_OVERWHELMING_MOVE") => vec![attack(me, d(8, 9), 3)],
+        (KnowledgeDemon, "PONDER_MOVE") => vec![
+            attack(me, d(11, 13), 1),
+            Effect::Heal { target: me, amount: 30.0 },
+            buff(me, PowerId::Strength, d(2, 3)),
+        ],
+
+        (LouseProgenitor, "WEB_CANNON_MOVE") => vec![attack(me, d(9, 10), 1), debuff(me, PowerId::Frail, 2)],
+        (LouseProgenitor, "CURL_AND_GROW_MOVE") => vec![block(me, t(14, 18)), buff(me, PowerId::Strength, 5)],
+        (LouseProgenitor, "POUNCE_MOVE") => vec![attack(me, d(14, 16), 1)],
+
+        // Two Toxic straight into your hand.
+        (Myte, "TOXIC_MOVE") => (0..2)
+            .map(|_| Effect::GenerateCard { id: CardId::Toxic, upgraded: false, to: Pile::Hand, free_this_turn: false })
+            .collect(),
+        (Myte, "BITE_MOVE") => vec![attack(me, d(13, 15), 1)],
+        (Myte, "SUCK_MOVE") => vec![attack(me, d(4, 6), 1), buff(me, PowerId::Strength, d(2, 3))],
+
+        // Three eggs, each into the last free egg slot; a crowded board gets fewer.
+        (Ovicopter, "LAY_EGGS_MOVE") => {
+            (0..3).map(|_| Effect::SpawnMonster { id: ToughEgg, flags: Flags::default() }).collect()
+        }
+        (Ovicopter, "SMASH_MOVE") => vec![attack(me, d(16, 17), 1)],
+        (Ovicopter, "TENDERIZER_MOVE") => vec![attack(me, d(7, 8), 1), debuff(me, PowerId::Vulnerable, 2)],
+        (Ovicopter, "NUTRITIONAL_PASTE_MOVE") => vec![buff(me, PowerId::Strength, d(3, 4))],
+        (ToughEgg, "HATCH_MOVE") => vec![Effect::Hatch { target: me }],
+        (ToughEgg, "NIBBLE_MOVE") => vec![attack(me, d(4, 5), 1)],
+
+        (SlumberingBeetle, "SNORE_MOVE") => vec![],
+        (SlumberingBeetle, "ROLL_OUT_MOVE") => vec![attack(me, d(16, 18), 1), buff(me, PowerId::Strength, 2)],
+
+        (SpinyToad, "PROTRUDING_SPIKES_MOVE") => vec![buff(me, PowerId::Thorns, 5)],
+        (SpinyToad, "SPIKE_EXPLOSION_MOVE") => vec![attack(me, d(23, 25), 1), buff(me, PowerId::Thorns, -5)],
+        (SpinyToad, "TONGUE_LASH_MOVE") => vec![attack(me, d(17, 19), 1)],
+
+        // Liquify: the Sandpit, then three Frantic Escapes shuffled into the
+        // draw pile and three into the discard.
+        (TheInsatiable, "LIQUIFY_GROUND_MOVE") => std::iter::once(buff(me, PowerId::Sandpit, 4))
+            .chain((0..3).map(|_| Effect::GenerateCard {
+                id: CardId::FranticEscape,
+                upgraded: false,
+                to: Pile::DrawRandom,
+                free_this_turn: false,
+            }))
+            .chain(statuses(CardId::FranticEscape, 3))
+            .collect(),
+        (TheInsatiable, "THRASH_MOVE" | "THRASH_MOVE_2") => vec![attack(me, d(8, 9), 2)],
+        (TheInsatiable, "LUNGING_BITE_MOVE") => vec![attack(me, d(28, 31), 1)],
+        (TheInsatiable, "SALIVATE_MOVE") => vec![buff(me, PowerId::Strength, d(2, 3))],
+
+        // Slots are ["illusion", "obscura"]: the Parafright stands in front.
+        (TheObscura, "ILLUSION_MOVE") => {
+            vec![Effect::SpawnMonster { id: Parafright, flags: Flags { slot: 1, ..Default::default() } }]
+        }
+        (TheObscura, "PIERCING_GAZE_MOVE") => vec![attack(me, d(10, 11), 1)],
+        (TheObscura, "SAIL_MOVE") => vec![Effect::MonsterStep { me, step: STEP_SAIL }],
+        (TheObscura, "HARDENING_STRIKE_MOVE") => vec![attack(me, d(6, 7), 1), block(me, d(6, 7))],
+        (Parafright, "SLAM_MOVE") => vec![attack(me, d(16, 17), 1)],
+
+        (ThievingHopper, "THIEVERY_MOVE") => vec![Effect::MonsterStep { me, step: STEP_STEAL }, attack(me, d(17, 19), 1)],
+        (ThievingHopper, "FLUTTER_MOVE") => vec![buff(me, PowerId::Flutter, 5)],
+        (ThievingHopper, "HAT_TRICK_MOVE") => vec![attack(me, d(21, 23), 1)],
+        (ThievingHopper, "NAB_MOVE") => vec![attack(me, d(14, 16), 1)],
+        (ThievingHopper, "ESCAPE_MOVE") => vec![Effect::Escape { target: me }],
+
+        (Tunneler, "BITE_MOVE") => vec![attack(me, d(13, 15), 1)],
+        (Tunneler, "BURROW_MOVE") => vec![buff(me, PowerId::Burrowed, 1), block(me, t(32, 37))],
+        (Tunneler, "BELOW_MOVE") => vec![attack(me, d(23, 26), 1)],
+        (Tunneler, "DIZZY_MOVE") => vec![],
 
         _ => panic!("unknown move {name} for {id:?}"),
     }
@@ -1369,6 +1619,275 @@ fn graph(id: MonsterId, asc: Ascension, flags: Flags) -> (Vec<State>, usize) {
             g.follow(about, explode);
             g.follow(explode, explode);
             g.done(pressurize)
+        }
+
+        // Act 2 (Hive).
+        BowlbugEgg => {
+            let bite = g.mv("BITE_MOVE", vec![atk(d(7, 8)), Defend]);
+            g.follow(bite, bite);
+            g.done(bite)
+        }
+        BowlbugNectar => {
+            let thrash = g.mv("THRASH_MOVE", vec![atk(3)]);
+            let buff = g.mv("BUFF_MOVE", vec![Buff]);
+            let thrash2 = g.mv("THRASH2_MOVE", vec![atk(3)]);
+            g.follow(thrash, buff);
+            g.follow(buff, thrash2);
+            g.follow(thrash2, thrash2);
+            g.done(thrash)
+        }
+        // Headbutt until one is fully blocked; the stagger that follows is a
+        // stun, so the Dizzy branch only shows if the stun could not land.
+        BowlbugRock => {
+            let headbutt = g.mv("HEADBUTT_MOVE", vec![atk(d(15, 16))]);
+            let dizzy = g.mv("DIZZY_MOVE", vec![Stun]);
+            let post = g.cond(vec![(dizzy, Cond::OffBalance), (headbutt, Cond::Balanced)]);
+            g.follow(headbutt, post);
+            g.follow(dizzy, headbutt);
+            g.done(headbutt)
+        }
+        BowlbugSilk => {
+            let thrash = g.mv("THRASH_MOVE", vec![multi(d(4, 5), 2)]);
+            let spit = g.mv("TOXIC_SPIT_MOVE", vec![Debuff { strong: false }]);
+            g.follow(thrash, spit);
+            g.follow(spit, thrash);
+            g.done(spit)
+        }
+        Chomper => {
+            let clamp = g.mv("CLAMP_MOVE", vec![multi(d(8, 9), 2)]);
+            let screech = g.mv("SCREECH_MOVE", vec![Status { count: 3 }]);
+            g.follow(clamp, screech);
+            g.follow(screech, clamp);
+            g.done(if flags.scream_first { screech } else { clamp })
+        }
+        Crusher => {
+            let thrash = g.mv("THRASH_MOVE", vec![atk(d(12, 14))]);
+            let enlarge = g.mv("ENLARGING_STRIKE_MOVE", vec![atk(4)]);
+            let sting = g.mv("BUG_STING_MOVE", vec![multi(d(6, 7), 2), Debuff { strong: false }]);
+            let adapt = g.mv("ADAPT_MOVE", vec![Buff]);
+            let guarded = g.mv("GUARDED_STRIKE_MOVE", vec![atk(d(12, 14)), Defend]);
+            g.follow(thrash, enlarge);
+            g.follow(enlarge, sting);
+            g.follow(sting, adapt);
+            g.follow(adapt, guarded);
+            g.follow(guarded, thrash);
+            g.done(thrash)
+        }
+        Rocket => {
+            let reticle = g.mv("TARGETING_RETICLE_MOVE", vec![atk(d(3, 4))]);
+            let beam = g.mv("PRECISION_BEAM_MOVE", vec![atk(d(18, 20))]);
+            let charge = g.mv("CHARGE_UP_MOVE", vec![Buff]);
+            let laser = g.mv("LASER_MOVE", vec![atk(d(31, 35))]);
+            let recharge = g.mv("RECHARGE_MOVE", vec![Sleep]);
+            g.follow(reticle, beam);
+            g.follow(beam, charge);
+            g.follow(charge, laser);
+            g.follow(laser, recharge);
+            g.follow(recharge, reticle);
+            g.done(reticle)
+        }
+        // A fixed cycle entered at the segment's assigned move; a segment
+        // that dies plays dead, reattaches, then picks moves at random.
+        DecimillipedeSegmentFront | DecimillipedeSegmentMiddle | DecimillipedeSegmentBack => {
+            let writhe = g.mv("WRITHE_MOVE", vec![multi(d(5, 6), 2)]);
+            let bulk = g.mv("BULK_MOVE", vec![atk(d(6, 7)), Buff]);
+            let constrict = g.mv("CONSTRICT_MOVE", vec![atk(d(8, 9)), Debuff { strong: false }]);
+            let dead = g.mv("DEAD_MOVE", vec![]);
+            let reattach = g.mv_once("REATTACH_MOVE", vec![Heal]);
+            let rand = g.random(vec![
+                br(writhe, Repeat::CannotRepeat),
+                br(bulk, Repeat::CannotRepeat),
+                br(constrict, Repeat::CannotRepeat),
+            ]);
+            g.follow(constrict, bulk);
+            g.follow(bulk, writhe);
+            g.follow(writhe, constrict);
+            g.follow(dead, reattach);
+            g.follow(reattach, rand);
+            g.done(match flags.starter_move % 3 {
+                0 => writhe,
+                1 => bulk,
+                _ => constrict,
+            })
+        }
+        Entomancer => {
+            let spit = g.mv("PHEROMONE_SPIT_MOVE", vec![Buff]);
+            let bees = g.mv("BEES_MOVE", vec![multi(3, d(7, 8) as u32)]);
+            let spear = g.mv("SPEAR_MOVE", vec![atk(d(18, 20))]);
+            g.follow(bees, spear);
+            g.follow(spear, spit);
+            g.follow(spit, bees);
+            g.done(bees)
+        }
+        // Each exoskeleton opens on the move its slot names.
+        Exoskeleton => {
+            let skitter = g.mv("SKITTER_MOVE", vec![multi(1, d(3, 4) as u32)]);
+            let mandibles = g.mv("MANDIBLES_MOVE", vec![atk(d(8, 9))]);
+            let enrage = g.mv("ENRAGE_MOVE", vec![Buff]);
+            let rand = g.random(vec![br(skitter, Repeat::CannotRepeat), br(mandibles, Repeat::CannotRepeat)]);
+            let init = g.cond(vec![
+                (skitter, Cond::Slot(1)),
+                (mandibles, Cond::Slot(2)),
+                (enrage, Cond::Slot(3)),
+                (rand, Cond::Slot(4)),
+            ]);
+            g.follow(skitter, rand);
+            g.follow(mandibles, enrage);
+            g.follow(enrage, rand);
+            g.done(init)
+        }
+        HunterKiller => {
+            let goop = g.mv("TENDERIZING_GOOP_MOVE", vec![Debuff { strong: false }]);
+            let bite = g.mv("BITE_MOVE", vec![atk(d(17, 19))]);
+            let puncture = g.mv("PUNCTURE_MOVE", vec![multi(d(7, 8), 3)]);
+            let rand = g.random(vec![br(bite, Repeat::CannotRepeat), br(puncture, Repeat::Times(2))]);
+            g.follow(goop, rand);
+            g.follow(bite, rand);
+            g.follow(puncture, rand);
+            g.done(goop)
+        }
+        InfestedPrism => {
+            let jab = g.mv("JAB_MOVE", vec![atk(d(15, 17))]);
+            let radiate = g.mv("RADIATE_MOVE", vec![atk(d(11, 13)), Defend]);
+            let whirl = g.mv("WHIRLWIND_MOVE", vec![multi(d(5, 6), 3)]);
+            let pulsate = g.mv("PULSATE_MOVE", vec![atk(d(8, 10)), Buff, Defend]);
+            g.follow(jab, radiate);
+            g.follow(radiate, whirl);
+            g.follow(whirl, pulsate);
+            g.follow(pulsate, jab);
+            g.done(jab)
+        }
+        // Three rounds of Curse of Knowledge, then the attacks alone.
+        KnowledgeDemon => {
+            let curse = g.mv("CURSE_OF_KNOWLEDGE_MOVE", vec![Debuff { strong: false }]);
+            let slap = g.mv("SLAP_MOVE", vec![atk(d(17, 18))]);
+            let overwhelm = g.mv("KNOWLEDGE_OVERWHELMING_MOVE", vec![multi(d(8, 9), 3)]);
+            let ponder = g.mv("PONDER_MOVE", vec![atk(d(11, 13)), Heal, Buff]);
+            let branch = g.cond(vec![(curse, Cond::CursesLeft), (slap, Cond::CursesDone)]);
+            g.follow(curse, slap);
+            g.follow(slap, overwhelm);
+            g.follow(overwhelm, ponder);
+            g.follow(ponder, branch);
+            g.done(curse)
+        }
+        LouseProgenitor => {
+            let web = g.mv("WEB_CANNON_MOVE", vec![atk(d(9, 10)), Debuff { strong: false }]);
+            let pounce = g.mv("POUNCE_MOVE", vec![atk(d(14, 16))]);
+            let curl = g.mv("CURL_AND_GROW_MOVE", vec![Defend, Buff]);
+            g.follow(web, curl);
+            g.follow(curl, pounce);
+            g.follow(pounce, web);
+            g.done(web)
+        }
+        // Slots are ["first", "second"]: the first opens on Toxic, the
+        // second on Suck.
+        Myte => {
+            let toxic = g.mv("TOXIC_MOVE", vec![Status { count: 2 }]);
+            let bite = g.mv("BITE_MOVE", vec![atk(d(13, 15))]);
+            let suck = g.mv("SUCK_MOVE", vec![atk(d(4, 6)), Buff]);
+            let init = g.cond(vec![(toxic, Cond::Slot(1)), (suck, Cond::Slot(2))]);
+            g.follow(toxic, bite);
+            g.follow(bite, suck);
+            g.follow(suck, toxic);
+            g.done(init)
+        }
+        // Lays eggs while its side is small enough, feeds itself otherwise.
+        Ovicopter => {
+            let paste = g.mv("NUTRITIONAL_PASTE_MOVE", vec![Buff]);
+            let lay = g.mv("LAY_EGGS_MOVE", vec![Summon]);
+            let smash = g.mv("SMASH_MOVE", vec![atk(d(16, 17))]);
+            let tenderizer = g.mv("TENDERIZER_MOVE", vec![atk(d(7, 8)), Debuff { strong: false }]);
+            let branch = g.cond(vec![(lay, Cond::CanLay), (paste, Cond::CannotLay)]);
+            g.follow(lay, smash);
+            g.follow(paste, smash);
+            g.follow(smash, tenderizer);
+            g.follow(tenderizer, branch);
+            g.done(lay)
+        }
+        ToughEgg => {
+            let hatch = g.mv("HATCH_MOVE", vec![Summon]);
+            let nibble = g.mv("NIBBLE_MOVE", vec![atk(d(4, 5))]);
+            g.follow(hatch, nibble);
+            g.follow(nibble, nibble);
+            g.done(hatch)
+        }
+        SlumberingBeetle => {
+            let snore = g.mv("SNORE_MOVE", vec![Sleep]);
+            let rollout = g.mv("ROLL_OUT_MOVE", vec![atk(d(16, 18)), Buff]);
+            let branch = g.cond(vec![(snore, Cond::Slumbering), (rollout, Cond::Awake)]);
+            g.follow(snore, branch);
+            g.follow(rollout, rollout);
+            g.done(snore)
+        }
+        SpinyToad => {
+            let spikes = g.mv("PROTRUDING_SPIKES_MOVE", vec![Buff]);
+            let explosion = g.mv("SPIKE_EXPLOSION_MOVE", vec![atk(d(23, 25))]);
+            let lash = g.mv("TONGUE_LASH_MOVE", vec![atk(d(17, 19))]);
+            g.follow(spikes, explosion);
+            g.follow(explosion, lash);
+            g.follow(lash, spikes);
+            g.done(spikes)
+        }
+        TheInsatiable => {
+            let liquify = g.mv("LIQUIFY_GROUND_MOVE", vec![Buff, Status { count: 6 }]);
+            let thrash = g.mv("THRASH_MOVE", vec![multi(d(8, 9), 2)]);
+            let thrash2 = g.mv("THRASH_MOVE_2", vec![multi(d(8, 9), 2)]);
+            let bite = g.mv("LUNGING_BITE_MOVE", vec![atk(d(28, 31))]);
+            let salivate = g.mv("SALIVATE_MOVE", vec![Buff]);
+            g.follow(liquify, thrash);
+            g.follow(thrash, bite);
+            g.follow(bite, salivate);
+            g.follow(salivate, thrash2);
+            g.follow(thrash2, thrash);
+            g.done(liquify)
+        }
+        TheObscura => {
+            let illusion = g.mv("ILLUSION_MOVE", vec![Summon]);
+            let gaze = g.mv("PIERCING_GAZE_MOVE", vec![atk(d(10, 11))]);
+            let sail = g.mv("SAIL_MOVE", vec![Buff]);
+            let hardening = g.mv("HARDENING_STRIKE_MOVE", vec![atk(d(6, 7)), Defend]);
+            let rand = g.random(vec![
+                br(gaze, Repeat::CannotRepeat),
+                br(sail, Repeat::CannotRepeat),
+                br(hardening, Repeat::CannotRepeat),
+            ]);
+            g.follow(illusion, rand);
+            g.follow(gaze, rand);
+            g.follow(sail, rand);
+            g.follow(hardening, rand);
+            g.done(illusion)
+        }
+        Parafright => {
+            let slam = g.mv("SLAM_MOVE", vec![atk(d(16, 17))]);
+            g.follow(slam, slam);
+            g.done(slam)
+        }
+        // Steals, takes to the air, attacks twice, then flees.
+        ThievingHopper => {
+            let thievery = g.mv("THIEVERY_MOVE", vec![atk(d(17, 19)), CardDebuff]);
+            let nab = g.mv("NAB_MOVE", vec![atk(d(14, 16))]);
+            let hat = g.mv("HAT_TRICK_MOVE", vec![atk(d(21, 23))]);
+            let flutter = g.mv("FLUTTER_MOVE", vec![Buff]);
+            let escape = g.mv("ESCAPE_MOVE", vec![Escape]);
+            g.follow(thievery, flutter);
+            g.follow(flutter, hat);
+            g.follow(hat, nab);
+            g.follow(nab, escape);
+            g.follow(escape, escape);
+            g.done(thievery)
+        }
+        // Bite, burrow, then Below forever until its block breaks, which
+        // stuns it back to Bite.
+        Tunneler => {
+            let bite = g.mv("BITE_MOVE", vec![atk(d(13, 15))]);
+            let burrow = g.mv("BURROW_MOVE", vec![Buff, Defend]);
+            let below = g.mv("BELOW_MOVE", vec![atk(d(23, 26))]);
+            let dizzy = g.mv("DIZZY_MOVE", vec![Stun]);
+            g.follow(bite, burrow);
+            g.follow(burrow, below);
+            g.follow(below, below);
+            g.follow(dizzy, bite);
+            g.done(bite)
         }
     }
 }

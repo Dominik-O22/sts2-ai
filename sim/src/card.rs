@@ -173,6 +173,12 @@ defs! {
     Writhe: -1, Curse, Special, None, kw = [Unplayable, Innate], gen = false;
     Soot: -1, Status, Special, None, kw = [Unplayable], gen = false;
     Luminesce: 0, Skill, Special, Self_, kw = [Exhaust, Retain], gen = false;
+    Toxic: 1, Status, Special, None, kw = [Exhaust], gen = false;
+    FranticEscape: 1, Status, Special, Self_, gen = false;
+    Disintegration: -1, Status, Special, None, kw = [Unplayable], gen = false;
+    MindRot: -1, Status, Special, None, kw = [Unplayable], gen = false;
+    Sloth: -1, Status, Special, None, kw = [Unplayable], gen = false;
+    WasteAway: -1, Status, Special, None, kw = [Unplayable], gen = false;
 }
 
 /// The Ironclad card pool in `IroncladCardPool.cs` order, for generation.
@@ -368,6 +374,7 @@ impl Card {
             // damage is not a card number.
             Clumsy | CurseOfTheBell | Debt | Doubt | Enthralled
             | Folly | Greed | Guilty | Injury | Normality | PoorSleep | Regret | Shame | SporeMind | Writhe | Soot => d(),
+            FranticEscape | Disintegration | MindRot | Sloth | WasteAway => d(),
             Anger => Vars { damage: pick(6.0, 8.0), ..d() },
             Armaments => Vars { block: 5.0, ..d() },
             AshenStrike => Vars { damage: 6.0, magic: pick(3.0, 4.0), ..d() },
@@ -450,6 +457,7 @@ impl Card {
             BadLuck => Vars { hp_loss: 13.0, ..d() },
             Decay => Vars { damage: 2.0, ..d() },
             Luminesce => Vars { energy: if up { 3 } else { 2 }, ..d() },
+            Toxic => Vars { damage: 5.0, ..d() },
         };
         v.damage += self.extra_damage;
         v
@@ -701,6 +709,18 @@ impl Card {
             GiantRock => vec![attack(1)],
             Wound | Dazed | Burn | Infection | AscendersBane | Beckon | Soot => vec![],
             Luminesce => vec![Effect::GainEnergy { amount: v.energy }],
+            Toxic | Disintegration | MindRot | Sloth | WasteAway => vec![],
+            // FranticEscape.cs: the Sandpit gets a turn longer, and the card
+            // costs 1 more for the rest of the combat.
+            FranticEscape => {
+                let pit = c.living_enemies().find(|&i| c.enemies[i].creature.power(PowerId::Sandpit).is_some());
+                let mut e: Vec<Effect> = pit
+                    .map(|i| Effect::ApplyPower { target: CreatureRef::Enemy(i), id: PowerId::Sandpit, amount: 1, applier: None })
+                    .into_iter()
+                    .collect();
+                e.push(Effect::CostThisCombat { uid, delta: 1 });
+                e
+            }
             // Enthralled and Spore Mind are the only playable curses and
             // neither does anything; the rest are unplayable.
             BadLuck | Clumsy | CurseOfTheBell | Debt | Decay | Doubt | Enthralled | Folly | Greed | Guilty

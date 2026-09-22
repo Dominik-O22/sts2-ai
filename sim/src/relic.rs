@@ -60,6 +60,8 @@ pub enum RelicId {
     PaelsTears, PhilosophersStone, PollinousCore, PrismaticGem, PumpkinCandle, RadiantPearl,
     RoyalPoison, RunicPyramid, Sai, SealOfGold, SneckoEye, Sozu, SpikedGauntlets, SwordOfJade,
     TeaOfDiscourtesy, ThrowingAxe, ToastyMittens, VelvetChoker, WhisperingEarring,
+    // Act 2 (Hive): an ancient's relic met in a recorded act 2 run.
+    VeryHotCocoa,
 }
 
 /// Every relic, for generators and tests.
@@ -101,7 +103,7 @@ pub const ALL: &[RelicId] = &[
     RelicId::PumpkinCandle, RelicId::RadiantPearl, RelicId::RoyalPoison, RelicId::RunicPyramid, RelicId::Sai,
     RelicId::SealOfGold, RelicId::SneckoEye, RelicId::Sozu, RelicId::SpikedGauntlets, RelicId::SwordOfJade,
     RelicId::TeaOfDiscourtesy, RelicId::ThrowingAxe, RelicId::ToastyMittens, RelicId::VelvetChoker,
-    RelicId::WhisperingEarring,
+    RelicId::WhisperingEarring, RelicId::VeryHotCocoa,
 ];
 
 /// Ancient rarity, handed out by the Ancients that open each act, and the
@@ -115,7 +117,7 @@ pub const ANCIENT: &[RelicId] = &[
     RelicId::PaelsTears, RelicId::PhilosophersStone, RelicId::PrismaticGem, RelicId::PumpkinCandle,
     RelicId::RadiantPearl, RelicId::RunicPyramid, RelicId::Sai, RelicId::SealOfGold, RelicId::SneckoEye,
     RelicId::Sozu, RelicId::SpikedGauntlets, RelicId::ThrowingAxe, RelicId::ToastyMittens, RelicId::VelvetChoker,
-    RelicId::WhisperingEarring,
+    RelicId::WhisperingEarring, RelicId::VeryHotCocoa,
 ];
 
 /// A relic instance on the run.
@@ -422,6 +424,7 @@ impl Combat {
                     out.push(Effect::UpgradeHand);
                 }
                 BoomingConch if turn <= 1 && elite => out.push(Effect::GainEnergy { amount: 1 }),
+                VeryHotCocoa if turn <= 1 => out.push(Effect::GainEnergy { amount: 4 }),
                 Crossbow => out.push(Effect::GenerateRandom {
                     pool: GenPool::IroncladAttacks,
                     count: 1,

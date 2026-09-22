@@ -118,6 +118,23 @@ ADVICE = {
     "SOUL_FYSH_BOSS": "Survive six turns to close the loop, and do not exhaust the Beckons.",
     "WATERFALL_GIANT_BOSS": "Drop it to zero and keep playing: About To Blow then Explode is what ends the fight.",
     "INKLETS_NORMAL": "Three inklets, the middle one opening on Whirlwind. Slippery caps what each hit takes off.",
+    "BOWLBUGS_WEAK": "Fully block a Bowlbug Rock headbutt once, so it staggers the turn after.",
+    "BOWLBUGS_NORMAL": "Fully block a Bowlbug Rock headbutt once, so it staggers the turn after.",
+    "EXOSKELETONS_WEAK": "Hit one with a single big attack: Hard to Kill caps each hit at 9.",
+    "HUNTER_KILLER_NORMAL": "Play several cards on a turn under Tender, and watch Strength and Dexterity come back at the end.",
+    "LOUSE_PROGENITOR_NORMAL": "Hit it with a multi-hit attack card: Curl Up blocks only once the whole card is done.",
+    "MYTES_NORMAL": "End a turn with a Toxic still in hand once.",
+    "OVICOPTER_NORMAL": "Let an egg hatch, then kill eggs so it lays again rather than feeding.",
+    "SLUMBERING_BEETLE_NORMAL": "Hit the beetle through its Plating to wake it before Slumber runs out.",
+    "THE_OBSCURA_NORMAL": "Kill the Parafright once so it revives, and let Sail buff both.",
+    "THIEVING_HOPPER_WEAK": "Hit it hard while it flutters so it gets knocked down; it flees after Nab otherwise.",
+    "TUNNELER_WEAK": "Break its block after it burrows, so it is stunned back to Bite.",
+    "DECIMILLIPEDE_ELITE": "Kill one segment early and keep the others alive two turns, so it reattaches.",
+    "ENTOMANCER_ELITE": "Attack it several times a turn: every hit shuffles Dazed into your draw pile.",
+    "INFESTED_PRISMS_ELITE": "Play skills: each one gives you Tainted until the enemy turn ends.",
+    "KAISER_CRAB_BOSS": "Target one half, then the other, so Surrounded turns; kill one half to see Crab Rage.",
+    "KNOWLEDGE_DEMON_BOSS": "Survive all three Curses of Knowledge, taking a different curse each time.",
+    "THE_INSATIABLE_BOSS": "Play Frantic Escape to push the Sandpit back, and let it run down a turn or two.",
 }
 
 

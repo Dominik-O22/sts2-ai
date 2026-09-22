@@ -217,6 +217,14 @@ pub struct Stats {
     /// The coming player turn is an extra one (Pael's Eye): the enemies keep
     /// their moves.
     pub extra_turn: bool,
+    /// Cards the combat started with have uids `1..=deck_size`; the rest were
+    /// made during it (`CardModel.DeckVersion` is null for those).
+    pub deck_size: u32,
+    /// The Disintegration a Curse of Knowledge offer carries.
+    pub offer_disintegration: i32,
+    /// Enemies whose HP was rolled again mid-fight (a hatched Tough Egg), for
+    /// the replay to adopt like a fresh spawn's.
+    pub hp_rerolled: Vec<usize>,
 }
 
 #[derive(Clone, Debug)]
@@ -336,13 +344,27 @@ impl Combat {
             next_uid,
             started: false,
         };
-        for (i, spec) in enemies.iter().enumerate() {
+        c.stats.deck_size = deck.len() as u32;
+        for spec in enemies {
             c.spawn(spec.id, spec.flags);
-            if let Some(&hp) = c.script.enemy_hp.get(i) {
-                let e = &mut c.enemies[i].creature;
-                e.max_hp = hp;
-                e.hp = hp;
+        }
+        // MonsterModel.AfterAddedToRoom, which runs once every starting
+        // monster is in the room.
+        for i in 0..c.enemies.len() {
+            if is_segment(c.enemies[i].monster.id) {
+                c.even_segment_hp(i);
             }
+            if c.enemies[i].monster.id == MonsterId::Rocket {
+                // Rocket.AfterAddedToRoom: the player stands between the halves.
+                let mut p = Power::new(PowerId::Surrounded, 1);
+                p.applier = Some(CreatureRef::Enemy(i));
+                c.player.creature.powers.push(p);
+            }
+        }
+        for (i, &hp) in c.script.enemy_hp.iter().enumerate().take(c.enemies.len()) {
+            let e = &mut c.enemies[i].creature;
+            e.max_hp = hp;
+            e.hp = hp;
         }
         c.started = true;
         let pre = c.relic_before_combat_start();
@@ -350,6 +372,24 @@ impl Combat {
         c.queue.push_back(Effect::StartTurn(Side::Player));
         c.run();
         c
+    }
+
+    /// `DecimillipedeSegment.AfterAddedToRoom`: an even max HP no other segment
+    /// has, stepping up by 2 and wrapping to the minimum past the maximum.
+    fn even_segment_hp(&mut self, i: usize) {
+        let (lo, hi) = Monster::hp_range(self.enemies[i].monster.id, self.asc);
+        let mut hp = self.enemies[i].creature.max_hp;
+        hp += hp % 2;
+        let taken = |hp: i32| self.enemies.iter().enumerate().any(|(j, e)| j != i && e.creature.max_hp == hp);
+        while taken(hp) {
+            hp += 2;
+            if hp > hi {
+                hp = lo;
+            }
+        }
+        let e = &mut self.enemies[i].creature;
+        e.max_hp = hp;
+        e.hp = hp;
     }
 
     /// `CombatState.CreateCreature` + `MonsterModel.AfterAddedToRoom`: roll
@@ -364,6 +404,13 @@ impl Combat {
             p.applier = Some(me);
             creature.powers.push(p);
         }
+        // ToughEgg.AfterAddedToRoom: Hatch counts one more turn when it is
+        // laid on the enemy's turn. Ovicopter then makes it a Minion.
+        if id == MonsterId::ToughEgg {
+            let hatch = if self.side == Side::Player { 1 } else { 2 };
+            creature.powers.push(Power::new(PowerId::Hatch, hatch));
+            creature.powers.push(Power::new(PowerId::Minion, 1));
+        }
         // AfterAddedToRoom block (Cubex) goes through CreatureCmd.GainBlock,
         // which returns early until IsInProgress is set, and the starting
         // monsters are added before that. Only mid-combat spawns get it.
@@ -377,9 +424,11 @@ impl Combat {
         // `EncounterModel.GetNextSlot`: the lowest free slot, which is often
         // not the end. Fogmog holds "fogmog" with "illusion" ahead of it, and
         // Living Fog holds the last of six with five bomb slots ahead.
-        // `TwoTailedRat.CallForBackup` is the exception: it skips GetNextSlot
-        // and inlines `Slots.LastOrDefault`, so backup arrives at the back.
-        let slot = if flags.slot != 0 { flags.slot } else { self.free_slot(id == MonsterId::TwoTailedRat) };
+        // `TwoTailedRat.CallForBackup` and `Ovicopter.LayEggsMove` are the
+        // exceptions: they inline `Slots.LastOrDefault`, so their summons
+        // arrive at the back.
+        let last = matches!(id, MonsterId::TwoTailedRat | MonsterId::ToughEgg);
+        let slot = if flags.slot != 0 { flags.slot } else { self.free_slot(last) };
         self.enemies.push(Enemy { creature, monster, slot, reviving: false, escaped: false });
         let idx = self.enemies.len() - 1;
         let at = self.order.iter().position(|&j| self.enemies[j].slot > slot).unwrap_or(self.order.len());
@@ -414,6 +463,9 @@ impl Combat {
         RollCtx {
             asleep: self.enemies.get(i).is_some_and(|e| e.creature.power(PowerId::Asleep).is_some()),
             can_summon: self.can_summon(m, i),
+            slumbering: self.enemies.get(i).is_some_and(|e| e.creature.power(PowerId::Slumber).is_some()),
+            // GetTeammatesOf counts the monster itself, even one not yet placed.
+            living_allies: self.living_enemies().count() + usize::from(i >= self.enemies.len()),
         }
     }
 
@@ -451,6 +503,10 @@ impl Combat {
             MonsterId::LivingFog => Some(6),
             // first..fifth.
             MonsterId::TwoTailedRat => Some(5),
+            // egg1..egg5 plus ovicopter.
+            MonsterId::Ovicopter => Some(6),
+            // illusion plus obscura.
+            MonsterId::TheObscura => Some(2),
             _ => None,
         });
         named.unwrap_or(crate::encode::MAX_ENEMIES).min(crate::encode::MAX_ENEMIES)
@@ -550,6 +606,10 @@ impl Combat {
         if self.player.hand.iter().any(vetoed) || !self.relic_allows_play() {
             return false;
         }
+        // SlothPower.ShouldPlay: only `amount` cards a turn.
+        if self.player.creature.power(PowerId::Sloth).is_some_and(|p| p.data >= p.amount) {
+            return false;
+        }
         !(card.smogged && self.player.creature.powers.iter().any(|p| p.blocks_smogged()))
     }
 
@@ -646,6 +706,10 @@ impl Combat {
                     }
                     PotionTarget::None => None,
                 };
+                // SurroundedPower.BeforePotionUsed.
+                if let Some(t) = target {
+                    self.face_crab(t);
+                }
                 let mut subs = id.on_use(self, target);
                 subs.push(Effect::AfterPotionUsed);
                 self.push_front_all(subs);
@@ -989,6 +1053,21 @@ impl Combat {
             Effect::TakeOffer { uid } => {
                 if let Some(i) = self.player.offer.iter().position(|c| c.uid == uid) {
                     let mut card = self.player.offer.remove(i);
+                    // KnowledgeDemon.IChoosable.OnChosen: the pick's power
+                    // lands and the card never enters a pile.
+                    let curse = match card.id {
+                        CardId::Disintegration => Some((PowerId::Disintegration, self.stats.offer_disintegration)),
+                        CardId::MindRot => Some((PowerId::MindRot, 1)),
+                        CardId::Sloth => Some((PowerId::Sloth, 3)),
+                        CardId::WasteAway => Some((PowerId::WasteAway, 1)),
+                        _ => None,
+                    };
+                    if let Some((id, amount)) = curse {
+                        self.player.offer.clear();
+                        let me = CreatureRef::Player;
+                        self.queue.push_front(Effect::ApplyPower { target: me, id, amount, applier: Some(me) });
+                        return;
+                    }
                     if self.stats.offer_free {
                         card.cost_this_turn = Some(0);
                     }
@@ -996,6 +1075,51 @@ impl Combat {
                     self.put_card(card, Pile::Hand);
                 }
                 self.player.offer.clear();
+            }
+            Effect::OfferCurse { cards, disintegration } => {
+                self.player.offer.clear();
+                for id in cards {
+                    let card = Card::new(self.new_uid(), id, false);
+                    self.player.offer.push(card);
+                }
+                self.stats.offer_free = false;
+                self.stats.offer_disintegration = disintegration;
+                let options = self.player.offer.iter().map(|c| c.uid).collect();
+                self.pending = Some(Pending { options, then: Then::TakeOffer, can_skip: false });
+            }
+            Effect::CostThisCombat { uid, delta } => {
+                if let Some(c) = self.find_card_mut(uid) {
+                    c.cost_this_combat = Some(c.cost_this_combat.unwrap_or(c.base_cost()) + delta);
+                }
+            }
+            Effect::MonsterStep { me, step } => {
+                if let CreatureRef::Enemy(i) = me {
+                    let subs = self.monster_step(i, step);
+                    self.push_front_all(subs);
+                }
+            }
+            // ReattachPower.DoReattach: only while another segment still lives.
+            Effect::Reattach { target, hp } => {
+                if let CreatureRef::Enemy(i) = target {
+                    if !self.other_segments_dead(i) {
+                        let e = &mut self.enemies[i];
+                        e.creature.hp = hp.min(e.creature.max_hp);
+                        e.reviving = false;
+                    }
+                }
+            }
+            // ToughEgg.HatchMove: every power but Minion goes, then a fresh
+            // HP roll (`Rng.NextInt` excludes the maximum).
+            Effect::Hatch { target } => {
+                if let CreatureRef::Enemy(i) = target {
+                    let (lo, hi) = if self.asc.has(crate::types::AscensionLevel::ToughEnemies) { (20, 23) } else { (19, 22) };
+                    let hp = lo + self.rngs.niche.next_int((hi - lo) as usize) as i32;
+                    let c = &mut self.enemies[i].creature;
+                    c.powers.retain(|p| p.id == PowerId::Minion);
+                    c.max_hp = hp;
+                    c.hp = hp;
+                    self.stats.hp_rerolled.push(i);
+                }
             }
             Effect::CloneToHand { uid, ethereal } => {
                 if let Some(mut card) = self.find_card(uid).cloned() {
@@ -1085,6 +1209,13 @@ impl Combat {
             Effect::CardPlayIter { uid, target, paid } => {
                 let Some(card) = self.find_card(uid).cloned() else { return };
                 self.stats.cards_played_this_turn += 1;
+                // SlothPower.BeforeCardPlayed, SurroundedPower.BeforeCardPlayed.
+                if let Some(p) = self.player.creature.power_mut(PowerId::Sloth) {
+                    p.data += 1;
+                }
+                if let Some(t) = target {
+                    self.face_crab(t);
+                }
                 let mut subs = self.before_card_played(&card);
                 subs.extend(self.relic_before_card_played(&card, paid));
                 subs.extend(card.on_play(self, target));
@@ -1463,7 +1594,7 @@ impl Combat {
             // Burn and Infection deal damage; Beckon, Bad Luck and Regret
             // take HP through block.
             let hurt = match c.id {
-                CardId::Burn | CardId::Infection | CardId::Decay => {
+                CardId::Burn | CardId::Infection | CardId::Decay | CardId::Toxic => {
                     Some((c.vars().damage, ValueProp::UNPOWERED.or(ValueProp::MOVE)))
                 }
                 CardId::Beckon | CardId::BadLuck => Some((c.vars().hp_loss, unblockable)),
@@ -1682,6 +1813,20 @@ impl Combat {
                 out.extend(p.after_card_played(CreatureRef::Enemy(i), card.ty(), card.id, card.upgraded));
             }
         }
+        for i in self.living_enemies().collect::<Vec<_>>() {
+            let me = CreatureRef::Enemy(i);
+            let c = &self.enemies[i].creature;
+            // CurlUpPower.AfterCardPlayed: once the attack that hit is done.
+            if let Some(p) = c.power(PowerId::CurlUp).filter(|p| p.data == card.uid as i32) {
+                out.push(Effect::GainBlock { target: me, amount: p.amount as f64, props: ValueProp::UNPOWERED, card: None });
+                out.push(Effect::RemovePower { target: me, id: PowerId::CurlUp });
+            }
+            // VitalSparkPower.AfterCardPlayed: every skill is Tainted while it
+            // lives, and playing one hands the player that much Tainted.
+            if let Some(p) = c.power(PowerId::VitalSpark).filter(|_| card.ty() == CardType::Skill) {
+                out.push(Effect::ApplyPower { target: CreatureRef::Player, id: PowerId::Tainted, amount: p.amount, applier: None });
+            }
+        }
         out
     }
 
@@ -1891,13 +2036,23 @@ impl Combat {
             num *= e.damage_multiplicative(props);
         }
         for (owner, p) in self.listeners() {
-            num += p.modify_damage_additive(owner, dealer, props);
+            num += p.modify_damage_additive(owner, target, dealer, props);
         }
         num += self.relic_damage_additive(player_card, props);
         for (owner, p) in self.listeners() {
             num *= p.modify_damage_multiplicative(owner, target, dealer, props, dv, dc);
         }
         num *= self.relic_damage_multiplicative(player_card, props);
+        // SurroundedPower.ModifyDamageMultiplicative: the crab half behind the
+        // player hits for half again, powered or not.
+        if let (CreatureRef::Player, Some(CreatureRef::Enemy(d))) = (target, dealer) {
+            if let Some(facing) = self.player.creature.power(PowerId::Surrounded).map(|p| p.data) {
+                let behind = if facing == 0 { PowerId::BackAttackLeft } else { PowerId::BackAttackRight };
+                if self.enemies[d].creature.power(behind).is_some() {
+                    num *= 1.5;
+                }
+            }
+        }
         // GigantificationPower.ModifyDamageMultiplicative: the player's card attacks.
         if player_card.is_some() && props.is_powered() && self.player.creature.power(PowerId::Gigantification).is_some() {
             num *= 3.0;
@@ -1932,6 +2087,10 @@ impl Combat {
         if self.creature(target).power(PowerId::Intangible).is_some() {
             modified = modified.min(1.0);
         }
+        // HardToKillPower.ModifyDamageCap: no hit takes more than the amount.
+        if let Some(cap) = self.creature(target).power(PowerId::HardToKill).map(|p| p.amount) {
+            modified = modified.min(cap as f64);
+        }
         let c = self.creature_mut(target);
         // Creature.DamageBlockInternal: block absorbs min(block, amount),
         // truncated on the block write but not on the remainder.
@@ -1939,6 +2098,25 @@ impl Combat {
         let had_block = c.block > 0;
         c.block -= blocked as i32;
         let block_broken = had_block && blocked > 0.0 && c.block == 0;
+        let fully_blocked = !props.has(ValueProp::UNBLOCKABLE) && (blocked > 0.0 || c.block > 0) && modified - blocked < 1.0;
+        // ImbalancedPower.AfterDamageGiven: a fully blocked hit throws the
+        // Bowlbug Rock off balance.
+        if let Some(CreatureRef::Enemy(d)) = dealer {
+            if fully_blocked && self.enemies[d].creature.power(PowerId::Imbalanced).is_some() {
+                self.enemies[d].monster.vars.off_balance = true;
+            }
+        }
+        // CurlUpPower.AfterDamageReceived remembers the card attack that hit.
+        if let (CreatureRef::Enemy(i), Some(uid)) = (target, card) {
+            if props.is_powered() {
+                if let Some(p) = self.enemies[i].creature.power_mut(PowerId::CurlUp) {
+                    if p.data == 0 {
+                        p.data = uid as i32;
+                    }
+                }
+            }
+        }
+        let c = self.creature_mut(target);
         let mut unblocked = (modified - blocked).max(0.0);
         // SlipperyPower.ModifyHpLostAfterOsty: at most 1 HP per hit.
         if c.power(PowerId::Slippery).is_some() && unblocked >= 1.0 {
@@ -2040,6 +2218,12 @@ impl Combat {
         if target == CreatureRef::Player {
             out.extend(self.relic_after_damage_received(lost, props, own_turn));
         }
+        // BurrowedPower.AfterBlockBroken: the Tunneler is stunned back to Bite
+        // and loses the burrow.
+        if block_broken && target != CreatureRef::Player && self.creature(target).power(PowerId::Burrowed).is_some() {
+            out.push(Effect::Stun { target, next: Some("BITE_MOVE") });
+            out.push(Effect::RemovePower { target, id: PowerId::Burrowed });
+        }
         // HandDrill.AfterDamageGiven: breaking an enemy's block leaves it Vulnerable.
         if block_broken
             && dealer == Some(CreatureRef::Player)
@@ -2119,6 +2303,27 @@ impl Combat {
                 out.push(Effect::Stun { target: them, next: None });
                 out.push(Effect::ApplyPower { target: them, id: PowerId::Strength, amount, applier: Some(them) });
             }
+        }
+        // ReattachPower.AfterDeath: a segment with another still alive plays
+        // dead and comes back.
+        if self.enemies[i].creature.power(PowerId::Reattach).is_some() && !self.other_segments_dead(i) {
+            self.enemies[i].reviving = true;
+            self.enemies[i].monster.force_named_move("DEAD_MOVE");
+        }
+        // CrabRagePower.AfterDeath: the other half gets angry.
+        for j in 0..self.enemies.len() {
+            if j != i && self.enemies[j].creature.alive() && self.enemies[j].creature.power(PowerId::CrabRage).is_some() {
+                let them = CreatureRef::Enemy(j);
+                out.push(Effect::ApplyPower { target: them, id: PowerId::Strength, amount: 6, applier: Some(them) });
+                out.push(Effect::GainBlock { target: them, amount: 99.0, props: ValueProp::UNPOWERED, card: None });
+                out.push(Effect::RemovePower { target: them, id: PowerId::CrabRage });
+            }
+        }
+        // SurroundedPower.AfterDeath: with only one side left, face it.
+        let left: Vec<usize> = self.living_enemies().collect();
+        let all = |id: PowerId| left.iter().all(|&j| self.enemies[j].creature.power(id).is_some());
+        if !left.is_empty() && (all(PowerId::BackAttackLeft) || all(PowerId::BackAttackRight)) {
+            self.face_crab(CreatureRef::Enemy(left[0]));
         }
         self.player
             .creature
@@ -2217,6 +2422,91 @@ impl Combat {
 }
 
 impl Combat {
+    /// `ReattachPower.AreAllOtherSegmentsDead`.
+    fn other_segments_dead(&self, i: usize) -> bool {
+        self.enemies
+            .iter()
+            .enumerate()
+            .filter(|&(j, e)| j != i && e.creature.power(PowerId::Reattach).is_some())
+            .all(|(_, e)| !e.creature.alive())
+    }
+
+    /// `SurroundedPower.UpdateDirection`: turn to face a crab half standing
+    /// behind the player.
+    fn face_crab(&mut self, target: CreatureRef) {
+        let CreatureRef::Enemy(t) = target else { return };
+        let left = self.enemies[t].creature.power(PowerId::BackAttackLeft).is_some();
+        let right = self.enemies[t].creature.power(PowerId::BackAttackRight).is_some();
+        if let Some(p) = self.player.creature.power_mut(PowerId::Surrounded) {
+            if p.data == 0 && left {
+                p.data = 1;
+            } else if p.data == 1 && right {
+                p.data = 0;
+            }
+        }
+    }
+
+    /// `Effect::MonsterStep`: the parts of a monster's move that read the
+    /// combat as the move resolves.
+    fn monster_step(&mut self, i: usize, step: u8) -> Vec<Effect> {
+        use crate::monster::{STEP_FLUTTER_DOWN, STEP_PHEROMONE, STEP_SAIL, STEP_STAGGER, STEP_STEAL};
+        let me = CreatureRef::Enemy(i);
+        match step {
+            // BowlbugRock.HeadbuttMove: `CreatureCmd.Stun(DizzyMove)`.
+            STEP_STAGGER if self.enemies[i].monster.vars.off_balance => {
+                self.enemies[i].monster.stun(None);
+                vec![]
+            }
+            STEP_FLUTTER_DOWN => {
+                self.enemies[i].monster.stun_past_next();
+                vec![]
+            }
+            STEP_STEAL => self.steal_card(i),
+            // Entomancer.SpitMove: the hive grows to three, then Strength.
+            STEP_PHEROMONE => {
+                if self.enemies[i].creature.power_amount(PowerId::PersonalHive) < 3 {
+                    vec![
+                        Effect::ApplyPower { target: me, id: PowerId::PersonalHive, amount: 1, applier: Some(me) },
+                        Effect::ApplyPower { target: me, id: PowerId::Strength, amount: 1, applier: Some(me) },
+                    ]
+                } else {
+                    vec![Effect::ApplyPower { target: me, id: PowerId::Strength, amount: 2, applier: Some(me) }]
+                }
+            }
+            // TheObscura.WailMove: Strength to every teammate, itself included.
+            STEP_SAIL => self
+                .living_enemies()
+                .map(|j| Effect::ApplyPower { target: CreatureRef::Enemy(j), id: PowerId::Strength, amount: 3, applier: Some(me) })
+                .collect(),
+            _ => vec![],
+        }
+    }
+
+    /// `ThievingHopper.ThieveryMove`: take a card the combat started with
+    /// from the draw or discard pile, the rarest first (uncommon, then
+    /// common or rare, then basic, then the rest), and hold it in a Swipe.
+    fn steal_card(&mut self, i: usize) -> Vec<Effect> {
+        use crate::types::CardRarity;
+        let deck = self.stats.deck_size;
+        let imbued = |c: &Card| c.enchantment.is_some_and(|e| e.id == crate::enchant::EnchantmentId::Imbued);
+        let cards: Vec<&Card> = self.player.draw.iter().chain(&self.player.discard).filter(|c| c.uid <= deck).collect();
+        let tiers: [&dyn Fn(&Card) -> bool; 4] = [
+            &|c| !imbued(c) && c.def().rarity == CardRarity::Uncommon,
+            &|c| !imbued(c) && matches!(c.def().rarity, CardRarity::Common | CardRarity::Rare),
+            &|c| !imbued(c) && c.def().rarity == CardRarity::Basic,
+            &|c| imbued(c) || (c.def().rarity == CardRarity::Special && !matches!(c.ty(), CardType::Status | CardType::Curse)),
+        ];
+        let pool: Vec<u32> = tiers
+            .iter()
+            .map(|t| cards.iter().filter(|c| t(c)).map(|c| c.uid).collect::<Vec<_>>())
+            .find(|v| !v.is_empty())
+            .unwrap_or_else(|| cards.iter().map(|c| c.uid).collect());
+        let Some(&uid) = self.rngs.card_generation.pick(&pool) else { return vec![] };
+        self.take_card(uid);
+        let me = CreatureRef::Enemy(i);
+        vec![Effect::ApplyPower { target: me, id: PowerId::Swipe, amount: 1, applier: Some(me) }]
+    }
+
     /// What to do with a chosen card.
     fn choose(&mut self, then: Then, uid: u32) -> Vec<Effect> {
         let again = |then: Then| Effect::Choose { from: Pile::Hand, filter: CardFilter::Any, then, can_skip: true };
@@ -2322,6 +2612,11 @@ fn pool_cards(pool: GenPool) -> Vec<CardId> {
                 }
         })
         .collect()
+}
+
+/// The three `DecimillipedeSegment`s.
+fn is_segment(id: MonsterId) -> bool {
+    matches!(id, MonsterId::DecimillipedeSegmentFront | MonsterId::DecimillipedeSegmentMiddle | MonsterId::DecimillipedeSegmentBack)
 }
 
 /// `Creature.SetUniqueMonsterHpValue`: uniform over the range minus the max HP

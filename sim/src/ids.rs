@@ -150,6 +150,18 @@ pub enum CardId {
     Soot,
     /// Retained energy token from Radiant Pearl.
     Luminesce,
+    // Act 2 (Hive).
+    /// Exhausting status that hurts if it ends the turn in hand (Myte).
+    Toxic,
+    /// Status that pushes the Sandpit back a turn, costing more each play
+    /// (The Insatiable).
+    FranticEscape,
+    /// The four Curse of Knowledge picks (Knowledge Demon). Never in a pile:
+    /// choosing one applies its power.
+    Disintegration,
+    MindRot,
+    Sloth,
+    WasteAway,
 }
 
 /// `Models/Powers/<Name>Power.cs`.
@@ -290,6 +302,55 @@ pub enum PowerId {
     /// Halves powered attack damage taken until the enemy turn ends
     /// (Diamond Diadem).
     DiamondDiadem,
+    // Act 2 (Hive).
+    /// A fully blocked attack knocks the owner off balance (Bowlbug Rock).
+    Imbalanced,
+    /// Caps each hit the owner takes at the amount (Exoskeleton).
+    HardToKill,
+    /// -1 Strength and Dexterity per card played, returned at turn end
+    /// (Hunter Killer). `data` counts the cards.
+    Tender,
+    /// The turns before the Thieving Hopper flees; a display timer.
+    EscapeArtist,
+    /// Holds a card the Thieving Hopper stole.
+    Swipe,
+    /// Halves powered attacks; each one that gets through spends a charge,
+    /// and the last knocks the hopper down (Thieving Hopper).
+    Flutter,
+    /// Keeps block between turns; breaking it stuns (Tunneler).
+    Burrowed,
+    /// Counts down the Slumbering Beetle's nap.
+    Slumber,
+    /// Block once the first card attack that hit has finished (Louse
+    /// Progenitor). `data` is that card's uid.
+    CurlUp,
+    /// Counts down to a Tough Egg hatching.
+    Hatch,
+    /// A dead segment comes back with the amount as HP (Decimillipede).
+    Reattach,
+    /// Dazed into the attacker's draw pile per hit (Entomancer).
+    PersonalHive,
+    /// Skills become Tainted: playing one gives the player Tainted (Infested
+    /// Prism).
+    VitalSpark,
+    /// Extra damage taken from each powered attack until the enemy turn ends.
+    Tainted,
+    /// Markers for which side of the player a Kaiser Crab half stands on.
+    BackAttackLeft,
+    BackAttackRight,
+    /// Strength and block when the other crab half dies.
+    CrabRage,
+    /// 1.5x damage from the crab half behind you. `data` is the facing:
+    /// 0 right, 1 left.
+    Surrounded,
+    /// The Insatiable eats you when this runs out.
+    Sandpit,
+    /// Knowledge Demon's curses: HP loss each turn end, fewer cards drawn,
+    /// a cap on plays per turn, less energy.
+    Disintegration,
+    MindRot,
+    Sloth,
+    WasteAway,
 }
 
 /// `Models/Monsters/<Name>.cs`.
@@ -347,6 +408,33 @@ pub enum MonsterId {
     LagavulinMatriarch,
     SoulFysh,
     WaterfallGiant,
+    // Act 2 (Hive).
+    BowlbugEgg,
+    BowlbugNectar,
+    BowlbugRock,
+    BowlbugSilk,
+    Chomper,
+    Crusher,
+    Rocket,
+    DecimillipedeSegmentFront,
+    DecimillipedeSegmentMiddle,
+    DecimillipedeSegmentBack,
+    Entomancer,
+    Exoskeleton,
+    HunterKiller,
+    InfestedPrism,
+    KnowledgeDemon,
+    LouseProgenitor,
+    Myte,
+    Ovicopter,
+    ToughEgg,
+    SlumberingBeetle,
+    SpinyToad,
+    TheInsatiable,
+    TheObscura,
+    Parafright,
+    ThievingHopper,
+    Tunneler,
 }
 
 /// Every variant, for id lookups by name.
@@ -464,6 +552,12 @@ pub const ALL_CARDS: &[CardId] = &[
     CardId::Writhe,
     CardId::Soot,
     CardId::Luminesce,
+    CardId::Toxic,
+    CardId::FranticEscape,
+    CardId::Disintegration,
+    CardId::MindRot,
+    CardId::Sloth,
+    CardId::WasteAway,
 ];
 
 pub const ALL_POWERS: &[PowerId] = &[
@@ -541,6 +635,29 @@ pub const ALL_POWERS: &[PowerId] = &[
     PowerId::Heist,
     PowerId::Confused,
     PowerId::DiamondDiadem,
+    PowerId::Imbalanced,
+    PowerId::HardToKill,
+    PowerId::Tender,
+    PowerId::EscapeArtist,
+    PowerId::Swipe,
+    PowerId::Flutter,
+    PowerId::Burrowed,
+    PowerId::Slumber,
+    PowerId::CurlUp,
+    PowerId::Hatch,
+    PowerId::Reattach,
+    PowerId::PersonalHive,
+    PowerId::VitalSpark,
+    PowerId::Tainted,
+    PowerId::BackAttackLeft,
+    PowerId::BackAttackRight,
+    PowerId::CrabRage,
+    PowerId::Surrounded,
+    PowerId::Sandpit,
+    PowerId::Disintegration,
+    PowerId::MindRot,
+    PowerId::Sloth,
+    PowerId::WasteAway,
 ];
 
 pub const ALL_MONSTERS: &[MonsterId] = &[
@@ -595,4 +712,30 @@ pub const ALL_MONSTERS: &[MonsterId] = &[
     MonsterId::LagavulinMatriarch,
     MonsterId::SoulFysh,
     MonsterId::WaterfallGiant,
+    MonsterId::BowlbugEgg,
+    MonsterId::BowlbugNectar,
+    MonsterId::BowlbugRock,
+    MonsterId::BowlbugSilk,
+    MonsterId::Chomper,
+    MonsterId::Crusher,
+    MonsterId::Rocket,
+    MonsterId::DecimillipedeSegmentFront,
+    MonsterId::DecimillipedeSegmentMiddle,
+    MonsterId::DecimillipedeSegmentBack,
+    MonsterId::Entomancer,
+    MonsterId::Exoskeleton,
+    MonsterId::HunterKiller,
+    MonsterId::InfestedPrism,
+    MonsterId::KnowledgeDemon,
+    MonsterId::LouseProgenitor,
+    MonsterId::Myte,
+    MonsterId::Ovicopter,
+    MonsterId::ToughEgg,
+    MonsterId::SlumberingBeetle,
+    MonsterId::SpinyToad,
+    MonsterId::TheInsatiable,
+    MonsterId::TheObscura,
+    MonsterId::Parafright,
+    MonsterId::ThievingHopper,
+    MonsterId::Tunneler,
 ];

@@ -49,6 +49,14 @@ pub fn is_debuff(id: PowerId) -> bool {
             | PowerId::Shriek
             | PowerId::Smoggy
             | PowerId::Confused
+            | PowerId::Imbalanced
+            | PowerId::Tender
+            | PowerId::Tainted
+            | PowerId::Surrounded
+            | PowerId::Disintegration
+            | PowerId::MindRot
+            | PowerId::Sloth
+            | PowerId::WasteAway
     )
 }
 
@@ -101,8 +109,10 @@ impl Power {
     }
 
     /// `ModifyDamageAdditive`. `owner` is the creature this power sits on.
-    pub fn modify_damage_additive(&self, owner: CreatureRef, dealer: Option<CreatureRef>, props: ValueProp) -> f64 {
+    pub fn modify_damage_additive(&self, owner: CreatureRef, target: CreatureRef, dealer: Option<CreatureRef>, props: ValueProp) -> f64 {
         match self.id {
+            // TaintedPower.cs: powered attacks on the owner hit harder.
+            PowerId::Tainted if target == owner && props.is_powered() => self.amount as f64,
             // StrengthPower.cs
             PowerId::Strength if dealer == Some(owner) && props.is_powered() => self.amount as f64,
             // VigorPower.cs: the combat loop spends it after the attack.
@@ -138,6 +148,8 @@ impl Power {
             PowerId::Shrink if dealer == Some(owner) => 0.7,
             // DiamondDiademPower.cs: halve powered attacks on the owner.
             PowerId::DiamondDiadem if target == owner => 0.5,
+            // FlutterPower.cs: DamageDecrease 50.
+            PowerId::Flutter if target == owner => 0.5,
             _ => 1.0,
         }
     }
@@ -189,14 +201,16 @@ impl Power {
     pub fn modify_max_energy(&self, amount: i32) -> i32 {
         match self.id {
             PowerId::Pyre => amount + self.amount,
+            PowerId::WasteAway => amount - self.amount,
             _ => amount,
         }
     }
 
-    /// `ModifyHandDraw`: Clarity draws one more each turn.
+    /// `ModifyHandDraw`: Clarity draws one more each turn, Mind Rot fewer.
     pub fn modify_hand_draw(&self, count: u32) -> u32 {
         match self.id {
             PowerId::Clarity => count + 1,
+            PowerId::MindRot => count.saturating_sub(self.amount.max(0) as u32),
             _ => count,
         }
     }
@@ -227,7 +241,7 @@ impl Power {
 
     /// `ShouldClearBlock`.
     pub fn should_clear_block(&self, owner: CreatureRef, creature: CreatureRef) -> bool {
-        !(self.id == PowerId::Barricade && owner == creature)
+        !(matches!(self.id, PowerId::Barricade | PowerId::Burrowed) && owner == creature)
     }
 
     /// `ShouldDraw`: NoDraw blocks everything but the turn-start hand draw.
@@ -290,6 +304,15 @@ impl Power {
             // ClarityPower.cs
             PowerId::Clarity => vec![Effect::DecrementPower { target: owner, id: self.id }],
             // PlatingPower.cs: decrement each turn after the first.
+            // SandpitPower.AfterSideTurnStartLate: one turn closer to being
+            // eaten; its AfterRemoved kills the player outright.
+            PowerId::Sandpit if side == Side::Enemy => {
+                if self.amount <= 1 {
+                    vec![Effect::RemovePower { target: owner, id: self.id }, Effect::Kill { target: CreatureRef::Player }]
+                } else {
+                    vec![Effect::DecrementPower { target: owner, id: self.id }]
+                }
+            }
             PowerId::Plating => {
                 let first = match owner {
                     CreatureRef::Player => turn == 1,
@@ -313,6 +336,10 @@ impl Power {
             self.data = 0;
         }
         if self.id == PowerId::HardenedShell {
+            self.data = 0;
+        }
+        // SlothPower.BeforeSideTurnStart: a fresh allowance of plays.
+        if self.id == PowerId::Sloth && owner.side() == side {
             self.data = 0;
         }
     }
@@ -407,6 +434,34 @@ impl Power {
             {
                 remove()
             }
+            // TenderPower.cs: the turn's Strength and Dexterity come back.
+            PowerId::Tender if own_side => {
+                let n = std::mem::take(&mut self.data);
+                vec![
+                    Effect::ApplyPower { target: owner, id: PowerId::Strength, amount: n, applier: self.applier },
+                    Effect::ApplyPower { target: owner, id: PowerId::Dexterity, amount: n, applier: self.applier },
+                ]
+            }
+            PowerId::Hatch if own_side => vec![Effect::DecrementPower { target: owner, id: self.id }],
+            PowerId::EscapeArtist if own_side && self.amount > 1 => vec![Effect::DecrementPower { target: owner, id: self.id }],
+            PowerId::Tainted if side == Side::Enemy => remove(),
+            // SlumberPower.AfterSideTurnEnd: the nap runs out on its own and
+            // the beetle wakes (WakeUpMove sheds the Plating).
+            PowerId::Slumber if own_side => {
+                let mut e = vec![Effect::DecrementPower { target: owner, id: self.id }];
+                if self.amount <= 1 {
+                    e.push(Effect::RemovePower { target: owner, id: PowerId::Plating });
+                }
+                e
+            }
+            // DisintegrationPower.AfterSideTurnEndLate.
+            PowerId::Disintegration if own_side => vec![Effect::Damage {
+                target: owner,
+                amount: self.amount as f64,
+                props: ValueProp::UNPOWERED,
+                dealer: Some(owner),
+                card: None,
+            }],
             // ShrinkPower.cs: counts down unless permanent (-1).
             PowerId::Shrink if own_side && self.amount > 0 => vec![Effect::DecrementPower { target: owner, id: self.id }],
             // ConstrictPower.cs: HP loss at the end of the owner's turn.
@@ -529,6 +584,15 @@ impl Power {
                 vec![Effect::GainBlock { target: owner, amount: self.amount as f64, props: ValueProp::UNPOWERED, card: None }]
             }
             // JugglingPower.cs: on the third attack this turn, clone it.
+            // TenderPower.cs: every card played costs 1 Strength and Dexterity
+            // until the turn ends.
+            PowerId::Tender => {
+                self.data += 1;
+                vec![
+                    Effect::ApplyPower { target: owner, id: PowerId::Strength, amount: -1, applier: self.applier },
+                    Effect::ApplyPower { target: owner, id: PowerId::Dexterity, amount: -1, applier: self.applier },
+                ]
+            }
             PowerId::Juggling if ty == CardType::Attack => {
                 self.data += 1;
                 if self.data == 3 {
@@ -592,6 +656,29 @@ impl Power {
                 Effect::Stun { target: owner, next: Some("SLASH_MOVE") },
                 Effect::RemovePower { target: owner, id: self.id },
             ],
+            // SlumberPower.cs: each hit that gets through shortens the nap;
+            // the last one stuns it awake into Roll Out.
+            PowerId::Slumber if unblocked > 0 => {
+                let mut e = vec![Effect::DecrementPower { target: owner, id: self.id }];
+                if self.amount <= 1 {
+                    e.push(Effect::Stun { target: owner, next: Some("ROLL_OUT_MOVE") });
+                }
+                e
+            }
+            // FlutterPower.cs: a powered attack that gets through spends a
+            // charge; the last one knocks the hopper out of the air.
+            PowerId::Flutter if unblocked > 0 && props.is_powered() => {
+                let mut e = vec![Effect::DecrementPower { target: owner, id: self.id }];
+                if self.amount <= 1 {
+                    e.push(Effect::MonsterStep { me: owner, step: crate::monster::STEP_FLUTTER_DOWN });
+                }
+                e
+            }
+            // PersonalHivePower.cs: every powered hit on it puts Dazed into
+            // the attacker's draw pile.
+            PowerId::PersonalHive if props.is_powered() && dealer == Some(CreatureRef::Player) => (0..self.amount)
+                .map(|_| Effect::GenerateCard { id: crate::ids::CardId::Dazed, upgraded: false, to: Pile::DrawRandom, free_this_turn: false })
+                .collect(),
             // PlowPower.cs: `hp_after` is the owner's HP after the hit.
             PowerId::Plow if unblocked > 0 && hp_after <= self.amount => vec![
                 Effect::RemoveStrength { target: owner },
