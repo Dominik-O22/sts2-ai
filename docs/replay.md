@@ -64,6 +64,10 @@ between, caught the game mid-resolution and is skipped.
 
 ## Recording what is missing
 
+`scripts/record.py` is the way to set up a fight, including one that is already
+recorded. It knows the deck that makes a long fight, what to carry, and that
+everything has to be set before `fight`.
+
 `scripts/record.py` walks the encounters with no clean recording, builds a
 deck for each through the dev console, says what the monster does and what
 you have to do to make it show, waits for the fight, then replays it.

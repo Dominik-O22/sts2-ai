@@ -49,6 +49,9 @@ Change one here before changing the code that depends on it.
 - A replay harness pushes those logs through the sim, injecting recorded draws and enemy
   rolls, and diffs state per action. Every real run played becomes a regression test.
 - A red suite means a sim bug or a game patch.
+- `scripts/record.py` sets up the fights that produce those logs: it walks the encounters
+  with no clean recording, builds the deck, says what to watch for, and replays the result.
+  Reach for it whenever a game state needs setting up, not only when filling a gap.
 - Unit tests only for mechanics fiddly enough that a replay diff would not say which card
   broke. No test per card. This is a fun project.
 
