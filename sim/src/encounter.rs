@@ -1,7 +1,8 @@
-//! Act 1 encounters: `Models/Encounters/*.cs` via `GenerateAllEncounters`.
+//! Encounters: `Models/Encounters/*.cs` via each act's `GenerateAllEncounters`.
 //! Act 1 is not one fixed act. `ActModel.GetRandomList` picks per act index
 //! from `ModelDb.ActsByIndex`, and both `Overgrowth` and `Underdocks` have
-//! `Index => 0`, so a run rolls one of the two. Both are here.
+//! `Index => 0`, so a run rolls one of the two. Both are here, and act 3
+//! (`Glory`, `Index => 2`).
 //!
 //! Each encounter generates its monster list, rolling its own composition
 //! where the game does.
@@ -11,11 +12,23 @@ use crate::ids::MonsterId;
 use crate::monster::Flags;
 use crate::rng::Rng;
 
-/// Which act 1 a run rolled. `Acts/Overgrowth.cs`, `Acts/Underdocks.cs`.
+/// The act an encounter belongs to. `Acts/Overgrowth.cs`, `Acts/Underdocks.cs`,
+/// `Acts/Glory.cs`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Act {
     Overgrowth,
     Underdocks,
+    Glory,
+}
+
+impl Act {
+    /// `ActModel.Index`: 0 for both act 1s, 2 for act 3.
+    pub fn index(self) -> u8 {
+        match self {
+            Act::Overgrowth | Act::Underdocks => 0,
+            Act::Glory => 2,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -71,6 +84,25 @@ pub enum Encounter {
     LagavulinMatriarchBoss,
     SoulFyshBoss,
     WaterfallGiantBoss,
+    // Act 3 (Glory).
+    DevotedSculptorWeak,
+    ScrollsOfBitingWeak,
+    TurretOperatorWeak,
+    AxebotsNormal,
+    ConstructMenagerieNormal,
+    FabricatorNormal,
+    FrogKnightNormal,
+    GlobeHeadNormal,
+    OwlMagistrateNormal,
+    ScrollsOfBitingNormal,
+    SlimedBerserkerNormal,
+    TheLostAndForgottenNormal,
+    KnightsElite,
+    MechaKnightElite,
+    SoulNexusElite,
+    AeonglassBoss,
+    QueenBoss,
+    TestSubjectBoss,
 }
 
 pub const ALL: &[Encounter] = &[
@@ -116,6 +148,24 @@ pub const ALL: &[Encounter] = &[
     Encounter::LagavulinMatriarchBoss,
     Encounter::SoulFyshBoss,
     Encounter::WaterfallGiantBoss,
+    Encounter::DevotedSculptorWeak,
+    Encounter::ScrollsOfBitingWeak,
+    Encounter::TurretOperatorWeak,
+    Encounter::AxebotsNormal,
+    Encounter::ConstructMenagerieNormal,
+    Encounter::FabricatorNormal,
+    Encounter::FrogKnightNormal,
+    Encounter::GlobeHeadNormal,
+    Encounter::OwlMagistrateNormal,
+    Encounter::ScrollsOfBitingNormal,
+    Encounter::SlimedBerserkerNormal,
+    Encounter::TheLostAndForgottenNormal,
+    Encounter::KnightsElite,
+    Encounter::MechaKnightElite,
+    Encounter::SoulNexusElite,
+    Encounter::AeonglassBoss,
+    Encounter::QueenBoss,
+    Encounter::TestSubjectBoss,
 ];
 
 fn one(id: MonsterId) -> EnemySpec {
@@ -127,12 +177,20 @@ fn slug_with_move(idx: u8) -> EnemySpec {
     EnemySpec { id: MonsterId::CorpseSlug, flags: Flags { starter_move: idx, ..Flags::default() } }
 }
 
+/// `ScrollOfBiting.StarterMoveIdx`.
+fn scroll_with_move(idx: u8) -> EnemySpec {
+    EnemySpec { id: MonsterId::ScrollOfBiting, flags: Flags { starter_move: idx, ..Flags::default() } }
+}
+
 impl Encounter {
     pub fn kind(self) -> Kind {
         use Encounter::*;
         match self {
             FuzzyWurmCrawlerWeak | NibbitsWeak | ShrinkerBeetleWeak | SlimesWeak => Kind::Weak,
             CorpseSlugsWeak | SeapunkWeak | SludgeSpinnerWeak | ToadpolesWeak => Kind::Weak,
+            DevotedSculptorWeak | ScrollsOfBitingWeak | TurretOperatorWeak => Kind::Weak,
+            KnightsElite | MechaKnightElite | SoulNexusElite => Kind::Elite,
+            AeonglassBoss | QueenBoss | TestSubjectBoss => Kind::Boss,
             BygoneEffigyElite | ByrdonisElite | PhrogParasiteElite => Kind::Elite,
             PhantasmalGardenersElite | SkulkingColonyElite | TerrorEelElite => Kind::Elite,
             VantomBoss | CeremonialBeastBoss | TheKinBoss => Kind::Boss,
@@ -141,10 +199,14 @@ impl Encounter {
         }
     }
 
-    /// Which act 1 this encounter belongs to. The two never mix in a run.
+    /// Which act this encounter belongs to. The two act 1s never mix in a run.
     pub fn act(self) -> Act {
         use Encounter::*;
         match self {
+            DevotedSculptorWeak | ScrollsOfBitingWeak | TurretOperatorWeak | AxebotsNormal | ConstructMenagerieNormal
+            | FabricatorNormal | FrogKnightNormal | GlobeHeadNormal | OwlMagistrateNormal | ScrollsOfBitingNormal
+            | SlimedBerserkerNormal | TheLostAndForgottenNormal | KnightsElite | MechaKnightElite | SoulNexusElite
+            | AeonglassBoss | QueenBoss | TestSubjectBoss => Act::Glory,
             CorpseSlugsWeak | SeapunkWeak | SludgeSpinnerWeak | ToadpolesWeak | CorpseSlugsNormal | CultistsNormal
             | FossilStalkerNormal | GremlinMercNormal | HauntedShipNormal | LivingFogNormal | PunchConstructNormal
             | SeapunkNormal | SewerClamNormal | TwoTailedRatsNormal | PhantasmalGardenersElite | SkulkingColonyElite
@@ -264,6 +326,36 @@ impl Encounter {
             LagavulinMatriarchBoss => vec![one(LagavulinMatriarch)],
             SoulFyshBoss => vec![one(SoulFysh)],
             WaterfallGiantBoss => vec![one(WaterfallGiant)],
+
+            DevotedSculptorWeak => vec![one(DevotedSculptor)],
+            // Starting moves offset by one from a single roll, like the slugs.
+            ScrollsOfBitingWeak | ScrollsOfBitingNormal => {
+                let first = rng.next_int(3) as u8;
+                let mut v: Vec<EnemySpec> = (0..3).map(|i| scroll_with_move((first + i) % 3)).collect();
+                // The fourth scroll always opens on More Teeth.
+                if self == ScrollsOfBitingNormal {
+                    v.push(scroll_with_move(2));
+                }
+                v
+            }
+            TurretOperatorWeak => vec![one(LivingShield), one(TurretOperator)],
+            AxebotsNormal => vec![one(Axebot)],
+            ConstructMenagerieNormal => vec![one(PunchConstruct), one(CubexConstruct), one(CubexConstruct)],
+            // Slots are bot1, bot2, fabricator, bot3, bot4: the bots it
+            // builds fill in around it.
+            FabricatorNormal => vec![EnemySpec { id: Fabricator, flags: Flags { slot: 3, ..Default::default() } }],
+            FrogKnightNormal => vec![one(FrogKnight)],
+            GlobeHeadNormal => vec![one(GlobeHead)],
+            OwlMagistrateNormal => vec![one(OwlMagistrate)],
+            SlimedBerserkerNormal => vec![one(SlimedBerserker)],
+            TheLostAndForgottenNormal => vec![one(TheLost), one(TheForgotten)],
+            KnightsElite => vec![one(FlailKnight), one(SpectralKnight), one(MagiKnight)],
+            MechaKnightElite => vec![one(MechaKnight)],
+            SoulNexusElite => vec![one(SoulNexus)],
+            AeonglassBoss => vec![one(Aeonglass)],
+            // Slots are amalgam, queen.
+            QueenBoss => vec![one(TorchHeadAmalgam), one(Queen)],
+            TestSubjectBoss => vec![one(TestSubject)],
         }
     }
 }

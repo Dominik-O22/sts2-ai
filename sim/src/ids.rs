@@ -150,6 +150,10 @@ pub enum CardId {
     Soot,
     /// Retained energy token from Radiant Pearl.
     Luminesce,
+    // Act 3 (Glory).
+    /// Unplayable status that hurts at the end of the turn, harder with every
+    /// Increasing Intensity (Aeonglass).
+    Wither,
 }
 
 /// `Models/Powers/<Name>Power.cs`.
@@ -290,6 +294,40 @@ pub enum PowerId {
     /// Halves powered attack damage taken until the enemy turn ends
     /// (Diamond Diadem).
     DiamondDiadem,
+    // Act 3 (Glory).
+    /// Respawns the Axebot with one less stock when it dies.
+    Stock,
+    /// Power cards are Galvanized; playing one hurts you (Globe Head).
+    Galvanic,
+    /// Halves powered attack damage taken (Owl Magistrate in flight).
+    Soar,
+    /// Unblocked attack damage costs you max HP (Scroll of Biting).
+    PaperCuts,
+    /// Blocks every Turret Operator at the start of your turn (Living Shield).
+    Rampart,
+    /// Strength it steals returns when it dies (The Lost).
+    PossessStrength,
+    /// Dexterity it steals returns when it dies (The Forgotten).
+    PossessSpeed,
+    /// Every card is Hexed, and Hexed cards are Ethereal (Spectral Knight).
+    Hex,
+    /// Your upgraded cards are downgraded until the caster dies (Magi Knight).
+    Dampen,
+    /// Strength at the end of the owner's turn (Zapbot).
+    HighVoltage,
+    /// Binds the first cards drawn each turn; only one Bound card may be
+    /// played per turn (Queen).
+    ChainsOfBinding,
+    /// Revives the Test Subject in a stronger form instead of dying.
+    Adaptable,
+    /// Strength whenever you play a Skill (Test Subject).
+    Enrage,
+    /// A Wound for every unblocked hit of its attacks (Test Subject).
+    PainfulStabs,
+    /// Intangible every other turn (Test Subject).
+    Nemesis,
+    /// A Wither into your hand every sixth card you play (Aeonglass).
+    WitheringPresence,
 }
 
 /// `Models/Monsters/<Name>.cs`.
@@ -347,6 +385,32 @@ pub enum MonsterId {
     LagavulinMatriarch,
     SoulFysh,
     WaterfallGiant,
+    // Act 3 (Glory).
+    Axebot,
+    DevotedSculptor,
+    FrogKnight,
+    GlobeHead,
+    OwlMagistrate,
+    ScrollOfBiting,
+    SlimedBerserker,
+    LivingShield,
+    TurretOperator,
+    TheLost,
+    TheForgotten,
+    MechaKnight,
+    FlailKnight,
+    SpectralKnight,
+    MagiKnight,
+    SoulNexus,
+    Fabricator,
+    Zapbot,
+    Stabbot,
+    Guardbot,
+    Noisebot,
+    Queen,
+    TorchHeadAmalgam,
+    TestSubject,
+    Aeonglass,
 }
 
 /// Every variant, for id lookups by name.
@@ -464,6 +528,7 @@ pub const ALL_CARDS: &[CardId] = &[
     CardId::Writhe,
     CardId::Soot,
     CardId::Luminesce,
+    CardId::Wither,
 ];
 
 pub const ALL_POWERS: &[PowerId] = &[
@@ -541,6 +606,22 @@ pub const ALL_POWERS: &[PowerId] = &[
     PowerId::Heist,
     PowerId::Confused,
     PowerId::DiamondDiadem,
+    PowerId::Stock,
+    PowerId::Galvanic,
+    PowerId::Soar,
+    PowerId::PaperCuts,
+    PowerId::Rampart,
+    PowerId::PossessStrength,
+    PowerId::PossessSpeed,
+    PowerId::Hex,
+    PowerId::Dampen,
+    PowerId::HighVoltage,
+    PowerId::ChainsOfBinding,
+    PowerId::Adaptable,
+    PowerId::Enrage,
+    PowerId::PainfulStabs,
+    PowerId::Nemesis,
+    PowerId::WitheringPresence,
 ];
 
 pub const ALL_MONSTERS: &[MonsterId] = &[
@@ -595,4 +676,29 @@ pub const ALL_MONSTERS: &[MonsterId] = &[
     MonsterId::LagavulinMatriarch,
     MonsterId::SoulFysh,
     MonsterId::WaterfallGiant,
+    MonsterId::Axebot,
+    MonsterId::DevotedSculptor,
+    MonsterId::FrogKnight,
+    MonsterId::GlobeHead,
+    MonsterId::OwlMagistrate,
+    MonsterId::ScrollOfBiting,
+    MonsterId::SlimedBerserker,
+    MonsterId::LivingShield,
+    MonsterId::TurretOperator,
+    MonsterId::TheLost,
+    MonsterId::TheForgotten,
+    MonsterId::MechaKnight,
+    MonsterId::FlailKnight,
+    MonsterId::SpectralKnight,
+    MonsterId::MagiKnight,
+    MonsterId::SoulNexus,
+    MonsterId::Fabricator,
+    MonsterId::Zapbot,
+    MonsterId::Stabbot,
+    MonsterId::Guardbot,
+    MonsterId::Noisebot,
+    MonsterId::Queen,
+    MonsterId::TorchHeadAmalgam,
+    MonsterId::TestSubject,
+    MonsterId::Aeonglass,
 ];

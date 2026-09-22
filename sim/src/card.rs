@@ -173,6 +173,7 @@ defs! {
     Writhe: -1, Curse, Special, None, kw = [Unplayable, Innate], gen = false;
     Soot: -1, Status, Special, None, kw = [Unplayable], gen = false;
     Luminesce: 0, Skill, Special, Self_, kw = [Exhaust, Retain], gen = false;
+    Wither: -1, Status, Special, None, kw = [Unplayable], gen = false;
 }
 
 /// The Ironclad card pool in `IroncladCardPool.cs` order, for generation.
@@ -196,6 +197,18 @@ pub const IRONCLAD_POOL: &[CardId] = &[
     CardId::Tremble, CardId::TrueGrit, CardId::TwinStrike, CardId::Unmovable, CardId::Unrelenting,
     CardId::Uppercut, CardId::Vicious, CardId::Whirlwind,
 ];
+
+/// `Models/Afflictions/*.cs` from act 3. Smog predates this and lives in
+/// `Card::smogged`; a card never holds more than one affliction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Affliction {
+    /// Playing it hurts you for Globe Head's Galvanic (`Galvanized.cs`).
+    Galvanized,
+    /// Ethereal while Hex is on you (`Hexed.cs`).
+    Hexed,
+    /// Only one Bound card per turn (`Bound.cs`, Queen's Chains of Binding).
+    Bound,
+}
 
 /// `DynamicVarSet` flattened to the numbers cards use.
 #[derive(Clone, Copy, Debug, PartialEq, Default)]
@@ -240,6 +253,10 @@ pub struct Card {
     /// `CardModel.IsDupe` (History Course): loses Exhaust and leaves combat
     /// once played.
     pub dupe: bool,
+    /// `CardModel.Affliction`, the act 3 ones.
+    pub affliction: Option<Affliction>,
+    /// Downgraded by Magi Knight's Dampen; upgraded again when it lifts.
+    pub dampened: bool,
 }
 
 impl Card {
@@ -259,6 +276,8 @@ impl Card {
             enchantment: None,
             retain_added: false,
             dupe: false,
+            affliction: None,
+            dampened: false,
         }
     }
 
@@ -326,7 +345,7 @@ impl Card {
         if self.def().keywords.contains(&k) {
             return true;
         }
-        if k == Keyword::Ethereal && self.ethereal_added {
+        if k == Keyword::Ethereal && (self.ethereal_added || self.affliction == Some(Affliction::Hexed)) {
             return true;
         }
         k == Keyword::Innate && self.upgraded && matches!(self.id, CardId::Aggression | CardId::Juggling)
@@ -450,6 +469,8 @@ impl Card {
             BadLuck => Vars { hp_loss: 13.0, ..d() },
             Decay => Vars { damage: 2.0, ..d() },
             Luminesce => Vars { energy: if up { 3 } else { 2 }, ..d() },
+            // Aeonglass's upgrades land in `extra_damage`, 3 at a time.
+            Wither => Vars { damage: 3.0, ..d() },
         };
         v.damage += self.extra_damage;
         v
@@ -699,7 +720,7 @@ impl Card {
             Whirlwind => vec![aoe(self.captured_x.max(0) as u32)],
             Slimed => vec![draw(v.cards)],
             GiantRock => vec![attack(1)],
-            Wound | Dazed | Burn | Infection | AscendersBane | Beckon | Soot => vec![],
+            Wound | Dazed | Burn | Infection | AscendersBane | Beckon | Soot | Wither => vec![],
             Luminesce => vec![Effect::GainEnergy { amount: v.energy }],
             // Enthralled and Spore Mind are the only playable curses and
             // neither does anything; the rest are unplayable.

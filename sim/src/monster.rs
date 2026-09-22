@@ -101,6 +101,21 @@ pub enum Cond {
     /// `Creature.HasPower<AsleepPower>` (Lagavulin Matriarch's sleep branch).
     Asleep,
     NotAsleep,
+    /// `LivingShield.GetAllyCount() > 0`: another enemy is still alive.
+    HasAllies,
+    NoAllies,
+    /// `Fabricator.CanFabricate`: fewer than four living on its side.
+    CanFabricate,
+    CannotFabricate,
+    /// `FrogKnight`'s HALF_HEALTH branch: the charge comes once, below half.
+    BeetleCharge,
+    NoBeetleCharge,
+    /// `Queen.HasAmalgamDied`.
+    AmalgamAlive,
+    AmalgamDead,
+    /// `TestSubject.Respawns < 2`: still in its second form.
+    SecondForm,
+    ThirdForm,
 }
 
 /// What a branch predicate may read outside the monster itself. The game's
@@ -113,6 +128,10 @@ pub struct RollCtx {
     /// `TwoTailedRat.CanSummon()`, which folds together its own counters, the
     /// free encounter slots, and whether a peer is already calling.
     pub can_summon: bool,
+    /// Living enemies other than this one (Living Shield, Fabricator).
+    pub allies_alive: usize,
+    /// `CurrentHp < MaxHp / 2`, integer division (Frog Knight).
+    pub below_half: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -157,6 +176,9 @@ pub struct Flags {
     /// `CorpseSlug.StarterMoveIdx` / `TwoTailedRat.StarterMoveIndex`: which
     /// move of three the monster opens on.
     pub starter_move: u8,
+    /// `Axebot._stockOverrideAmount`: set on an Axebot its Stock respawned,
+    /// which opens on Boot Up with this many respawns left.
+    pub stock: Option<u8>,
 }
 
 /// Counters a monster keeps across its own moves, each named after the field
@@ -171,6 +193,22 @@ pub struct Vars {
     pub pressure_gun_damage: i32,
     /// `WaterfallGiant.SteamEruptionDamage`, the pressure the blast carries.
     pub steam_eruption_damage: i32,
+    /// `Axebot.StockAmount`: 2, or what a respawn was left with.
+    pub stock: i32,
+    /// `FrogKnight.HasBeetleCharged`.
+    pub beetle_charged: bool,
+    /// `Queen.HasAmalgamDied`.
+    pub amalgam_died: bool,
+    /// `TestSubject.Respawns` and `ExtraMultiClawCount`.
+    pub respawns: i32,
+    pub extra_claws: i32,
+    /// `Aeonglass.WitherUpgradeCount` and `AdditionalStrength`.
+    pub wither_upgrades: i32,
+    pub extra_strength: i32,
+    /// The monster's own Dexterity when it acts (The Forgotten's Dread).
+    pub own_dex: i32,
+    /// `Fabricator._lastSpawned`: the next bot is never the same one.
+    pub last_spawned: Option<MonsterId>,
 }
 
 #[derive(Clone, Debug)]
@@ -201,6 +239,7 @@ impl Monster {
             vars: Vars {
                 turns_until_summonable: 2,
                 pressure_gun_damage: Self::pressure_gun_base(id, asc),
+                stock: flags.stock.map_or(2, i32::from),
                 ..Vars::default()
             },
             states,
@@ -277,6 +316,31 @@ impl Monster {
             LagavulinMatriarch => flat(222, 233),
             SoulFysh => flat(211, 221),
             WaterfallGiant => flat(240, 250),
+
+            Axebot => r(70, 78, 76, 86),
+            DevotedSculptor => flat(162, 172),
+            FrogKnight => flat(191, 199),
+            GlobeHead => flat(148, 158),
+            OwlMagistrate => flat(231, 247),
+            ScrollOfBiting => r(30, 37, 33, 39),
+            SlimedBerserker => flat(261, 281),
+            LivingShield => flat(55, 65),
+            TurretOperator => flat(41, 51),
+            TheLost => flat(93, 99),
+            TheForgotten => flat(106, 111),
+            MechaKnight => flat(300, 320),
+            FlailKnight => flat(101, 108),
+            SpectralKnight => flat(93, 97),
+            MagiKnight => flat(82, 89),
+            SoulNexus => flat(234, 254),
+            Fabricator => flat(150, 155),
+            Zapbot | Stabbot | Noisebot => r(18, 23, 19, 24),
+            Guardbot => r(16, 20, 17, 21),
+            Queen => flat(400, 419),
+            TorchHeadAmalgam => flat(199, 211),
+            // The first of its three forms.
+            TestSubject => flat(100, 111),
+            Aeonglass => flat(512, 535),
         }
     }
 
@@ -305,6 +369,21 @@ impl Monster {
             TerrorEel => vec![(PowerId::Shriek, asc.pick(AscensionLevel::ToughEnemies, 75, 70))],
             // LagavulinMatriarch.Sleep: shell first, then the nap counter.
             LagavulinMatriarch => vec![(PowerId::Plating, 12), (PowerId::Asleep, 3)],
+
+            // A respawned Axebot carries fewer; `Combat::spawn` sets that.
+            Axebot => vec![(PowerId::Stock, 2)],
+            FrogKnight => vec![(PowerId::Plating, asc.pick(AscensionLevel::ToughEnemies, 19, 15))],
+            GlobeHead => vec![(PowerId::Galvanic, 6)],
+            ScrollOfBiting => vec![(PowerId::PaperCuts, 2)],
+            LivingShield => vec![(PowerId::Rampart, 25)],
+            TheLost => vec![(PowerId::PossessStrength, 1)],
+            TheForgotten => vec![(PowerId::PossessSpeed, 1)],
+            MechaKnight => vec![(PowerId::Artifact, 3)],
+            Zapbot => vec![(PowerId::HighVoltage, 2)],
+            TorchHeadAmalgam => vec![(PowerId::Minion, 1)],
+            TestSubject => vec![(PowerId::Adaptable, 1), (PowerId::Enrage, asc.pick(AscensionLevel::DeadlyEnemies, 3, 2))],
+            // WitheringPresencePower counts six cards; the amount is that count.
+            Aeonglass => vec![(PowerId::WitheringPresence, 6), (PowerId::Artifact, 3)],
             _ => vec![],
         }
     }
@@ -385,7 +464,13 @@ impl Monster {
     /// `WaterfallGiant.TriggerAboutToBlowState`: jump straight to the wind-up,
     /// whatever the graph had queued (`SetMoveImmediate(forceTransition: true)`).
     pub fn force_about_to_blow(&mut self) {
-        let Some(idx) = self.states.iter().position(|s| s.name() == "ABOUT_TO_BLOW_MOVE") else { return };
+        self.force_to("ABOUT_TO_BLOW_MOVE");
+    }
+
+    /// `MonsterModel.SetMoveImmediate`: `name` becomes the next move at once
+    /// (Test Subject's death, the Queen enraging when her Amalgam falls).
+    pub fn force_to(&mut self, name: &str) {
+        let Some(idx) = self.states.iter().position(|s| s.name() == name) else { return };
         self.current = idx;
         self.performed_current = false;
         self.next_move = Some(idx);
@@ -460,6 +545,16 @@ impl Monster {
             Cond::Slot(n) => self.flags.slot == n,
             Cond::Asleep => ctx.asleep,
             Cond::NotAsleep => !ctx.asleep,
+            Cond::HasAllies => ctx.allies_alive > 0,
+            Cond::NoAllies => ctx.allies_alive == 0,
+            Cond::CanFabricate => ctx.allies_alive + 1 < 4,
+            Cond::CannotFabricate => ctx.allies_alive + 1 >= 4,
+            Cond::BeetleCharge => !self.vars.beetle_charged && ctx.below_half,
+            Cond::NoBeetleCharge => self.vars.beetle_charged || !ctx.below_half,
+            Cond::AmalgamAlive => !self.vars.amalgam_died,
+            Cond::AmalgamDead => self.vars.amalgam_died,
+            Cond::SecondForm => self.vars.respawns < 2,
+            Cond::ThirdForm => self.vars.respawns >= 2,
         }
     }
 
@@ -527,6 +622,11 @@ fn block(me: CreatureRef, amount: i32) -> Effect {
 
 fn buff(me: CreatureRef, id: PowerId, amount: i32) -> Effect {
     Effect::ApplyPower { target: me, id, amount, applier: Some(me) }
+}
+
+/// `PowerCmd.Apply<T>(Creature, amount, null, null)`: no applier.
+fn buff_unsourced(me: CreatureRef, id: PowerId, amount: i32) -> Effect {
+    Effect::ApplyPower { target: me, id, amount, applier: None }
 }
 
 /// `PowerCmd.Apply<T>(targets, ...)` against every player creature.
@@ -775,6 +875,163 @@ fn moves(id: MonsterId, name: &str, me: CreatureRef, asc: Ascension, vars: &mut 
         (WaterfallGiant, "ABOUT_TO_BLOW_MOVE") => vec![Effect::ArmSteamEruption { target: me }],
         (WaterfallGiant, "EXPLODE_MOVE") => {
             vec![attack(me, vars.steam_eruption_damage, 1), Effect::Kill { target: me }]
+        }
+
+        // Act 3 (Glory).
+        // Boot Up is where a respawned Axebot starts: Strength for every
+        // stock it has spent.
+        (Axebot, "BOOT_UP_MOVE") => vec![block(me, d(10, 15)), buff(me, PowerId::Strength, d(3, 4) * (2 - vars.stock))],
+        (Axebot, "ONE_TWO_MOVE") => vec![attack(me, d(9, 10), 2)],
+        (Axebot, "HAMMER_UPPERCUT_MOVE") => {
+            vec![attack(me, d(12, 14), 1), debuff(me, PowerId::Weak, 2), debuff(me, PowerId::Frail, 2)]
+        }
+
+        (DevotedSculptor, "FORBIDDEN_INCANTATION_MOVE") => vec![buff_unsourced(me, PowerId::Ritual, 9)],
+        (DevotedSculptor, "SAVAGE_MOVE") => vec![attack(me, d(12, 15), 1)],
+
+        (FrogKnight, "FOR_THE_QUEEN") => vec![buff(me, PowerId::Strength, 5)],
+        (FrogKnight, "STRIKE_DOWN_EVIL") => vec![attack(me, d(21, 23), 1)],
+        (FrogKnight, "TONGUE_LASH") => vec![attack(me, d(13, 14), 1), debuff(me, PowerId::Frail, 2)],
+        (FrogKnight, "BEETLE_CHARGE") => {
+            vars.beetle_charged = true;
+            vec![attack(me, d(35, 40), 1)]
+        }
+
+        (GlobeHead, "THUNDER_STRIKE") => vec![attack(me, d(6, 7), 3)],
+        (GlobeHead, "SHOCKING_SLAP") => vec![attack(me, d(13, 14), 1), debuff(me, PowerId::Frail, 2)],
+        (GlobeHead, "GALVANIC_BURST") => vec![attack(me, d(16, 17), 1), buff(me, PowerId::Strength, 2)],
+
+        (OwlMagistrate, "MAGISTRATE_SCRUTINY") => vec![attack(me, d(16, 17), 1)],
+        (OwlMagistrate, "PECK_ASSAULT") => vec![attack(me, 4, 6)],
+        (OwlMagistrate, "JUDICIAL_FLIGHT") => vec![buff(me, PowerId::Soar, 1)],
+        (OwlMagistrate, "VERDICT") => vec![
+            attack(me, d(33, 36), 1),
+            debuff(me, PowerId::Vulnerable, 4),
+            Effect::RemovePower { target: me, id: PowerId::Soar },
+        ],
+
+        (ScrollOfBiting, "CHOMP") => vec![attack(me, d(14, 16), 1)],
+        (ScrollOfBiting, "CHEW") => vec![attack(me, d(5, 6), 2)],
+        (ScrollOfBiting, "MORE_TEETH") => vec![buff(me, PowerId::Strength, 2)],
+
+        (SlimedBerserker, "VOMIT_ICHOR_MOVE") => statuses(CardId::Slimed, 10).collect(),
+        // The Weak has no applier.
+        (SlimedBerserker, "LEECHING_HUG_MOVE") => vec![
+            Effect::ApplyPower { target: CreatureRef::Player, id: PowerId::Weak, amount: 3, applier: None },
+            buff(me, PowerId::Strength, 3),
+        ],
+        (SlimedBerserker, "SMOTHER_MOVE") => vec![attack(me, d(30, 33), 1)],
+        (SlimedBerserker, "FURIOUS_PUMMELING_MOVE") => vec![attack(me, d(4, 5), 4)],
+
+        (LivingShield, "SHIELD_SLAM_MOVE") => vec![attack(me, 6, 1)],
+        (LivingShield, "SMASH_MOVE") => vec![attack(me, d(16, 18), 1), buff(me, PowerId::Strength, 3)],
+        (TurretOperator, "UNLOAD_MOVE" | "UNLOAD_MOVE_2") => vec![attack(me, d(3, 4), 5)],
+        (TurretOperator, "RELOAD_MOVE") => vec![buff(me, PowerId::Strength, 1)],
+
+        // What they steal comes back when they die (PossessStrength/SpeedPower).
+        (TheLost, "DEBILITATING_SMOG") => vec![debuff(me, PowerId::Strength, -2), buff(me, PowerId::Strength, 2)],
+        (TheLost, "EYE_LASERS") => vec![attack(me, d(4, 5), 2)],
+        (TheForgotten, "MIASMA") => {
+            vec![debuff(me, PowerId::Dexterity, -2), block(me, 8), buff(me, PowerId::Dexterity, 2)]
+        }
+        (TheForgotten, "DREAD") => vec![attack(me, d(13, 15) + vars.own_dex, 1)],
+
+        (MechaKnight, "CHARGE_MOVE") => vec![attack(me, d(25, 30), 1)],
+        (MechaKnight, "FLAMETHROWER_MOVE") => (0..4)
+            .map(|_| Effect::GenerateCard { id: CardId::Burn, upgraded: false, to: Pile::Hand, free_this_turn: false })
+            .collect(),
+        (MechaKnight, "WINDUP_MOVE") => vec![block(me, 15), buff(me, PowerId::Strength, 5)],
+        (MechaKnight, "HEAVY_CLEAVE_MOVE") => vec![attack(me, d(35, 40), 1)],
+
+        (FlailKnight, "WAR_CHANT") => vec![buff(me, PowerId::Strength, 3)],
+        (FlailKnight, "FLAIL_MOVE") => vec![attack(me, d(9, 10), 2)],
+        (FlailKnight, "RAM_MOVE") => vec![attack(me, d(15, 17), 1)],
+        (SpectralKnight, "HEX") => vec![debuff(me, PowerId::Hex, 2)],
+        (SpectralKnight, "SOUL_SLASH") => vec![attack(me, d(15, 17), 1)],
+        (SpectralKnight, "SOUL_FLAME") => vec![attack(me, d(3, 4), 3)],
+        (MagiKnight, "POWER_SHIELD_MOVE") => vec![attack(me, d(6, 7), 1), block(me, t(5, 9))],
+        (MagiKnight, "DAMPEN_MOVE") => vec![debuff(me, PowerId::Dampen, 1)],
+        (MagiKnight, "PREP_MOVE") => vec![block(me, t(5, 9))],
+        (MagiKnight, "MAGIC_BOMB") => vec![attack(me, d(35, 40), 1)],
+        (MagiKnight, "RAM_MOVE") => vec![attack(me, d(10, 11), 1)],
+
+        (SoulNexus, "SOUL_BURN_MOVE") => vec![attack(me, d(29, 31), 1)],
+        (SoulNexus, "MAELSTROM_MOVE") => vec![attack(me, d(6, 7), 4)],
+        (SoulNexus, "DRAIN_LIFE_MOVE") => {
+            vec![attack(me, d(18, 19), 1), debuff(me, PowerId::Vulnerable, 2), debuff(me, PowerId::Weak, 2)]
+        }
+
+        (Fabricator, "FABRICATE_MOVE") => vec![
+            Effect::FabricateBot { fabricator: me, aggro: false },
+            Effect::FabricateBot { fabricator: me, aggro: true },
+        ],
+        (Fabricator, "FABRICATING_STRIKE_MOVE") => {
+            vec![attack(me, d(18, 21), 1), Effect::FabricateBot { fabricator: me, aggro: true }]
+        }
+        (Fabricator, "DISINTEGRATE_MOVE") => vec![attack(me, d(11, 13), 1)],
+        (Zapbot, "ZAP") => vec![attack(me, d(14, 15), 1)],
+        (Stabbot, "STAB_MOVE") => vec![attack(me, d(11, 12), 1), debuff(me, PowerId::Frail, 1)],
+        (Guardbot, "GUARD_MOVE") => vec![Effect::BlockMonsters { id: Fabricator, amount: 15 }],
+        (Noisebot, "NOISE_MOVE") => vec![
+            Effect::GenerateCard { id: CardId::Dazed, upgraded: false, to: Pile::Discard, free_this_turn: false },
+            Effect::GenerateCard { id: CardId::Dazed, upgraded: false, to: Pile::DrawRandom, free_this_turn: false },
+        ],
+
+        (Queen, "PUPPET_STRINGS_MOVE") => vec![debuff(me, PowerId::ChainsOfBinding, 3)],
+        (Queen, "YOU_ARE_MINE_MOVE") => vec![
+            debuff(me, PowerId::Frail, 99),
+            debuff(me, PowerId::Weak, 99),
+            debuff(me, PowerId::Vulnerable, 99),
+        ],
+        (Queen, "BURN_BRIGHT_FOR_ME_MOVE") => {
+            vec![Effect::ApplyPowerAllies { source: me, id: PowerId::Strength, amount: 1 }, block(me, 20)]
+        }
+        (Queen, "OFF_WITH_YOUR_HEAD_MOVE") => vec![attack(me, d(3, 4), 5)],
+        (Queen, "EXECUTION_MOVE") => vec![attack(me, d(15, 18), 1)],
+        (Queen, "ENRAGE_MOVE") => vec![buff(me, PowerId::Strength, 2)],
+        (TorchHeadAmalgam, "TACKLE_MOVE" | "TACKLE_2_MOVE") => vec![attack(me, d(18, 19), 1)],
+        (TorchHeadAmalgam, "BEAM_MOVE") => vec![attack(me, 8, 3)],
+        (TorchHeadAmalgam, "TACKLE_3_MOVE" | "TACKLE_4_MOVE") => vec![attack(me, d(14, 15), 1)],
+
+        // Back from the dead in the next form: second with Painful Stabs,
+        // third with Nemesis and nothing left to revive it.
+        (TestSubject, "RESPAWN_MOVE") => {
+            vars.respawns += 1;
+            if vars.respawns == 1 {
+                vec![Effect::ReviveAt { target: me, max_hp: t(200, 212) }, buff(me, PowerId::PainfulStabs, 1)]
+            } else {
+                vec![
+                    Effect::ReviveAt { target: me, max_hp: t(300, 313) },
+                    buff(me, PowerId::Nemesis, 1),
+                    Effect::RemovePower { target: me, id: PowerId::Adaptable },
+                    Effect::RemovePower { target: me, id: PowerId::PainfulStabs },
+                ]
+            }
+        }
+        (TestSubject, "BITE_MOVE") => vec![attack(me, d(20, 22), 1)],
+        (TestSubject, "SKULL_BASH_MOVE") => vec![attack(me, d(14, 16), 1), debuff(me, PowerId::Vulnerable, 1)],
+        (TestSubject, "MULTI_CLAW_MOVE") => {
+            let hits = 3 + vars.extra_claws as u32;
+            vars.extra_claws += 1;
+            vec![attack(me, d(10, 11), hits)]
+        }
+        (TestSubject, "PHASE3_LACERATE_MOVE") => vec![attack(me, d(10, 11), 3)],
+        (TestSubject, "BIG_POUNCE") => vec![attack(me, 45, 1)],
+        (TestSubject, "BURNING_GROWL_MOVE") => {
+            statuses(CardId::Burn, d(3, 5) as u32).chain([buff(me, PowerId::Strength, d(2, 3))]).collect()
+        }
+
+        (Aeonglass, "EBB_MOVE") => vec![attack(me, d(26, 32), 1), block(me, 33)],
+        (Aeonglass, "EYE_LASERS_MOVE") => vec![attack(me, d(11, 12), 2)],
+        // Every Wither already in play hits 3 harder, and the new ones match.
+        (Aeonglass, "INCREASING_INTENSITY_MOVE") => {
+            vars.wither_upgrades += 1;
+            let strength = d(3, 4) + vars.extra_strength;
+            vars.extra_strength += 1;
+            std::iter::once(Effect::UpgradeWithers)
+                .chain(statuses(CardId::Wither, d(1, 2) as u32))
+                .chain([buff(me, PowerId::Strength, strength)])
+                .collect()
         }
 
         _ => panic!("unknown move {name} for {id:?}"),
@@ -1369,6 +1626,266 @@ fn graph(id: MonsterId, asc: Ascension, flags: Flags) -> (Vec<State>, usize) {
             g.follow(about, explode);
             g.follow(explode, explode);
             g.done(pressurize)
+        }
+
+        // Act 3 (Glory).
+        // Uppercut and One-Two trade off; a respawned Axebot boots up first.
+        Axebot => {
+            let boot = g.mv("BOOT_UP_MOVE", vec![Defend, Buff]);
+            let one_two = g.mv("ONE_TWO_MOVE", vec![multi(d(9, 10), 2)]);
+            let uppercut = g.mv("HAMMER_UPPERCUT_MOVE", vec![atk(d(12, 14)), Debuff { strong: false }]);
+            g.follow(boot, uppercut);
+            g.follow(uppercut, one_two);
+            g.follow(one_two, uppercut);
+            g.done(if flags.stock.is_some() { boot } else { uppercut })
+        }
+        DevotedSculptor => {
+            let incant = g.mv("FORBIDDEN_INCANTATION_MOVE", vec![Buff]);
+            let savage = g.mv("SAVAGE_MOVE", vec![atk(d(12, 15))]);
+            g.follow(incant, savage);
+            g.follow(savage, savage);
+            g.done(incant)
+        }
+        // Once below half, one Beetle Charge takes Tongue Lash's place.
+        FrogKnight => {
+            let queen = g.mv("FOR_THE_QUEEN", vec![Buff]);
+            let strike = g.mv("STRIKE_DOWN_EVIL", vec![atk(d(21, 23))]);
+            let lash = g.mv("TONGUE_LASH", vec![atk(d(13, 14)), Debuff { strong: false }]);
+            let charge = g.mv("BEETLE_CHARGE", vec![atk(d(35, 40))]);
+            let half = g.cond(vec![(lash, Cond::NoBeetleCharge), (charge, Cond::BeetleCharge)]);
+            g.follow(queen, half);
+            g.follow(strike, queen);
+            g.follow(lash, strike);
+            g.follow(charge, lash);
+            g.done(lash)
+        }
+        GlobeHead => {
+            let thunder = g.mv("THUNDER_STRIKE", vec![multi(d(6, 7), 3)]);
+            let slap = g.mv("SHOCKING_SLAP", vec![atk(d(13, 14)), Debuff { strong: false }]);
+            let burst = g.mv("GALVANIC_BURST", vec![atk(d(16, 17)), Buff]);
+            g.follow(slap, thunder);
+            g.follow(thunder, burst);
+            g.follow(burst, slap);
+            g.done(slap)
+        }
+        OwlMagistrate => {
+            let scrutiny = g.mv("MAGISTRATE_SCRUTINY", vec![atk(d(16, 17))]);
+            let peck = g.mv("PECK_ASSAULT", vec![multi(4, 6)]);
+            let flight = g.mv("JUDICIAL_FLIGHT", vec![Buff]);
+            let verdict = g.mv("VERDICT", vec![atk(d(33, 36)), Debuff { strong: false }]);
+            g.follow(scrutiny, peck);
+            g.follow(peck, flight);
+            g.follow(flight, verdict);
+            g.follow(verdict, scrutiny);
+            g.done(scrutiny)
+        }
+        ScrollOfBiting => {
+            let chomp = g.mv("CHOMP", vec![atk(d(14, 16))]);
+            let chew = g.mv("CHEW", vec![multi(d(5, 6), 2)]);
+            let teeth = g.mv("MORE_TEETH", vec![Buff]);
+            let rand = g.random(vec![br(chomp, Repeat::CannotRepeat), br(chew, Repeat::Times(2))]);
+            g.follow(chomp, teeth);
+            g.follow(chew, rand);
+            g.follow(teeth, chew);
+            g.done(match flags.starter_move % 3 {
+                0 => chomp,
+                1 => chew,
+                _ => teeth,
+            })
+        }
+        SlimedBerserker => {
+            let vomit = g.mv("VOMIT_ICHOR_MOVE", vec![Status { count: 10 }]);
+            let hug = g.mv("LEECHING_HUG_MOVE", vec![Debuff { strong: false }, Buff]);
+            let smother = g.mv("SMOTHER_MOVE", vec![atk(d(30, 33))]);
+            let pummel = g.mv("FURIOUS_PUMMELING_MOVE", vec![multi(d(4, 5), 4)]);
+            g.follow(vomit, pummel);
+            g.follow(pummel, hug);
+            g.follow(hug, smother);
+            g.follow(smother, vomit);
+            g.done(vomit)
+        }
+        // Shield Slam while the turret stands, Smash once it is alone.
+        LivingShield => {
+            let slam = g.mv("SHIELD_SLAM_MOVE", vec![atk(6)]);
+            let smash = g.mv("SMASH_MOVE", vec![atk(d(16, 18)), Buff]);
+            let branch = g.cond(vec![(slam, Cond::HasAllies), (smash, Cond::NoAllies)]);
+            g.follow(slam, branch);
+            g.follow(smash, smash);
+            g.done(slam)
+        }
+        TurretOperator => {
+            let unload = g.mv("UNLOAD_MOVE", vec![multi(d(3, 4), 5)]);
+            let unload2 = g.mv("UNLOAD_MOVE_2", vec![multi(d(3, 4), 5)]);
+            let reload = g.mv("RELOAD_MOVE", vec![Buff]);
+            g.follow(unload, unload2);
+            g.follow(unload2, reload);
+            g.follow(reload, unload);
+            g.done(unload)
+        }
+        TheLost => {
+            let smog = g.mv("DEBILITATING_SMOG", vec![Debuff { strong: false }, Buff]);
+            let lasers = g.mv("EYE_LASERS", vec![multi(d(4, 5), 2)]);
+            g.follow(smog, lasers);
+            g.follow(lasers, smog);
+            g.done(smog)
+        }
+        // Dread's intent reads its Dexterity; the base shows here.
+        TheForgotten => {
+            let miasma = g.mv("MIASMA", vec![Debuff { strong: false }, Defend, Buff]);
+            let dread = g.mv("DREAD", vec![atk(d(13, 15))]);
+            g.follow(miasma, dread);
+            g.follow(dread, miasma);
+            g.done(miasma)
+        }
+        MechaKnight => {
+            let charge = g.mv("CHARGE_MOVE", vec![atk(d(25, 30))]);
+            let flame = g.mv("FLAMETHROWER_MOVE", vec![Status { count: 4 }]);
+            let windup = g.mv("WINDUP_MOVE", vec![Defend, Buff]);
+            let cleave = g.mv("HEAVY_CLEAVE_MOVE", vec![atk(d(35, 40))]);
+            g.follow(charge, flame);
+            g.follow(flame, windup);
+            g.follow(windup, cleave);
+            g.follow(cleave, flame);
+            g.done(charge)
+        }
+        FlailKnight => {
+            let chant = g.mv("WAR_CHANT", vec![Buff]);
+            let flail = g.mv("FLAIL_MOVE", vec![multi(d(9, 10), 2)]);
+            let ram = g.mv("RAM_MOVE", vec![atk(d(15, 17))]);
+            let rand = g.random(vec![br(chant, Repeat::CannotRepeat), br(flail, Repeat::Times(2)), br(ram, Repeat::Times(2))]);
+            g.follow(chant, rand);
+            g.follow(flail, rand);
+            g.follow(ram, rand);
+            g.done(ram)
+        }
+        SpectralKnight => {
+            let hex = g.mv("HEX", vec![Debuff { strong: false }]);
+            let slash = g.mv("SOUL_SLASH", vec![atk(d(15, 17))]);
+            let flame = g.mv("SOUL_FLAME", vec![multi(d(3, 4), 3)]);
+            let rand = g.random(vec![br(slash, Repeat::Times(2)), br(flame, Repeat::CannotRepeat)]);
+            g.follow(hex, slash);
+            g.follow(slash, rand);
+            g.follow(flame, rand);
+            g.done(hex)
+        }
+        MagiKnight => {
+            let shield = g.mv("POWER_SHIELD_MOVE", vec![atk(d(6, 7)), Defend]);
+            let dampen = g.mv("DAMPEN_MOVE", vec![Debuff { strong: false }]);
+            let prep = g.mv("PREP_MOVE", vec![Defend]);
+            let bomb = g.mv("MAGIC_BOMB", vec![atk(d(35, 40))]);
+            let spear = g.mv("RAM_MOVE", vec![atk(d(10, 11))]);
+            g.follow(shield, dampen);
+            g.follow(dampen, spear);
+            g.follow(spear, prep);
+            g.follow(prep, bomb);
+            g.follow(bomb, spear);
+            g.done(shield)
+        }
+        SoulNexus => {
+            let burn = g.mv("SOUL_BURN_MOVE", vec![atk(d(29, 31))]);
+            let maelstrom = g.mv("MAELSTROM_MOVE", vec![multi(d(6, 7), 4)]);
+            let drain = g.mv("DRAIN_LIFE_MOVE", vec![atk(d(18, 19)), Debuff { strong: true }]);
+            let rand = g.random(vec![
+                br(burn, Repeat::CannotRepeat),
+                br(maelstrom, Repeat::CannotRepeat),
+                br(drain, Repeat::CannotRepeat),
+            ]);
+            g.follow(burn, rand);
+            g.follow(maelstrom, rand);
+            g.follow(drain, rand);
+            g.done(burn)
+        }
+        // Builds bots while it has room for them, then just hits.
+        Fabricator => {
+            let fabricate = g.mv("FABRICATE_MOVE", vec![Summon]);
+            let strike = g.mv("FABRICATING_STRIKE_MOVE", vec![atk(d(18, 21)), Summon]);
+            let disintegrate = g.mv("DISINTEGRATE_MOVE", vec![atk(d(11, 13))]);
+            let rand = g.random(vec![br(fabricate, Repeat::Forever), br(strike, Repeat::Forever)]);
+            let branch = g.cond(vec![(rand, Cond::CanFabricate), (disintegrate, Cond::CannotFabricate)]);
+            g.follow(fabricate, branch);
+            g.follow(strike, branch);
+            g.follow(disintegrate, branch);
+            g.done(branch)
+        }
+        Zapbot => {
+            let zap = g.mv("ZAP", vec![atk(d(14, 15))]);
+            g.follow(zap, zap);
+            g.done(zap)
+        }
+        Stabbot => {
+            let stab = g.mv("STAB_MOVE", vec![atk(d(11, 12)), Debuff { strong: false }]);
+            g.follow(stab, stab);
+            g.done(stab)
+        }
+        Guardbot => {
+            let guard = g.mv("GUARD_MOVE", vec![Defend]);
+            g.follow(guard, guard);
+            g.done(guard)
+        }
+        Noisebot => {
+            let noise = g.mv("NOISE_MOVE", vec![Status { count: 2 }]);
+            g.follow(noise, noise);
+            g.done(noise)
+        }
+        // Burn Bright feeds the Amalgam until it falls; then the Queen fights.
+        Queen => {
+            let puppet = g.mv("PUPPET_STRINGS_MOVE", vec![CardDebuff]);
+            let mine = g.mv("YOU_ARE_MINE_MOVE", vec![Debuff { strong: false }]);
+            let burn = g.mv("BURN_BRIGHT_FOR_ME_MOVE", vec![Buff, Defend]);
+            let off = g.mv("OFF_WITH_YOUR_HEAD_MOVE", vec![multi(d(3, 4), 5)]);
+            let execution = g.mv("EXECUTION_MOVE", vec![atk(d(15, 18))]);
+            let enrage = g.mv("ENRAGE_MOVE", vec![Buff]);
+            let mine_branch = g.cond(vec![(burn, Cond::AmalgamAlive), (off, Cond::AmalgamDead)]);
+            let burn_branch = g.cond(vec![(burn, Cond::AmalgamAlive), (off, Cond::AmalgamDead)]);
+            g.follow(puppet, mine);
+            g.follow(mine, mine_branch);
+            g.follow(burn, burn_branch);
+            g.follow(off, execution);
+            g.follow(execution, enrage);
+            g.follow(enrage, off);
+            g.done(puppet)
+        }
+        TorchHeadAmalgam => {
+            let t1 = g.mv("TACKLE_MOVE", vec![atk(d(18, 19))]);
+            let t2 = g.mv("TACKLE_2_MOVE", vec![atk(d(18, 19))]);
+            let beam = g.mv("BEAM_MOVE", vec![multi(8, 3)]);
+            let t3 = g.mv("TACKLE_3_MOVE", vec![atk(d(14, 15))]);
+            let t4 = g.mv("TACKLE_4_MOVE", vec![atk(d(14, 15))]);
+            g.follow(t1, t2);
+            g.follow(t2, beam);
+            g.follow(beam, t3);
+            g.follow(t3, t4);
+            g.follow(t4, beam);
+            g.done(t1)
+        }
+        // Three forms. Death forces Respawn (`TestSubject.TriggerDeadState`),
+        // which leads into the next form's loop.
+        TestSubject => {
+            let respawn = g.mv_once("RESPAWN_MOVE", vec![Heal, Buff]);
+            let bite = g.mv("BITE_MOVE", vec![atk(d(20, 22))]);
+            let bash = g.mv("SKULL_BASH_MOVE", vec![atk(d(14, 16)), Debuff { strong: false }]);
+            let claw = g.mv("MULTI_CLAW_MOVE", vec![multi(d(10, 11), 3)]);
+            let lacerate = g.mv("PHASE3_LACERATE_MOVE", vec![multi(d(10, 11), 3)]);
+            let pounce = g.mv("BIG_POUNCE", vec![atk(45)]);
+            let growl = g.mv("BURNING_GROWL_MOVE", vec![Status { count: d(3, 5) as u32 }, Buff]);
+            let revive = g.cond(vec![(claw, Cond::SecondForm), (lacerate, Cond::ThirdForm)]);
+            g.follow(bite, bash);
+            g.follow(bash, bite);
+            g.follow(claw, claw);
+            g.follow(lacerate, pounce);
+            g.follow(pounce, growl);
+            g.follow(growl, lacerate);
+            g.follow(respawn, revive);
+            g.done(bite)
+        }
+        Aeonglass => {
+            let ebb = g.mv("EBB_MOVE", vec![atk(d(26, 32)), Defend]);
+            let lasers = g.mv("EYE_LASERS_MOVE", vec![multi(d(11, 12), 2)]);
+            let intensity = g.mv("INCREASING_INTENSITY_MOVE", vec![Status { count: d(1, 2) as u32 }, Buff]);
+            g.follow(ebb, lasers);
+            g.follow(lasers, intensity);
+            g.follow(intensity, ebb);
+            g.done(ebb)
         }
     }
 }
