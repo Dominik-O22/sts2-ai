@@ -561,11 +561,15 @@ impl Combat {
                 break;
             }
             resolved += 1;
-            assert!(
-                resolved < 100_000 && self.queue.len() < 100_000,
-                "runaway effect loop: resolving {e:?}, queue front {:?}",
-                self.queue.iter().take(5).collect::<Vec<_>>()
-            );
+            // Some combos never terminate in the game either (Pillage
+            // drawing Strikes that Hellraiser auto-plays for 0 damage). The
+            // real game hangs; we score it as a loss so training never
+            // dies on it.
+            if resolved >= 100_000 || self.queue.len() >= 100_000 {
+                self.queue.clear();
+                self.outcome = Some(Outcome::Lost);
+                break;
+            }
             self.resolve(e);
         }
     }

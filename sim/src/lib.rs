@@ -508,6 +508,29 @@ mod tests {
         }
     }
 
+    /// Pillage keeps drawing while it draws attacks, Hellraiser auto-plays
+    /// every Strike drawn, and with enough negative Strength the Strikes
+    /// deal nothing: the game loops forever here. The sim scores it lost.
+    #[test]
+    fn unresolvable_effect_loop_is_a_loss_not_a_panic() {
+        let mut deck: Vec<card::Card> = (0..8).map(|_| card::Card::new(0, ids::CardId::StrikeIronclad, false)).collect();
+        deck.push(card::Card::new(0, ids::CardId::Pillage, false));
+        let mut c = Combat::new(&deck, IRONCLAD_HP, IRONCLAD_HP, IRONCLAD_ENERGY, &[one(MonsterId::Mawler)], Ascension(10), 1);
+        c.player.creature.powers.push(Power::new(PowerId::Hellraiser, 1));
+        c.player.creature.powers.push(Power::new(PowerId::Strength, -20));
+        let pillage = match c.player.hand.iter().position(|k| k.id == ids::CardId::Pillage) {
+            Some(i) => i,
+            None => {
+                let j = c.player.draw.iter().position(|k| k.id == ids::CardId::Pillage).unwrap();
+                let card = c.player.draw.remove(j);
+                c.player.hand.insert(0, card);
+                0
+            }
+        };
+        c.step(Action::PlayCard { hand_idx: pillage, target: Some(0) });
+        assert_eq!(c.outcome, Some(Outcome::Lost));
+    }
+
     #[test]
     fn random_playouts_terminate() {
         let mut wins = 0;
