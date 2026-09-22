@@ -26,12 +26,12 @@ once the sim loses track or HP gets low, so a night of fights runs
 unattended. Jobs marked `human` need your hands (a first turn left idle, a
 pickup screen); the pilot steps aside for their fights. `--queue` keeps
 running after the selected jobs and takes more from
-`recordings/queue.jsonl`, one JSON object per line, appended while it runs:
+`sts2ai/queue.jsonl`, one JSON object per line, appended while it runs:
 
     {"run": "kaiser_crab_boss"}
     {"job": {"name": "tf", "relics": ["TUNING_FORK"], "fights": ["SEWER_CLAM_NORMAL"]}}
 
-Every fight's replay result goes to `recordings/results.jsonl`.
+Every fight's replay result goes to `sts2ai/results.jsonl`.
 
 Start the game first, load a run at the ascension you want (ascension is
 fixed at run start), and leave it sitting anywhere outside combat. If the
@@ -408,7 +408,7 @@ def status(job: Job) -> str:
 
 class Pilot:
     """The policy playing fights through the bridge (`sts2ai.play --record`),
-    run in the background and logged to `recordings/pilot.log`. It steps
+    run in the background and logged to `sts2ai/pilot.log`. It steps
     aside for jobs that need a person."""
 
     def __init__(self, checkpoint: Path):
@@ -417,7 +417,7 @@ class Pilot:
 
     def start(self) -> None:
         if self.proc is None:
-            log = open(RECORDINGS / "pilot.log", "a")
+            log = open(GAME_DIR / "pilot.log", "a")
             self.proc = subprocess.Popen(
                 [sys.executable, "-m", "sts2ai.play", str(self.checkpoint), "--record"],
                 cwd=ROOT, stdout=log, stderr=subprocess.STDOUT,
@@ -482,16 +482,16 @@ def run_job(job: Job, pilot: Pilot | None) -> list[tuple[bool, str]]:
 
 
 def log_result(job: Job, enc: str, ok: bool, line: str, path: Path | None) -> None:
-    with open(RECORDINGS / "results.jsonl", "a") as f:
+    with open(GAME_DIR / "results.jsonl", "a") as f:
         f.write(json.dumps({"time": time.strftime("%Y-%m-%d %H:%M:%S"), "job": job.name, "fight": enc,
                             "ok": ok, "line": line, "file": path.name if path else None}) + "\n")
 
 
 def queued_jobs(jobs: list[Job]) -> list[Job]:
-    """Jobs appended to `recordings/queue.jsonl` since last time. A line is
+    """Jobs appended to `sts2ai/queue.jsonl` since last time. A line is
     `{"run": "terms"}` for known jobs, or `{"job": {...}}` for a one-off:
     name, relics, fights, setup, teardown, advice, human."""
-    queue, pos = RECORDINGS / "queue.jsonl", RECORDINGS / "queue.pos"
+    queue, pos = GAME_DIR / "queue.jsonl", GAME_DIR / "queue.pos"
     if not queue.exists():
         return []
     lines = queue.read_text().splitlines()
@@ -527,7 +527,7 @@ def main() -> None:
     ap.add_argument("--redo", action="store_true", help="include jobs that already replay clean")
     ap.add_argument("--repeat", type=int, default=1, metavar="N", help="run each job N times")
     ap.add_argument("--pilot", type=Path, metavar="CKPT", help="let this checkpoint play the fights")
-    ap.add_argument("--queue", action="store_true", help="keep running, taking jobs from recordings/queue.jsonl")
+    ap.add_argument("--queue", action="store_true", help="keep running, taking jobs from sts2ai/queue.jsonl")
     ap.add_argument("--no-deck", action="store_true", help="leave the run's deck alone")
     ap.add_argument("--plain", action="store_true", help="drop Fresnel Lens, so no card arrives enchanted")
     args = ap.parse_args()

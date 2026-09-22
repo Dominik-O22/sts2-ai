@@ -108,10 +108,10 @@ It samples its moves so repeats differ, and ends a fight with `win` once the
 sim loses track (the recording up to there is what the replay checks) or HP
 is down to a quarter (so the run survives). The game goes to instant mode
 for the session. Jobs marked `human` hand their fights back to you.
-`--queue` keeps it running on `recordings/queue.jsonl`: `{"run": "terms"}`
+`--queue` keeps it running on `sts2ai/queue.jsonl`: `{"run": "terms"}`
 for known jobs, `{"job": {"name", "relics", "fights", "setup", "teardown",
 "advice", "human"}}` for a one-off. Each fight's result is appended to
-`recordings/results.jsonl`.
+`sts2ai/results.jsonl`.
 
 Before it starts, it asks the sim whether it could build a fight from the
 run as it stands. A colorless card in the deck, a relic from an act that is

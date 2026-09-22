@@ -42,7 +42,10 @@ fn main() {
         };
         match replay(&text, &ids) {
             Ok(r) if r.ok() => {
-                let note = if r.reseeds > 0 { format!(", {} reseeds", r.reseeds) } else { String::new() };
+                let mut note = if r.reseeds > 0 { format!(", {} reseeds", r.reseeds) } else { String::new() };
+                if r.forced_end {
+                    note += ", ended by win";
+                }
                 println!("ok   {name}: {} decision points, {} actions{note}", r.snapshots, r.actions)
             }
             Ok(r) => {

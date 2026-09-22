@@ -32,9 +32,9 @@ uv run python scripts/record.py --pilot runs/set-3/latest.pt --queue
 ```
 
 With `--pilot` the policy plays the fights and the run goes unattended; with
-`--queue` it keeps taking jobs appended to `recordings/queue.jsonl`, which is
+`--queue` it keeps taking jobs appended to `sts2ai/queue.jsonl`, which is
 how you set up the next fight while a session is running. Every result lands
-in `recordings/results.jsonl`.
+in `sts2ai/results.jsonl`.
 
 Reach for it whenever a fight needs setting up, not just when recording a gap.
 It already knows the deck that makes a long fight, the potions worth carrying,

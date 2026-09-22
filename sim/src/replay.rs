@@ -90,6 +90,9 @@ pub struct Report {
     pub divergence: Option<(usize, String)>,
     /// Times an unscripted random pick had to be re-rolled to match.
     pub reseeds: u32,
+    /// The fight was ended from the console (`win`, which the recording
+    /// pilot uses), so everything up to that point is what got checked.
+    pub forced_end: bool,
 }
 
 impl Report {
@@ -496,6 +499,10 @@ pub struct Replayer {
     /// The same for a potion whose effect opened the screen (Attack
     /// Potion): its `potion` record comes after the pick.
     pre_potion: Option<PotionId>,
+    /// The sim's turn was ended early because a monster opened a choice in
+    /// its turn (Knowledge Demon); the `turn_start` or `end` that follows
+    /// must not end it again.
+    pre_ended: bool,
     gate: Gate,
     queue: VecDeque<(usize, Value)>,
     /// Records applied since the last checkpoint, re-applied on a reseed.
@@ -661,7 +668,7 @@ impl Replayer {
         c.player.creature.hp = fs.hp;
         adopt_layout(&mut c, first_snap, true);
 
-        let report = Report { snapshots: 0, actions: 0, divergence: None, reseeds: 0 };
+        let report = Report { snapshots: 0, actions: 0, divergence: None, reseeds: 0, forced_end: false };
         let known_enemies = c.enemies.len();
         Ok(Self {
             ids,
@@ -673,6 +680,7 @@ impl Replayer {
             snecko_pending: false,
             pre_played: None,
             pre_potion: None,
+            pre_ended: false,
             gate: Gate::default(),
             queue: VecDeque::new(),
             since: vec![],
@@ -920,6 +928,13 @@ impl Replayer {
                             return Ok(Applied::Ok);
                         }
                         self.pre_potion = self.ids.potions.get(name).copied();
+                    } else if rec["card"].is_null() && self.c.side == Side::Player && !self.pre_ended {
+                        // Nothing of yours opened it: the enemy turn did,
+                        // which the game is already in. Get the sim there so
+                        // the choice is up while the game waits on it.
+                        self.c.step(Action::EndTurn);
+                        self.report.actions += 1;
+                        self.pre_ended = true;
                     }
                 }
                 adopt_offer_options(&mut self.c, &self.ids, rec);
@@ -969,7 +984,9 @@ impl Replayer {
             }
             "turn_start" => {
                 self.at_decision = false;
-                if rec["turn"].as_u64().unwrap_or(1) > 1 {
+                if rec["turn"].as_u64().unwrap_or(1) > 1 && std::mem::take(&mut self.pre_ended) {
+                    clear_per_play(&mut self.c);
+                } else if rec["turn"].as_u64().unwrap_or(1) > 1 {
                     if self.c.is_over() || self.c.pending.is_some() {
                         return Ok(Applied::Diverged(
                             "game started a new turn; sim is over or waiting on a choice".into(),
@@ -982,14 +999,20 @@ impl Replayer {
                 Ok(Applied::Ok)
             }
             "end" => {
-                self.at_decision = false;
+                let settled = std::mem::take(&mut self.at_decision);
                 // A loss during the enemy turn has no turn_start after it.
-                if !self.c.is_over() && self.c.pending.is_none() {
+                if !self.c.is_over() && self.c.pending.is_none() && !std::mem::take(&mut self.pre_ended) {
                     self.c.step(Action::EndTurn);
                     self.report.actions += 1;
                 }
                 let won = rec["won"].as_bool().unwrap_or(false);
                 let sim_won = self.c.outcome == Some(Outcome::Won);
+                // The console's `win`: a win straight from a decision point
+                // that the enemy turn does not explain either.
+                if won && !sim_won && settled {
+                    self.report.forced_end = true;
+                    return Ok(Applied::Ended);
+                }
                 if won != sim_won || !self.c.is_over() {
                     return Ok(Applied::Diverged(format!("game ended (won {won}); sim outcome {:?}", self.c.outcome)));
                 }
