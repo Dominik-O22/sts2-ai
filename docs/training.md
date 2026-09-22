@@ -22,7 +22,8 @@ maturin from `sim-py/` into the package `sts2ai._sim`.
 - `sim/src/gen.rs`: `generate(rng, floor, asc)` rolls a run state for a
   fight on that floor: starter deck plus about two picks per three floors,
   occasional upgrades and removals, a relic every four floors, potions in a
-  third of the slots, HP between 40% and 100%. Floors 1-3 draw weak
+  third of the slots, HP between 40% and 100% (70% and up at the boss,
+  which follows a rest site). Floors 1-3 draw weak
   encounters, 5-15 add elites, 16 is the boss. `FightSetup::from_recording`
   turns a recorder file into the same struct, which is how the recordings
   become the held-out set.

@@ -253,7 +253,14 @@ pub fn generate_against(rng: &mut Rng, floor: u32, asc: Ascension, encounter: En
         _ => RoomKind::Monster,
     };
     let max_hp = IRONCLAD_HP;
-    let hp = if floor == 1 { max_hp } else { (max_hp as f32 * (0.4 + rng.next_float(0.6))).round() as i32 };
+    // The floor before the boss is a rest site, so boss fights start
+    // rested. Elites keep the full range: real runs meet them at any HP.
+    let (lo, span) = match encounter.kind() {
+        Kind::Boss => (0.7, 0.3),
+        _ if floor == 1 => (1.0, 0.0),
+        _ => (0.4, 0.6),
+    };
+    let hp = (max_hp as f32 * (lo + rng.next_float(span))).round() as i32;
     FightSetup {
         deck,
         hp: hp.max(1),
@@ -299,6 +306,15 @@ mod tests {
         assert_eq!(a.len(), 3 * crate::encounter::ALL.len());
         assert!(a.iter().zip(&b).all(|(x, y)| x.encounter == y.encounter && x.deck.len() == y.deck.len() && x.hp == y.hp));
         assert!(crate::encounter::ALL.iter().all(|e| a.iter().any(|s| s.encounter == *e)));
+    }
+
+    #[test]
+    fn boss_fights_start_rested() {
+        let mut rng = Rng::new(5);
+        for _ in 0..100 {
+            let s = generate(&mut rng, BOSS_FLOOR, Ascension(10));
+            assert!(s.hp >= (s.max_hp as f32 * 0.7).round() as i32, "boss start hp {}", s.hp);
+        }
     }
 
     #[test]
