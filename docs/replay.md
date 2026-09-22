@@ -50,11 +50,12 @@ work and is diffed at every snapshot. Card choices (Armaments, exhaust
 picks) are not logged; the replay tries each option and keeps the one whose
 result matches the next snapshot.
 
-Random targets are scripted from the recorded hits, random exhausts from
-the recorded exhausts. Random picks among existing cards with no record
-(Aggression's pull) are re-rolled: when a snapshot does not match, the
-replay rewinds to the last matching one, reseeds the card-selection stream,
-and tries again, up to 64 times. The report shows how many reseeds a clean
+Card random targets are scripted from the recorded hits, random exhausts
+from the recorded exhausts. Random outcomes with no record (Aggression's
+pull, the target of a power hit like Juggernaut) are re-rolled: when a
+snapshot does not match, the replay rewinds to the last matching one,
+reseeds the card-selection and target streams, and tries again, up to 64
+times. The report shows how many reseeds a clean
 replay needed. Random card generation is not forced yet.
 
 A snapshot immediately followed by another snapshot, with no action in

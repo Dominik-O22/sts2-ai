@@ -408,9 +408,10 @@ pub fn replay_seeded(text: &str, ids: &Ids, seed: u64) -> Result<Report, String>
             .find(|r| !matches!(r["t"].as_str(), Some("hit" | "exhaust")))
             .is_some_and(|r| r["t"] == "snapshot")
     };
-    // Random picks among existing cards (Aggression's pull, an unrecorded
-    // random exhaust) are not scripted. When a snapshot does not match, rewind
-    // to the last matching one, re-roll that stream, and try again.
+    // Random picks among existing cards (Aggression's pull) and random targets
+    // of power hits (Juggernaut) are not scripted. When a snapshot does not
+    // match, rewind to the last matching one, re-roll those streams, and try
+    // again.
     const RESEED_LIMIT: u32 = 64;
     let mut checkpoint = (c.clone(), 0usize, known_enemies, report.clone());
     let mut tries = 0u32;
@@ -438,14 +439,18 @@ pub fn replay_seeded(text: &str, ids: &Ids, seed: u64) -> Result<Report, String>
                 match settle(&c, rec, 0) {
                     Ok(k) => c = k,
                     Err(e) => {
-                        if tries >= RESEED_LIMIT || c.rngs.card_selection == checkpoint.0.rngs.card_selection {
+                        let untouched = c.rngs.card_selection == checkpoint.0.rngs.card_selection
+                            && c.rngs.targets == checkpoint.0.rngs.targets;
+                        if tries >= RESEED_LIMIT || untouched {
                             return Ok(failed(&report, n, e));
                         }
                         tries += 1;
                         let (ck, ck_n, ck_known, ck_report) = &checkpoint;
                         report = Report { reseeds: report.reseeds + 1, ..ck_report.clone() };
                         c = ck.clone();
-                        c.rngs.card_selection = crate::rng::Rng::new(seed ^ 0x06 ^ (u64::from(tries) << 32));
+                        let salt = u64::from(tries) << 32;
+                        c.rngs.card_selection = crate::rng::Rng::new(seed ^ 0x06 ^ salt);
+                        c.rngs.targets = crate::rng::Rng::new(seed ^ 0x03 ^ salt);
                         known_enemies = *ck_known;
                         snecko_pending = false;
                         n = ck_n + 1;
