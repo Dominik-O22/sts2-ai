@@ -19,27 +19,36 @@ wrong on its first day.
 ## Setting up game states to record
 
 Fidelity comes from real fights, not from tests written by whoever wrote the
-rule. `scripts/record.py` is how you get them: it walks the encounters with no
-clean recording, builds a deck through the dev console, says what the monsters
-do and what Dom has to do to make it show, waits for the fight, then replays it.
+rule. `scripts/record.py` is how you get them: it runs jobs (an encounter, a
+relic group, a multi-fight setup) with no clean recording, builds each one
+through the dev console, says what the monsters do and what to do to make it
+show, waits for the fight, then replays it.
 
 ```
-uv run python scripts/record.py --list          # status per encounter
-uv run python scripts/record.py                 # walk everything missing
-uv run python scripts/record.py --only SOUL_FYSH_BOSS --repeat 2
+uv run python scripts/record.py --list                  # status per job
+uv run python scripts/record.py hive elite              # jobs matching every term
+uv run python scripts/record.py soul_fysh_boss --redo --repeat 2
+uv run python scripts/record.py --pilot runs/set-3/latest.pt --queue
 ```
+
+With `--pilot` the policy plays the fights and the run goes unattended; with
+`--queue` it keeps taking jobs appended to `recordings/queue.jsonl`, which is
+how you set up the next fight while a session is running. Every result lands
+in `recordings/results.jsonl`.
 
 Reach for it whenever a fight needs setting up, not just when recording a gap.
 It already knows the deck that makes a long fight, the potions worth carrying,
 and that everything must be set before `fight`, because the console cannot add
 to a combat that is already running without the replay diverging.
 
-Dom plays the fights. You set them up and read the diffs.
+Dom or the pilot plays the fights. You set them up and read the diffs. Jobs
+marked `human` (an idle first turn, a pickup screen) need Dom.
 
 Most of what it prints comes from the sim, so a newly ported act shows up with
-nothing written by hand. `ADVICE` in that file is the exception: one line per
-fight where playing straight would not show the mechanic. Add one when you port
-a monster whose interesting behaviour needs steering toward.
+nothing written by hand. `ADVICE` and `RELIC_FIGHTS` in that file are the
+exception: one line per fight where playing straight would not show the
+mechanic, and the relic jobs. Add one when you port a monster whose
+interesting behaviour needs steering toward, or a relic.
 
 `docs/replay.md` has the detail: what the recording holds, what the replay
 forces versus checks, and the dev console commands.

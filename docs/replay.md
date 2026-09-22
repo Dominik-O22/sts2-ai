@@ -84,22 +84,34 @@ between, caught the game mid-resolution and is skipped.
 recorded. It knows the deck that makes a long fight, what to carry, and that
 everything has to be set before `fight`.
 
-`scripts/record.py` walks the encounters with no clean recording, builds a
-deck for each through the dev console, says what the monster does and what
-you have to do to make it show, waits for the fight, then replays it.
+`scripts/record.py` runs jobs with no clean recording: one per encounter,
+the relic groups, and setups that span fights (relics carried through a rest
+site). It builds each through the dev console, says what the monster does
+and what you have to do to make it show, waits for the fight, then replays
+it.
 
 ```
-uv run python scripts/record.py --list          # status per encounter
-uv run python scripts/record.py --act underdocks
-uv run python scripts/record.py --only WATERFALL_GIANT_BOSS
-uv run python scripts/record.py --repeat 2      # each fight twice
+uv run python scripts/record.py --list              # status per job
+uv run python scripts/record.py underdocks          # terms match names and tags
+uv run python scripts/record.py waterfall_giant_boss
+uv run python scripts/record.py --redo --repeat 2   # clean ones too, twice each
+uv run python scripts/record.py --pilot runs/set-3/latest.pt --queue
 ```
 
-The encounter list, the acts and tiers it filters on, and the description of
-every fight all come from the sim, so a newly ported act appears here with
-nothing written by hand. Only the one-line "what you have to do" advice is
-hand-written, and only for fights where playing straight would not show the
-mechanic.
+The encounter list, the acts and kinds it tags them with, and the
+description of every fight all come from the sim, so a newly ported act
+appears here with nothing written by hand. Only the one-line "what you have
+to do" advice and the relic jobs are hand-written.
+
+With `--pilot`, the policy plays through the bridge (`sts2ai.play --record`).
+It samples its moves so repeats differ, and ends a fight with `win` once the
+sim loses track (the recording up to there is what the replay checks) or HP
+is down to a quarter (so the run survives). The game goes to instant mode
+for the session. Jobs marked `human` hand their fights back to you.
+`--queue` keeps it running on `recordings/queue.jsonl`: `{"run": "terms"}`
+for known jobs, `{"job": {"name", "relics", "fights", "setup", "teardown",
+"advice", "human"}}` for a one-off. Each fight's result is appended to
+`recordings/results.jsonl`.
 
 Before it starts, it asks the sim whether it could build a fight from the
 run as it stands. A colorless card in the deck, a relic from an act that is

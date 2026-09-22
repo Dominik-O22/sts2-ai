@@ -12,6 +12,12 @@ choice left open goes to a card grid for you.
 When the sim loses track of a fight (a divergence, or an encounter it does
 not model) the fight is handed to you: it says so once, and card choices
 go to the grid.
+
+`--record` is for unattended recording (scripts/record.py --pilot): it
+samples its moves so repeated fights differ, and instead of handing a fight
+over it ends it with the console's `win`. That happens on a divergence,
+where the recording already holds what the replay can check, and once HP
+is down to a quarter, so a lost fight never ends the run.
 """
 
 from __future__ import annotations
@@ -30,14 +36,28 @@ from sts2ai.env import Layout
 from sts2ai.model import Policy, load_policy
 
 DEFAULT_PORT = 47474
+# The mod runs dev console lines written here (scripts/game.sh does the same).
+COMMANDS = Path.home() / ".local/share/SlayTheSpire2/sts2ai/commands.txt"
+
+
+def console(*lines: str) -> None:
+    tmp = COMMANDS.with_suffix(".tmp")
+    tmp.write_text("\n".join(lines) + "\n")
+    tmp.replace(COMMANDS)
 
 
 class Pilot(Session):
     """An advisor session that answers the bridge instead of waiting for you."""
 
-    def __init__(self, conn: socket.socket, policy: Policy, device: torch.device, search: int = 0, groups: int = 4):
+    def __init__(
+        self, conn: socket.socket, policy: Policy, device: torch.device, search: int = 0, groups: int = 4, record: bool = False
+    ):
         super().__init__(policy, device, search, groups)
         self.conn = conn
+        self.record = self.sample = record
+        # This fight has been ended with `win`; nothing more to do in it.
+        self.finished = False
+        self.hp: tuple[int, int] = (1, 1)
         # What the game is waiting on: "play" after `ready`, "select" while
         # a card selection is open, None once a command is in flight.
         self.waiting: str | None = None
@@ -57,7 +77,16 @@ class Pilot(Session):
     def handle(self, status: str) -> None:
         if status.startswith(("diverged", "unsupported")):
             self.blind = True
+            if self.record:
+                self.finish("the sim lost track")
         super().handle(status)
+
+    def finish(self, why: str) -> None:
+        """Recording mode: end the fight with the console's `win`."""
+        if not self.finished:
+            self.finished = True
+            print(f"  ending the fight: {why}\n")
+            console("win")
 
     def message(self, line: str) -> None:
         msg = json.loads(line)
@@ -82,12 +111,21 @@ class Pilot(Session):
                 self.waiting = self.sent_for
                 self.act()
             case "start":
-                self.blind = self.told = False
+                self.blind = self.told = self.finished = False
+                self.feed(line)
+            case "snapshot":
+                snap = json.loads(line)
+                self.hp = (snap.get("hp", 1), snap.get("max_hp", 1))
                 self.feed(line)
             case _:
                 self.feed(line)
 
     def act(self) -> None:
+        if self.finished:
+            return
+        if self.record and self.waiting == "play" and self.hp[0] * 4 <= self.hp[1]:
+            self.finish("HP is down to a quarter")
+            return
         enough = self.selection.get("picked", 0) >= self.selection.get("min", 1)
         match self.waiting:
             case None:
@@ -132,6 +170,7 @@ def main() -> None:
     ap.add_argument("--port", type=int, default=DEFAULT_PORT)
     ap.add_argument("--search", type=int, default=0, help="turn search with this many sim copies (0: policy only)")
     ap.add_argument("--groups", type=int, default=4, help="draw-pile shuffles the search copies are split over")
+    ap.add_argument("--record", action="store_true", help="unattended recording: sample moves, end lost or diverged fights with win")
     args = ap.parse_args()
     sys.stdout.reconfigure(line_buffering=True)
 
@@ -145,7 +184,7 @@ def main() -> None:
     except ConnectionRefusedError:
         sys.exit(f"nothing listening on port {args.port}: is the game running with the sts2ai mod? (scripts/build-mod.sh)")
     conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-    pilot = Pilot(conn, policy, device, args.search, args.groups)
+    pilot = Pilot(conn, policy, device, args.search, args.groups, args.record)
     try:
         for line in lines(conn):
             if line:

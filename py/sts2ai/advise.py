@@ -51,6 +51,9 @@ class Session:
         self.device = device
         self.search = search
         self.groups = groups
+        # Pick by sampling the policy instead of taking its favourite, so
+        # repeated recordings of one fight take different branches.
+        self.sample = False
         self.layout = Layout.load()
         self.floats = np.zeros((1, self.layout.n_floats), np.float32)
         self.ids = np.zeros((1, self.layout.n_ids), np.int64)
@@ -144,6 +147,9 @@ class Session:
                 (int(i) for i in np.flatnonzero(self.mask[0]) if self.sim.describe(int(i)) == best),
                 key=lambda i: probs[i],
             )
+            if self.sample:
+                legal = np.flatnonzero(self.mask[0])
+                pick = int(np.random.choice(legal, p=probs[legal] / probs[legal].sum()))
         print()
         return pick
 

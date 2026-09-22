@@ -1,23 +1,37 @@
 #!/usr/bin/env python3
-"""Walk the encounters that have no clean recording yet.
+"""Record the fights the sim has no clean replay of yet.
 
-For each one it builds a deck through the dev console, tells you what the
-monsters do and what you have to do to make it show, waits for you to fight
-it, then replays the recording against the sim and reports.
+Everything to record is a job: console setup, one or more fights, and the
+console lines that undo the setup. It builds each job's setup through the
+dev console, says what the monsters do and what to do to make a mechanic
+show, waits for the fight, then replays the recording against the sim.
 
-    uv run python scripts/record.py                 # everything missing
-    uv run python scripts/record.py --list          # just the status table
-    uv run python scripts/record.py --act underdocks
-    uv run python scripts/record.py --only WATERFALL_GIANT_BOSS
-    uv run python scripts/record.py --repeat 2      # each fight twice
-    uv run python scripts/record.py --redo          # include clean ones
-    uv run python scripts/record.py --relics        # the relic fights instead
-    uv run python scripts/record.py --relics --only paels_eye
+    uv run python scripts/record.py                    # every job not yet clean
+    uv run python scripts/record.py --list             # just the status table
+    uv run python scripts/record.py hive elite         # jobs tagged both
+    uv run python scripts/record.py relics             # the relic groups
+    uv run python scripts/record.py waterfall_giant_boss
+    uv run python scripts/record.py --redo --repeat 2  # clean ones too, twice each
+    uv run python scripts/record.py --pilot runs/set-3/latest.pt --queue
 
-The encounter list, the acts, and the description of every fight all come
-from the sim, so an act that gets ported shows up here with nothing written
-by hand. Only `ADVICE` is hand-written, and only where playing a fight
-straight would not show the mechanic.
+Terms pick jobs by name or tag; a job needs to match every term. Encounter
+jobs are named after the encounter and tagged with its act and kind; relic
+groups are tagged `relics`. The encounters, acts and monster descriptions
+all come from the sim, so a newly ported act shows up with nothing written
+by hand. Only `ADVICE` and `RELIC_FIGHTS` are hand-written.
+
+`--pilot CKPT` lets the policy play the fights through the bridge
+(`sts2ai.play --record`): it samples its moves, and ends a fight with `win`
+once the sim loses track or HP gets low, so a night of fights runs
+unattended. Jobs marked `human` need your hands (a first turn left idle, a
+pickup screen); the pilot steps aside for their fights. `--queue` keeps
+running after the selected jobs and takes more from
+`recordings/queue.jsonl`, one JSON object per line, appended while it runs:
+
+    {"run": "kaiser_crab_boss"}
+    {"job": {"name": "tf", "relics": ["TUNING_FORK"], "fights": ["SEWER_CLAM_NORMAL"]}}
+
+Every fight's replay result goes to `recordings/results.jsonl`.
 
 Start the game first, load a run at the ascension you want (ascension is
 fixed at run start), and leave it sitting anywhere outside combat. If the
@@ -32,12 +46,9 @@ pool, so a divergence points at the monster rather than at some card port.
 
 Everything is set before `fight`. Powers or block handed out mid-combat by
 the console are not in the recording's `start` record, so the sim never
-sees them and the replay diverges on the next snapshot.
-
-`--relics` walks `RELIC_FIGHTS` instead: each group of relics goes on for
-one fight and comes off again with `relic remove`, so every group starts
-from the same run. Removing a relic does not undo what it did on pickup,
-so a group whose pickup leaves a card behind takes it out again.
+sees them and the replay diverges on the next snapshot. Relics go on before
+a job's first fight and come off after its last; removing a relic does not
+undo its pickup, so a job whose pickup leaves a card behind takes it out.
 
 The recorder writes every fight into one folder. Fights this script drives
 are moved into `recordings/dev/` once they are done, so the top folder
@@ -149,80 +160,144 @@ ADVICE = {
 
 
 @dataclass
-class RelicFight:
-    """Relics that go on together for one fight, and what to do to make
-    them show. Grouped by the hook they touch, so a divergence still points
-    at a handful; the ones with their own turn flow fight alone."""
+class Send:
+    """Console lines."""
+
+    commands: list[str]
+
+
+@dataclass
+class Say:
+    """Something for you to do; `wait` holds the job until you press enter."""
+
+    text: str
+    wait: bool = False
+
+
+@dataclass
+class Fight:
+    """Start an encounter, wait for its recording, replay it."""
+
+    encounter: str
+
+
+Step = Send | Say | Fight
+
+
+@dataclass
+class Job:
+    """One thing to record. `relics` go on before the first step and come
+    off after the last, with `teardown`, whether or not the fights ran."""
 
     name: str
-    relics: list[str]
-    advice: str
-    encounter: str = "SEWER_CLAM_NORMAL"
-    # Console lines before the fight and after it, beyond adding and
-    # removing the relics themselves.
-    setup: list[str] = field(default_factory=list)
+    tags: set[str]
+    steps: list[Step]
+    relics: list[str] = field(default_factory=list)
     teardown: list[str] = field(default_factory=list)
+    advice: str | None = None
+    # Its fights need a person, not the pilot.
+    human: bool = False
+
+    def fights(self) -> list[str]:
+        return [s.encounter for s in self.steps if isinstance(s, Fight)]
+
+    def matches(self, terms: list[str]) -> bool:
+        return all(t == self.name or t in self.tags for t in terms)
+
+
+def relic_job(name: str, relics: list[str], advice: str, encounter: str = "SEWER_CLAM_NORMAL", *,
+              setup: list[str] = [], teardown: list[str] = [], human: bool = False) -> Job:
+    """A relic group: on for one fight, off again after."""
+    return Job(name, {"relics"}, [Send(setup), Fight(encounter)], relics, teardown, advice, human)
 
 
 # Sewer Clam by default: one monster, Plating to break, and a fight the
 # block deck drags out long enough for the per-turn relics to cycle.
-# Not here: Fur Coat, which needs a room its own map marked, and Delicate
-# Frond, whose potions land before the start record, so the replay
-# cannot see it work.
+# Not here: Fur Coat, which needs a room its own map marked, Delicate Frond,
+# whose potions land before the start record so the replay cannot see it
+# work, and Lizard Tail, which needs a death.
 RELIC_FIGHTS = [
-    RelicFight("paels_eye", ["PAELS_EYE"],
-               "End turn 1 without playing anything: the hand exhausts, the clam does not move, and you go again."),
-    RelicFight("whispering_earring", ["WHISPERING_EARRING"],
-               "Nothing to do on turn 1: it plays your hand for you, leftmost card first, at the clam."),
-    RelicFight("snecko_eye", ["SNECKO_EYE", "FAKE_SNECKO_EYE"],
-               "Play normally. Every card you draw rolls a new cost for the fight."),
-    RelicFight("choices_paradox", ["CHOICES_PARADOX"],
-               "Turn 1 offers five cards. Take one and hold it past the end of the turn to see it retained."),
-    RelicFight("history_course", ["HISTORY_COURSE"],
-               "End a few turns on different attacks and skills: each turn opens by replaying the last one."),
-    RelicFight("first_plays", ["THROWING_AXE", "MUSIC_BOX"],
-               "Open the fight with an attack (Throwing Axe plays it twice), and play an attack every turn "
-               "(Music Box hands back an ethereal copy of the first)."),
-    RelicFight("play_limits", ["BRILLIANT_SCARF", "VELVET_CHOKER"],
-               "Play five cards in one turn, the Angers help: the fifth is free. Then try for a seventh, "
-               "which Velvet Choker refuses.",
-               setup=["card ANGER Deck"] * 3, teardown=["remove_card ANGER Deck"] * 3),
-    RelicFight("draw_and_hand", ["FIDDLE", "RUNIC_PYRAMID"],
-               "Play Shrug It Off: Fiddle eats its draw. Leave cards in hand; they stay for next turn."),
-    RelicFight("turn_one", ["BONE_TEA", "BLESSED_ANTLER", "RADIANT_PEARL", "JEWELED_MASK", "BIG_MUSHROOM",
-                            "ROYAL_POISON", "FAKE_BLOOD_VIAL", "TEA_OF_DISCOURTESY", "EMBER_TEA", "SWORD_OF_JADE",
-                            "FAKE_ANCHOR"],
-               "All of it lands on turn 1. Play the Luminesce at some point."),
-    RelicFight("every_turn", ["CROSSBOW", "SAI", "MR_STRUGGLES", "FAKE_HAPPY_FLOWER", "POLLINOUS_CORE",
-                              "TOASTY_MITTENS", "PAELS_BLOOD", "IRON_CLUB", "SEAL_OF_GOLD"],
-               "Go at least six turns, so the five-turn flower and the four-turn core both fire.",
-               setup=["gold 100"]),
-    RelicFight("energy", ["PRISMATIC_GEM", "ECTOPLASM", "SOZU", "BLOOD_SOAKED_ROSE", "PHILOSOPHERS_STONE",
-                          "PUMPKIN_CANDLE", "SPIKED_GAUNTLETS", "PAELS_TEARS"],
-               "End a turn with energy left (Pael's Tears pays it back), and play Feel No Pain at its "
-               "raised cost. Sozu refuses the fight's potions, so no Fairy this time.",
-               teardown=["remove_card ENTHRALLED Deck"]),
-    RelicFight("card_hooks", ["DAUGHTER_OF_THE_WIND", "LOST_WISP", "FORGOTTEN_SOUL", "HAND_DRILL",
-                              "FAKE_STRIKE_DUMMY", "PAELS_LEGION", "DIAMOND_DIADEM", "FAKE_ORICHALCUM"],
-               "Break the clam's block with an attack (Hand Drill), play Feel No Pain (Lost Wisp), exhaust "
-               "something (Forgotten Soul), and have one turn of two cards or fewer (Diamond Diadem)."),
-    RelicFight("biiig_hug", ["BIIIG_HUG"],
-               "On pickup it asks for four cards to remove: take Defends. Every reshuffle adds a Soot."),
-    RelicFight("very_hot_cocoa", ["VERY_HOT_COCOA"], "Spend the four extra energy on turn 1."),
-    RelicFight("elite", ["BOOMING_CONCH", "BLACK_BLOOD"],
-               "Elites only for the conch. Win it: Black Blood heals 12 afterwards.",
-               encounter="TERROR_EEL_ELITE"),
+    relic_job("paels_eye", ["PAELS_EYE"],
+              "End turn 1 without playing anything: the hand exhausts, the clam does not move, and you go again.",
+              human=True),
+    relic_job("whispering_earring", ["WHISPERING_EARRING"],
+              "Nothing to do on turn 1: it plays your hand for you, leftmost card first, at the clam."),
+    relic_job("snecko_eye", ["SNECKO_EYE", "FAKE_SNECKO_EYE"],
+              "Play normally. Every card you draw rolls a new cost for the fight."),
+    relic_job("choices_paradox", ["CHOICES_PARADOX"],
+              "Turn 1 offers five cards. Take one and hold it past the end of the turn to see it retained."),
+    relic_job("history_course", ["HISTORY_COURSE"],
+              "End a few turns on different attacks and skills: each turn opens by replaying the last one."),
+    relic_job("first_plays", ["THROWING_AXE", "MUSIC_BOX"],
+              "Open the fight with an attack (Throwing Axe plays it twice), and play an attack every turn "
+              "(Music Box hands back an ethereal copy of the first)."),
+    relic_job("play_limits", ["BRILLIANT_SCARF", "VELVET_CHOKER"],
+              "Play five cards in one turn, the Angers help: the fifth is free. Then try for a seventh, "
+              "which Velvet Choker refuses.",
+              setup=["card ANGER Deck"] * 3, teardown=["remove_card ANGER Deck"] * 3, human=True),
+    relic_job("draw_and_hand", ["FIDDLE", "RUNIC_PYRAMID"],
+              "Play Shrug It Off: Fiddle eats its draw. Leave cards in hand; they stay for next turn."),
+    relic_job("turn_one", ["BONE_TEA", "BLESSED_ANTLER", "RADIANT_PEARL", "JEWELED_MASK", "BIG_MUSHROOM",
+                           "ROYAL_POISON", "FAKE_BLOOD_VIAL", "TEA_OF_DISCOURTESY", "EMBER_TEA", "SWORD_OF_JADE",
+                           "FAKE_ANCHOR"],
+              "All of it lands on turn 1. Play the Luminesce at some point."),
+    relic_job("every_turn", ["CROSSBOW", "SAI", "MR_STRUGGLES", "FAKE_HAPPY_FLOWER", "POLLINOUS_CORE",
+                             "TOASTY_MITTENS", "PAELS_BLOOD", "IRON_CLUB", "SEAL_OF_GOLD"],
+              "Go at least six turns, so the five-turn flower and the four-turn core both fire.",
+              setup=["gold 100"]),
+    relic_job("energy", ["PRISMATIC_GEM", "ECTOPLASM", "SOZU", "BLOOD_SOAKED_ROSE", "PHILOSOPHERS_STONE",
+                         "PUMPKIN_CANDLE", "SPIKED_GAUNTLETS", "PAELS_TEARS"],
+              "End a turn with energy left (Pael's Tears pays it back), and play Feel No Pain at its "
+              "raised cost. Sozu refuses the fight's potions, so no Fairy this time.",
+              teardown=["remove_card ENTHRALLED Deck"], human=True),
+    relic_job("card_hooks", ["DAUGHTER_OF_THE_WIND", "LOST_WISP", "FORGOTTEN_SOUL", "HAND_DRILL",
+                             "FAKE_STRIKE_DUMMY", "PAELS_LEGION", "DIAMOND_DIADEM", "FAKE_ORICHALCUM"],
+              "Break the clam's block with an attack (Hand Drill), play Feel No Pain (Lost Wisp), exhaust "
+              "something (Forgotten Soul), and have one turn of two cards or fewer (Diamond Diadem).",
+              human=True),
+    relic_job("biiig_hug", ["BIIIG_HUG"],
+              "On pickup it asks for four cards to remove: take Defends. Every reshuffle adds a Soot.",
+              human=True),
+    relic_job("very_hot_cocoa", ["VERY_HOT_COCOA"], "Spend the four extra energy on turn 1."),
+    relic_job("elite", ["BOOMING_CONCH", "BLACK_BLOOD"],
+              "Elites only for the conch. Win it: Black Blood heals 12 afterwards.",
+              encounter="TERROR_EEL_ELITE"),
+    # Relics that carry a count or a flag from one fight to the next. The
+    # second fight starts from what the first and the rest site left, which
+    # is what the recorder's `relic_state` has to get across.
+    Job("carried_state", {"relics"},
+        [Fight("SEWER_CLAM_NORMAL"), Send(["room RestSite"]),
+         Say("At the rest site take Lift (Girya), then go back to the map.", wait=True),
+         Fight("CULTISTS_NORMAL")],
+        ["PEN_NIB", "NUNCHAKU", "TUNING_FORK", "JOSS_PAPER", "HAPPY_FLOWER", "PENDULUM", "GIRYA",
+         "VENERABLE_TEA_SET"],
+        advice="Play plenty of attacks and skills and exhaust a few cards in the first fight, so the "
+        "counters end part-way into a cycle."),
 ]
 
 
-def send(commands: list[str], quiet: bool = False) -> None:
-    """Run dev console lines through the mod and show what it said."""
+def encounter_jobs() -> list[Job]:
+    """One job per encounter the sim models, tagged with act and kind."""
+    return [
+        Job(enc.lower(), {act.lower(), kind.lower(), "encounters"}, [Fight(enc)], advice=ADVICE.get(enc))
+        for enc, act, kind in encounters()
+    ]
+
+
+def all_jobs() -> list[Job]:
+    return encounter_jobs() + RELIC_FIGHTS
+
+
+def send(commands: list[str], quiet: bool = False) -> list[str]:
+    """Run dev console lines through the mod; returns what it said."""
     if not commands:
-        return
+        return []
     out = subprocess.run([str(ROOT / "scripts/game.sh"), *commands], capture_output=True, text=True)
+    lines = out.stdout.strip().splitlines()
     if not quiet:
-        for line in out.stdout.strip().splitlines():
+        for line in lines:
             print(f"    {line}")
+    return lines
 
 
 def encounters() -> list[tuple[str, str, str]]:
@@ -260,15 +335,6 @@ def is_finished(path: Path) -> bool:
         return False
 
 
-def status() -> dict[str, str]:
-    """ok, DIFF, or missing, per encounter."""
-    out = {}
-    for enc, _, _ in encounters():
-        files = recordings_for(enc)
-        out[enc] = "missing" if not files else ("ok" if any(replay(f)[0] for f in files) else "DIFF")
-    return out
-
-
 def newest_start() -> str | None:
     """The `start` record of the most recent recording, which describes the
     run as it stands: deck, enchantments, relics, potions."""
@@ -292,9 +358,9 @@ def blocker() -> str | None:
     return _sim.start_blocker(start) if start else None
 
 
-def wait_for_fight(enc: str, before: set[Path]) -> Path | None:
+def wait_for_fight(enc: str, before: set[Path], yours: bool) -> Path | None:
     """Block until a new finished recording for `enc` shows up."""
-    print("    fight it. ctrl-c to skip.")
+    print("    fight it. ctrl-c to skip." if yours else "    the pilot is on it. ctrl-c to skip.")
     try:
         while True:
             new = [p for p in recordings_for(enc) if p not in before]
@@ -306,36 +372,6 @@ def wait_for_fight(enc: str, before: set[Path]) -> Path | None:
         return None
 
 
-def run_one(enc: str, fight: RelicFight | None = None) -> tuple[bool, str]:
-    """One recorded fight against `enc`, with a relic group on for it if
-    given. The group comes off again whether or not the fight finished."""
-    print(f"\n=== {fight.name if fight else enc}")
-    print(f"    monster: {describe(enc)}")
-    advice = fight.advice if fight else ADVICE.get(enc)
-    if fight:
-        print(f"    relics:  {', '.join(fight.relics)}")
-    if advice:
-        print(f"    you:     {advice}")
-    before = set(recordings_for(enc))
-    if fight:
-        send([f"relic add {r}" for r in fight.relics] + fight.setup)
-    send(PER_FIGHT, quiet=True)
-    send([f"fight {enc}"])
-    path = wait_for_fight(enc, before)
-    if fight:
-        send([f"relic remove {r}" for r in fight.relics] + fight.teardown, quiet=True)
-    if path is None:
-        return False, "skipped"
-    # A run reloaded after an autosave gets back relics a teardown removed.
-    held = set(start_record(path).get("relics", []))
-    strays = sorted(held & {r for f in RELIC_FIGHTS for r in f.relics} - set(fight.relics if fight else []))
-    if strays:
-        print(f"    warning: also carried {', '.join(strays)}; take them off with `relic remove`")
-    ok, line = replay(park(path))
-    print(f"    {line}")
-    return ok, line
-
-
 def start_record(path: Path) -> dict:
     for line in path.read_text().splitlines():
         if line.strip():
@@ -345,123 +381,218 @@ def start_record(path: Path) -> dict:
     return {}
 
 
-def relic_recordings(fight: RelicFight) -> list[Path]:
-    """Dev fights against the group's encounter with every relic of the
-    group on."""
-    want = set(fight.relics)
-    return [p for p in sorted(DEV.glob(f"*-{fight.encounter}.jsonl")) if want <= set(start_record(p).get("relics", []))]
+_replays: dict[Path, tuple[bool, str]] = {}
 
 
-def relic_status() -> dict[str, str]:
-    out = {}
-    for fight in RELIC_FIGHTS:
-        files = relic_recordings(fight)
-        out[fight.name] = "missing" if not files else ("ok" if any(replay(f)[0] for f in files) else "DIFF")
+def replay_once(path: Path) -> tuple[bool, str]:
+    """`replay`, remembered for the session: the status table replays every
+    recording, and a job run only adds new ones."""
+    if path not in _replays:
+        _replays[path] = replay(path)
+    return _replays[path]
+
+
+def status(job: Job) -> str:
+    """ok when every fight of the job has a clean recording with the job's
+    relics on, missing when one has none, DIFF otherwise."""
+    want = set(job.relics)
+    worst = "ok"
+    for enc in job.fights():
+        files = [p for p in recordings_for(enc) if want <= set(start_record(p).get("relics", []))]
+        if not files:
+            return "missing"
+        if not any(replay_once(p)[0] for p in files):
+            worst = "DIFF"
+    return worst
+
+
+class Pilot:
+    """The policy playing fights through the bridge (`sts2ai.play --record`),
+    run in the background and logged to `recordings/pilot.log`. It steps
+    aside for jobs that need a person."""
+
+    def __init__(self, checkpoint: Path):
+        self.checkpoint = checkpoint
+        self.proc: subprocess.Popen | None = None
+
+    def start(self) -> None:
+        if self.proc is None:
+            log = open(RECORDINGS / "pilot.log", "a")
+            self.proc = subprocess.Popen(
+                [sys.executable, "-m", "sts2ai.play", str(self.checkpoint), "--record"],
+                cwd=ROOT, stdout=log, stderr=subprocess.STDOUT,
+            )
+
+    def stop(self) -> None:
+        if self.proc is not None:
+            self.proc.terminate()
+            self.proc.wait()
+            self.proc = None
+
+
+def fight(enc: str, job: Job, pilot: Pilot | None) -> tuple[bool, str, Path | None]:
+    """One recorded fight: top up, start it, wait for the recording, replay."""
+    print(f"    monster: {describe(enc)}")
+    before = set(recordings_for(enc))
+    send(PER_FIGHT, quiet=True)
+    if pilot:
+        pilot.stop() if job.human else pilot.start()
+    send([f"fight {enc}"])
+    path = wait_for_fight(enc, before, pilot is None or job.human)
+    if path is None:
+        return False, "skipped", None
+    # A run reloaded after an autosave gets back relics a teardown removed.
+    held = set(start_record(path).get("relics", []))
+    strays = sorted(held & {r for j in RELIC_FIGHTS for r in j.relics} - set(job.relics))
+    if strays:
+        print(f"    warning: also carried {', '.join(strays)}; take them off with `relic remove`")
+    path = park(path)
+    ok, line = replay_once(path)
+    print(f"    {line}")
+    return ok, line, path
+
+
+def run_job(job: Job, pilot: Pilot | None) -> list[tuple[bool, str]]:
+    """Set up, run every step, tear down. Returns each fight's result."""
+    print(f"\n=== {job.name}" + (" (yours)" if job.human and pilot else ""))
+    if job.relics:
+        print(f"    relics:  {', '.join(job.relics)}")
+    if job.advice:
+        print(f"    you:     {job.advice}")
+    results = []
+    send([f"relic add {r}" for r in job.relics], quiet=True)
+    try:
+        for step in job.steps:
+            match step:
+                case Send(commands):
+                    send(commands, quiet=True)
+                case Say(text, wait):
+                    print(f"    you:     {text}")
+                    if wait:
+                        input("    enter when done: ")
+                case Fight(enc):
+                    ok, line, path = fight(enc, job, pilot)
+                    results.append((ok, line))
+                    log_result(job, enc, ok, line, path)
+                    if not ok:
+                        break
+    finally:
+        send([f"relic remove {r}" for r in job.relics] + job.teardown, quiet=True)
+    return results
+
+
+def log_result(job: Job, enc: str, ok: bool, line: str, path: Path | None) -> None:
+    with open(RECORDINGS / "results.jsonl", "a") as f:
+        f.write(json.dumps({"time": time.strftime("%Y-%m-%d %H:%M:%S"), "job": job.name, "fight": enc,
+                            "ok": ok, "line": line, "file": path.name if path else None}) + "\n")
+
+
+def queued_jobs(jobs: list[Job]) -> list[Job]:
+    """Jobs appended to `recordings/queue.jsonl` since last time. A line is
+    `{"run": "terms"}` for known jobs, or `{"job": {...}}` for a one-off:
+    name, relics, fights, setup, teardown, advice, human."""
+    queue, pos = RECORDINGS / "queue.jsonl", RECORDINGS / "queue.pos"
+    if not queue.exists():
+        return []
+    lines = queue.read_text().splitlines()
+    done = int(pos.read_text()) if pos.exists() else 0
+    pos.write_text(str(len(lines)))
+    out = []
+    for line in lines[done:]:
+        if not line.strip():
+            continue
+        entry = json.loads(line)
+        if "run" in entry:
+            out += [j for j in jobs if j.matches(entry["run"].lower().split())]
+        elif (spec := entry.get("job")) is not None:
+            steps: list[Step] = [Send(spec.get("setup", []))] + [Fight(e) for e in spec["fights"]]
+            out.append(Job(spec["name"], {"queued"}, steps, spec.get("relics", []), spec.get("teardown", []),
+                           spec.get("advice"), spec.get("human", False)))
     return out
+
+
+def instant_mode(on: bool) -> bool:
+    """Set the game's instant mode (the console only toggles it); returns
+    whether it was on before."""
+    active = any("ACTIVE" in line for line in send(["instant"], quiet=True))
+    if active != on:
+        send(["instant"], quiet=True)
+    return not active
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("terms", nargs="*", help="job names or tags; a job must match all")
     ap.add_argument("--list", action="store_true", help="print the status table and stop")
-    # The acts and tiers the sim carries, so a ported act needs no edit here.
-    acts = sorted({act.lower() for _, act, _ in encounters()})
-    kinds = sorted({kind.lower() for _, _, kind in encounters()})
-    ap.add_argument("--act", choices=acts, help="only this act")
-    ap.add_argument("--kind", choices=kinds, help="only this tier")
-    ap.add_argument("--only", action="append", default=[], metavar="NAME", help="an encounter, or a relic fight with --relics")
-    ap.add_argument("--redo", action="store_true", help="include encounters that already replay clean")
+    ap.add_argument("--redo", action="store_true", help="include jobs that already replay clean")
+    ap.add_argument("--repeat", type=int, default=1, metavar="N", help="run each job N times")
+    ap.add_argument("--pilot", type=Path, metavar="CKPT", help="let this checkpoint play the fights")
+    ap.add_argument("--queue", action="store_true", help="keep running, taking jobs from recordings/queue.jsonl")
     ap.add_argument("--no-deck", action="store_true", help="leave the run's deck alone")
     ap.add_argument("--plain", action="store_true", help="drop Fresnel Lens, so no card arrives enchanted")
-    ap.add_argument("--repeat", type=int, default=1, metavar="N", help="record each encounter N times, all of which must be clean")
-    ap.add_argument("--relics", action="store_true", help="walk the relic fights instead of the encounters")
     args = ap.parse_args()
 
     if not RECORDINGS.is_dir():
         sys.exit(f"no recordings folder at {RECORDINGS}; build and load the mod first")
 
-    if args.relics:
-        fights = RELIC_FIGHTS
-        if args.only:
-            wanted = {o.lower() for o in args.only}
-            fights = [f for f in fights if f.name in wanted]
+    jobs = all_jobs()
+    terms = [t.lower() for t in args.terms]
+    picked = [j for j in jobs if j.matches(terms)]
+    # With --queue and no terms, only the queue decides what runs.
+    if not (args.queue and not terms):
         print("checking what is already recorded...")
-        state = relic_status()
-        for f in fights:
-            print(f"  {state[f.name]:>7}  {f.name:<20} {f.encounter}")
+        state = {j.name: status(j) for j in picked}
+        for j in picked:
+            print(f"  {state[j.name]:>7}  {j.name:<32} {' '.join(sorted(j.tags))}")
         if args.list:
             return
-        walk([(f.encounter, f) for f in fights if args.redo or state[f.name] != "ok"], args)
-        return
+        picked = [j for j in picked if args.redo or state[j.name] != "ok"]
+    else:
+        picked = []
 
-    encs = encounters()
-    if args.act:
-        encs = [e for e in encs if e[1].lower() == args.act]
-    if args.kind:
-        encs = [e for e in encs if e[2].lower() == args.kind]
-    if args.only:
-        wanted = {o.upper() for o in args.only}
-        encs = [e for e in encs if e[0] in wanted]
-
-    print("checking what is already recorded...")
-    state = status()
-    for enc, act, kind in encs:
-        print(f"  {state[enc]:>7}  {enc:<32} {act} {kind}")
-    if args.list:
-        return
-    walk([(e[0], None) for e in encs if args.redo or state[e[0]] != "ok"], args)
-
-
-def walk(todo: list[tuple[str, RelicFight | None]], args: argparse.Namespace) -> None:
-    """Set up and record each fight in turn, replaying as they finish."""
     if (why := blocker()) is not None:
         sys.exit(
             f"\nthe run is carrying something the sim does not know: {why}\n"
             "every fight would fail on the setup, not on the rules. a card or relic can come\n"
             "off with `remove_card` or `relic remove`; a potion needs using or a new run."
         )
-    if not todo:
+    if not picked and not args.queue:
         print("\nnothing to record.")
         return
-    print(f"\n{len(todo)} to go. start the game, open a run, and stay out of combat.")
+    print(f"\n{len(picked)} to go. start the game, open a run, and stay out of combat.")
     input("enter when ready: ")
-
     if args.plain:
         send(PLAIN)
     if not args.no_deck:
         print("building the deck...")
         send(DECK, quiet=True)
 
-    done, failed = [], []
-    for enc, fight in todo:
-        label = fight.name if fight else enc
-        runs = 0
-        while runs < args.repeat:
-            if args.repeat > 1:
-                print(f"    run {runs + 1} of {args.repeat}")
-            ok, line = run_one(enc, fight)
-            if ok:
-                runs += 1
-                continue
-            # A setup the sim cannot build is not this fight's fault, and
-            # every later fight would hit it too.
-            if line.startswith("ERR") and (why := blocker()) is not None:
-                print(f"\nstopping: the run is carrying {why}")
-                failed.append(label)
+    pilot = Pilot(args.pilot) if args.pilot else None
+    # Unattended, the animations are only time: instant mode, put back after.
+    instant_before = instant_mode(True) if pilot else None
+    clean, failed = [], []
+    try:
+        while True:
+            for job in picked:
+                for _ in range(args.repeat):
+                    results = run_job(job, pilot)
+                    if results and results[-1][1].startswith("ERR") and (why := blocker()) is not None:
+                        print(f"\nstopping: the run is carrying {why}")
+                        return
+                (clean if results and all(ok for ok, _ in results) else failed).append(job.name)
+            if not args.queue:
                 break
-            choice = input("    [enter] next, r retry, q quit: ").strip().lower()
-            if choice == "r":
-                continue
-            failed.append(label)
-            if choice == "q":
-                print(f"\nclean: {len(done)}  left: {len(todo) - len(done) - len(failed)}")
-                return
-            break
-        else:
-            done.append(label)
-
-    print(f"\nclean: {len(done)}")
-    if failed:
-        print("not clean: " + ", ".join(failed))
+            picked = queued_jobs(jobs)
+            if not picked:
+                time.sleep(2)
+    except KeyboardInterrupt:
+        print("\nstopped")
+    finally:
+        if pilot:
+            pilot.stop()
+        if instant_before is False:
+            instant_mode(False)
+        print(f"\nclean: {len(clean)}" + (f"\nnot clean: {', '.join(failed)}" if failed else ""))
 
 
 if __name__ == "__main__":
