@@ -623,7 +623,7 @@ def main() -> None:
     # Unattended, the session opens the game and the saved run itself.
     if args.pilot and not run_state().get("active"):
         print("\nopening the game and continuing the saved run...")
-        game.continue_run()
+        game.open_run("continue")
     if (why := blocker()) is not None:
         sys.exit(f"\ncannot set fights up: the game has {why}.")
     if not args.pilot:

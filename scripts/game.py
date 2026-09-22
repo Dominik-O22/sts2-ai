@@ -5,7 +5,9 @@ the main menu's Continue, pickup screens, anything with no command.
     uv run python scripts/game.py click FX FY      # left click at a fraction of the window (0.5 0.5: centre)
     uv run python scripts/game.py key KEY [KEY..]  # keys to the game window (xdotool names: Return, Down, Escape)
     uv run python scripts/game.py launch           # start the game, wait for its window
-    uv run python scripts/game.py continue         # launch if needed, click Continue, wait for the run
+    uv run python scripts/game.py continue         # launch if needed, continue the saved run, wait for it
+    uv run python scripts/game.py new_run ASC [SEED] [ACT1]   # same, but a new Ironclad run
+    uv run python scripts/game.py menu             # back to the main menu
     uv run python scripts/game.py where            # window position and size
 
 Hyprland 0.56 only (its dispatchers are Lua): `hyprctl` finds the window,
@@ -27,9 +29,8 @@ from pathlib import Path
 TITLE = "Slay the Spire 2"
 APP_ID = 2868840
 SHOT = Path("/tmp/sts2-window.png")
-RUN_STATE = Path.home() / ".local/share/SlayTheSpire2/sts2ai/run.json"
-# Main menu Continue, as a fraction of the window.
-CONTINUE = (0.406, 0.633)
+GAME_DIR = Path.home() / ".local/share/SlayTheSpire2/sts2ai"
+RUN_STATE = GAME_DIR / "run.json"
 
 
 @dataclass
@@ -108,19 +109,44 @@ def run_active() -> bool:
         return False
 
 
-def continue_run(timeout: float = 90) -> None:
-    """From a closed game or its main menu to the saved run, loaded."""
+def console(line: str, timeout: float = 10) -> str | None:
+    """Run one line through the mod's command file and return its outcome
+    from commands.log, or None if the game did not pick it up in time."""
+    log = GAME_DIR / "commands.log"
+    seen = log.stat().st_size if log.exists() else 0
+    tmp = GAME_DIR / "commands.tmp"
+    tmp.write_text(line + "\n")
+    tmp.rename(GAME_DIR / "commands.txt")
+    end = time.time() + timeout
+    while time.time() < end:
+        if log.exists() and log.stat().st_size > seen:
+            with log.open() as f:
+                f.seek(seen)
+                return f.read().strip()
+        time.sleep(0.2)
+    return None
+
+
+def open_run(command: str, timeout: float = 120) -> None:
+    """From a closed game or its main menu to a loaded run: the mod's
+    `sts2ai continue` or `sts2ai new_run ...`, retried until the menu is up
+    to take it."""
     # A closed game leaves its last run.json behind: after a fresh launch,
     # only a file the new process wrote counts.
     fresh, start = window() is None, time.time()
     launch()
     end = time.time() + timeout
+    sent = False
     while not (run_active() and (not fresh or RUN_STATE.stat().st_mtime > start)):
         if time.time() > end:
-            raise SystemExit("the run did not load; look at `shot`")
-        # The menu takes a while to accept input after the window opens.
-        click(*CONTINUE)
-        time.sleep(5)
+            raise SystemExit(f"{command} did not load a run; look at `shot`")
+        if not sent:
+            out = console(f"sts2ai {command}")
+            if out and "already loaded" in out:
+                return
+            # Before the main menu exists the command errors; try again.
+            sent = out is not None and out.startswith("ok")
+        time.sleep(2)
 
 
 def main() -> None:
@@ -134,8 +160,13 @@ def main() -> None:
         case ["click", fx, fy]:
             click(float(fx), float(fy))
         case ["continue"]:
-            continue_run()
+            open_run("continue")
             print("run loaded")
+        case ["new_run", *rest] if 1 <= len(rest) <= 3:
+            open_run("new_run " + " ".join(rest))
+            print("run started")
+        case ["menu"]:
+            print(console("sts2ai menu"))
         case ["launch"]:
             print(launch())
         case ["where"]:

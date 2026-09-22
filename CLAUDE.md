@@ -41,10 +41,11 @@ It already knows the deck that makes a long fight, the potions worth carrying,
 and that everything must be set before `fight`, because the console cannot add
 to a combat that is already running without the replay diverging.
 
-`scripts/game.py` drives the game window for what the console cannot do:
-`continue` launches the game and clicks Continue (a `--pilot` session does
-this itself when no run is loaded), `shot` screenshots the window alone,
-`click FX FY` and `key` send input.
+`scripts/game.py` covers what the dev console cannot: `continue` and
+`new_run ASC` launch the game if needed and load a run through the mod's
+own `sts2ai ...` commands (a `--pilot` session continues by itself when no
+run is loaded), `menu` goes back to the main menu, `shot` screenshots the
+game window alone, `click FX FY` and `key` send input to it.
 
 Dom or the pilot plays the fights. You set them up and read the diffs. Jobs
 marked `human` (an idle first turn, a pickup screen) need Dom.
