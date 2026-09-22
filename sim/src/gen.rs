@@ -14,7 +14,7 @@ use crate::potion::{self, PotionId};
 use crate::relic::{self, Relic, RelicId};
 use crate::replay::Ids;
 use crate::rng::Rng;
-use crate::types::{Ascension, AscensionLevel, CardRarity};
+use crate::types::{Ascension, AscensionLevel, CardRarity, CardType};
 use crate::{ironclad_starter_deck, IRONCLAD_ENERGY, IRONCLAD_HP};
 
 /// Relics the sim leaves out because nothing they do reaches a combat: they
@@ -246,6 +246,83 @@ fn reward_pool() -> Vec<CardId> {
     IRONCLAD_POOL.iter().copied().filter(|&id| !matches!(def(id).rarity, CardRarity::Basic | CardRarity::Special)).collect()
 }
 
+/// Deck plans a run can build toward. A run that commits to one takes
+/// reward cards from it over others, the way a player does; grouped by what
+/// each card's class does (`Models/Cards/<Name>.cs`), not by any tier list.
+const PLANS: &[&[CardId]] = &[
+    // Strength, and the multi-hits that scale with it.
+    &[
+        CardId::Inflame, CardId::DemonForm, CardId::FightMe, CardId::Brand, CardId::SetupStrike, CardId::Dominate,
+        CardId::Rupture, CardId::SwordBoomerang, CardId::TwinStrike, CardId::Whirlwind, CardId::Thrash,
+        CardId::PommelStrike, CardId::Uppercut,
+    ],
+    // Exhaust and the cards that pay off on it.
+    &[
+        CardId::Corruption, CardId::FeelNoPain, CardId::DarkEmbrace, CardId::BurningPact, CardId::SecondWind,
+        CardId::TrueGrit, CardId::FiendFire, CardId::Havoc, CardId::EvilEye, CardId::ForgottenRitual,
+        CardId::AshenStrike, CardId::DrumOfBattle, CardId::Stoke, CardId::Offering, CardId::Feed,
+    ],
+    // Block that stays, and the cards that hit with it.
+    &[
+        CardId::Barricade, CardId::BodySlam, CardId::Juggernaut, CardId::Unmovable, CardId::Impervious,
+        CardId::FlameBarrier, CardId::ShrugItOff, CardId::StoneArmor, CardId::Colossus, CardId::IronWave,
+        CardId::Armaments, CardId::Taunt,
+    ],
+    // Vulnerable and what it pays for.
+    &[
+        CardId::Cruelty, CardId::Vicious, CardId::Dominate, CardId::Tremble, CardId::Thunderclap, CardId::Uppercut,
+        CardId::Bully, CardId::Dismantle, CardId::MoltenFist, CardId::Taunt, CardId::Colossus, CardId::Bludgeon,
+    ],
+    // Losing HP on purpose.
+    &[
+        CardId::Rupture, CardId::Bloodletting, CardId::Hemokinesis, CardId::Breakthrough, CardId::BloodWall,
+        CardId::Offering, CardId::Brand, CardId::CrimsonMantle, CardId::Inferno, CardId::FeelNoPain,
+    ],
+];
+
+/// One card reward: three offers by rarity, and the one a player on `plan`
+/// would take, or none when the deck is big enough and nothing fits.
+/// Rares show up more often in later acts, as the game's rare offset grows.
+fn card_reward(rng: &mut Rng, pool: &[CardId], act: u32, deck: &[Card], plan: Option<&[CardId]>) -> Option<CardId> {
+    let weight = |id: CardId| match def(id).rarity {
+        CardRarity::Common => 60,
+        CardRarity::Uncommon => 37,
+        _ => 3 + 4 * act as usize,
+    };
+    let total: usize = pool.iter().map(|&id| weight(id)).sum();
+    let mut offer = || {
+        let mut n = rng.next_int(total);
+        for &id in pool {
+            if n < weight(id) {
+                return id;
+            }
+            n -= weight(id);
+        }
+        pool[0]
+    };
+    let offers = [offer(), offer(), offer()];
+    let Some(plan) = plan else { return Some(offers[rng.next_int(3)]) };
+    let attacks = deck.iter().filter(|c| def(c.id).ty == CardType::Attack).count();
+    let score = |id: CardId| -> f32 {
+        let d = def(id);
+        let mut s = match d.rarity {
+            CardRarity::Rare => 1.0,
+            CardRarity::Uncommon => 0.5,
+            _ => 0.0,
+        };
+        if plan.contains(&id) {
+            s += 2.0;
+        }
+        // A deck still needs to kill things.
+        if d.ty == CardType::Attack && attacks * 3 < deck.len() {
+            s += 1.5;
+        }
+        s
+    };
+    let best = offers.into_iter().max_by(|&a, &b| score(a).total_cmp(&score(b)))?;
+    (deck.len() < 20 || score(best) >= 2.0).then_some(best)
+}
+
 /// Relics a run can hold besides the starter. Ancient relics are left out:
 /// the Ancients that hand them out open acts 2 and 3, and Neow's are
 /// either inert or not on the list.
@@ -317,37 +394,36 @@ pub fn generate_against(rng: &mut Rng, floor: u32, asc: Ascension, encounter: En
         deck.push(Card::new(0, CardId::AscendersBane, false));
     }
     let pool = reward_pool();
-    let rarity_weight = |id: CardId| match def(id).rarity {
-        CardRarity::Common => 60,
-        CardRarity::Uncommon => 37,
-        _ => 3,
-    };
-    let total: usize = pool.iter().map(|&id| rarity_weight(id)).sum();
-    let pick_reward = |rng: &mut Rng| {
-        let mut n = rng.next_int(total);
-        for &id in &pool {
-            let w = rarity_weight(id);
-            if n < w {
-                return id;
-            }
-            n -= w;
-        }
-        pool[0]
-    };
-    for _ in 1..floor {
+    // Most runs commit to a plan; the rest take whatever, so the policy
+    // still sees unfocused decks.
+    let plan = (rng.next_int(5) != 0).then(|| PLANS[rng.next_int(PLANS.len())]);
+    for f in 1..floor {
+        // Later acts have more rest sites spent on smithing, and more shops
+        // and events that remove cards.
+        let later = act_floor(f).0 > 0;
         if rng.next_int(3) < 2 {
-            let id = pick_reward(rng);
-            deck.push(Card::new(0, id, rng.next_int(8) == 0));
+            if let Some(id) = card_reward(rng, &pool, act_floor(f).0, &deck, plan) {
+                deck.push(Card::new(0, id, rng.next_int(8) == 0));
+            }
         }
-        // Smiths and events: upgrade a random card, or remove a basic.
-        if rng.next_int(6) == 0 {
-            let i = rng.next_int(deck.len());
+        // Smiths go to the cards that matter, not to Strikes.
+        if rng.next_int(if later { 4 } else { 6 }) == 0 {
+            let good: Vec<usize> = (0..deck.len())
+                .filter(|&i| !deck[i].upgraded && !matches!(def(deck[i].id).rarity, CardRarity::Basic | CardRarity::Special))
+                .collect();
+            let i = match rng.pick(&good) {
+                Some(&i) => i,
+                None => rng.next_int(deck.len()),
+            };
             if def(deck[i].id).rarity != CardRarity::Special {
                 deck[i].upgraded = true;
             }
         }
-        if rng.next_int(8) == 0 {
-            if let Some(i) = deck.iter().position(|c| matches!(c.id, CardId::StrikeIronclad | CardId::DefendIronclad)) {
+        // Removals take Strikes first, then Defends.
+        if rng.next_int(if later { 5 } else { 8 }) == 0 {
+            let strikes = deck.iter().filter(|c| c.id == CardId::StrikeIronclad).count();
+            let first = if strikes > 0 { CardId::StrikeIronclad } else { CardId::DefendIronclad };
+            if let Some(i) = deck.iter().position(|c| c.id == first) {
                 deck.remove(i);
             }
         }
@@ -380,7 +456,8 @@ pub fn generate_against(rng: &mut Rng, floor: u32, asc: Ascension, encounter: En
         Kind::Boss => RoomKind::Boss,
         _ => RoomKind::Monster,
     };
-    let max_hp = IRONCLAD_HP;
+    // Events, relics and Ancients raise max HP by roughly this much an act.
+    let max_hp = IRONCLAD_HP + (0..act_floor(floor).0).map(|_| 5 + rng.next_int(8) as i32).sum::<i32>();
     // The floor before the boss is a rest site, so boss fights start
     // rested. Elites keep the full range: real runs meet them at any HP.
     let (lo, span) = match encounter.kind() {

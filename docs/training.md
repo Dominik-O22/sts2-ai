@@ -20,8 +20,12 @@ maturin from `sim-py/` into the package `sts2ai._sim`.
 ## Pieces
 
 - `sim/src/gen.rs`: `generate(rng, floor, asc)` rolls a run state for a
-  fight on that floor: starter deck plus about two picks per three floors,
-  occasional upgrades and removals, a relic every four floors, potions in a
+  fight on that floor: starter deck plus about two card rewards per three
+  floors, each three offers of which four runs in five take the one that
+  fits a deck plan (`PLANS`: Strength, exhaust, block, Vulnerable, HP loss)
+  and skip once the deck has 20 cards and nothing fits. Upgrades go to
+  non-basic cards, removals take Strikes first, and both come faster after
+  act 1, as does max HP; a relic every four floors, potions in a
   third of the slots, an Ancient relic per act after the first, HP between
   40% and 100% (70% and up at the boss, which follows a rest site). Floors
   run 1 to 48, sixteen per act: in each act the first floors draw weak
