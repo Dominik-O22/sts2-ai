@@ -43,8 +43,9 @@ The deck is the point. A fast deck kills a boss in three turns and proves
 nothing: the long move cycles are five and six turns. So the deck is mostly
 block and barely any damage, and it is built from the plainest cards in the
 pool, so a divergence points at the monster rather than at some card port.
-Each job has a loadout (`STANDARD`, or `FORTRESS` for act 2 and 3 elites
-and bosses): the exact deck, setup relics and a floor on max HP. Before a
+Each job has a loadout (`STANDARD`, or `POWERED` for acts 2 and 3, which
+need damage as well as block): the exact deck, setup relics and a floor on
+max HP. Before a
 job, only the difference from what the run carries goes to the console, so
 sessions no longer pile cards and relics on top of each other.
 
@@ -93,11 +94,14 @@ STANDARD = Loadout(
     {"ANCHOR": 1, "BAG_OF_PREPARATION": 1},
     80,
 )
-# For act 2 and 3 elites and bosses, whose cycles outlast the standard deck:
-# block that stays (Barricade) and grows (Stone Armor, Feel No Pain), still
-# little damage, so the fight runs long rather than ending early.
-FORTRESS = Loadout(
-    {**STANDARD.deck, "IMPERVIOUS": 3, "FEEL_NO_PAIN": 2, "BARRICADE": 1, "STONE_ARMOR": 2, "FLAME_BARRIER": 2},
+# For act 2 and 3, where block alone loses: a board of four bots out-hits
+# any pile of it. Area damage for crowds (Thunderclap, Breakthrough),
+# Strength that scales (Inflame, Demon Form), plain hits, and still enough
+# block. Bosses have hundreds of HP, so their cycles show all the same.
+POWERED = Loadout(
+    {"STRIKE_IRONCLAD": 2, "DEFEND_IRONCLAD": 3, "BASH": 1, "SHRUG_IT_OFF": 3, "IMPERVIOUS": 2,
+     "FLAME_BARRIER": 1, "FEEL_NO_PAIN": 1, "INFLAME": 2, "DEMON_FORM": 1, "THUNDERCLAP": 2,
+     "BREAKTHROUGH": 1, "POMMEL_STRIKE": 2, "UPPERCUT": 1, "IRON_WAVE": 2},
     STANDARD.relics,
     150,
 )
@@ -106,8 +110,7 @@ MAX_HP_RELICS = [("MANGO", 14), ("PEAR", 10), ("STRAWBERRY", 7)]
 
 
 def loadout_for(job: "Job") -> Loadout:
-    hard = job.tags & {"elite", "boss"} and job.tags & {"hive", "glory"}
-    return FORTRESS if hard else STANDARD
+    return POWERED if job.tags & {"hive", "glory"} else STANDARD
 
 
 class Run:
