@@ -4,6 +4,8 @@ with the dense features and run through an MLP with a masked policy head."""
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import torch
 from torch import Tensor, nn
 
@@ -60,3 +62,9 @@ class Policy(nn.Module):
 def masked_logits(logits: Tensor, mask: Tensor) -> Tensor:
     """Illegal actions get a logit small enough to vanish after softmax."""
     return logits.masked_fill(~mask, -1e9)
+
+
+def load_policy(path: Path, policy: Policy, device: torch.device) -> None:
+    """Load weights from a training checkpoint (or a bare state dict)."""
+    ck = torch.load(path, map_location=device)
+    policy.load_state_dict(ck["policy"] if "policy" in ck else ck)

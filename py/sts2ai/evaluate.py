@@ -13,7 +13,7 @@ import numpy as np
 import torch
 
 from sts2ai.env import DEFAULT_RECORDINGS, End, Envs, Layout
-from sts2ai.model import Policy, masked_logits
+from sts2ai.model import Policy, load_policy, masked_logits
 
 
 @torch.no_grad()
@@ -52,7 +52,7 @@ def main() -> None:
     args = ap.parse_args()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     policy = Policy(Layout.load()).to(device)
-    policy.load_state_dict(torch.load(args.checkpoint, map_location=device))
+    load_policy(args.checkpoint, policy, device)
     policy.eval()
     win, by_enc = evaluate(policy, device, args.episodes, args.recordings)
     for enc, (w, n) in sorted(by_enc.items()):

@@ -11,6 +11,7 @@ uv sync --reinstall-package sts2ai       # after editing Rust (cache-keys usuall
 uv run python -m sts2ai.train --iters 500
 uv run tensorboard --logdir runs
 uv run python -m sts2ai.evaluate runs/<time>/latest.pt
+uv run python -m sts2ai.train --resume runs/<time>/latest.pt --iters 2000   # continue a run
 ```
 
 Python 3.13 is pinned in `.python-version`; the extension is built by

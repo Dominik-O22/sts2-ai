@@ -47,6 +47,9 @@ class Config:
     eval_episodes: int = 200
     recordings: Path = DEFAULT_RECORDINGS
     run_dir: Path = Path("runs") / time.strftime("%Y%m%d-%H%M%S")
+    # Checkpoint to continue from. Skips the floor ramp: the policy already
+    # handles the early floors, so fights come from all of act 1 at once.
+    resume: Path | None = None
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
 
 
@@ -107,6 +110,10 @@ class Stats:
         return out
 
 
+def save_checkpoint(path: Path, policy: Policy, opt: torch.optim.Optimizer, it: int, global_step: int) -> None:
+    torch.save({"policy": policy.state_dict(), "optimizer": opt.state_dict(), "iter": it, "global_step": global_step}, path)
+
+
 def train(cfg: Config) -> Policy:
     torch.manual_seed(cfg.seed)
     np.random.seed(cfg.seed)
@@ -116,14 +123,21 @@ def train(cfg: Config) -> Policy:
     opt = torch.optim.Adam(policy.parameters(), lr=cfg.lr, eps=1e-5)
     roll = Rollout(cfg, envs, device)
     stats = Stats()
+    start_iter, global_step = 1, 0
+    if cfg.resume:
+        ck = torch.load(cfg.resume, map_location=device)
+        policy.load_state_dict(ck["policy"])
+        opt.load_state_dict(ck["optimizer"])
+        start_iter, global_step = ck["iter"] + 1, ck["global_step"]
+        print(f"resumed {cfg.resume} at iteration {ck['iter']}")
     cfg.run_dir.mkdir(parents=True, exist_ok=True)
     writer = SummaryWriter(str(cfg.run_dir))
     print(f"training on {device}, {cfg.envs} envs x {cfg.steps} steps, logs in {cfg.run_dir}")
 
-    global_step = 0
+    step0 = global_step
     t0 = time.time()
-    for it in range(1, cfg.iters + 1):
-        max_floor = min(BOSS_FLOOR, cfg.floor_start + (BOSS_FLOOR - cfg.floor_start) * it // max(1, cfg.floor_ramp))
+    for it in range(start_iter, start_iter + cfg.iters):
+        max_floor = BOSS_FLOOR if cfg.resume else min(BOSS_FLOOR, cfg.floor_start + (BOSS_FLOOR - cfg.floor_start) * it // max(1, cfg.floor_ramp))
         envs.set_floors(1, max_floor)
 
         # Rollout.
@@ -192,22 +206,22 @@ def train(cfg: Config) -> Policy:
 
         # Logging.
         summary = stats.summary()
-        sps = global_step / (time.time() - t0)
+        sps = (global_step - step0) / (time.time() - t0)
         for k, v in summary.items():
             writer.add_scalar(f"episode/{k}", v, global_step)
         for k, v in losses.items():
             writer.add_scalar(f"loss/{k}", v / n_updates, global_step)
         writer.add_scalar("curriculum/max_floor", max_floor, global_step)
         writer.add_scalar("perf/sps", sps, global_step)
-        if it % 10 == 0 or it == 1:
+        if it % 10 == 0 or it == start_iter:
             win = summary.get("win_rate", float("nan"))
             print(
                 f"it {it:5d} step {global_step:>10d} floor<={max_floor:2d} win {win:6.1%} "
                 f"reward {summary.get('reward', float('nan')):6.3f} ent {losses['entropy'] / n_updates:5.3f} "
                 f"kl {losses['approx_kl'] / n_updates:6.4f} {sps:8.0f} sps"
             )
-        if it % cfg.eval_every == 0 or it == cfg.iters:
-            torch.save(policy.state_dict(), cfg.run_dir / "latest.pt")
+        if it % cfg.eval_every == 0 or it == start_iter + cfg.iters - 1:
+            save_checkpoint(cfg.run_dir / "latest.pt", policy, opt, it, global_step)
             if cfg.recordings.is_dir():
                 policy.eval()
                 win, by_enc = evaluate(policy, device, cfg.eval_episodes, cfg.recordings)
