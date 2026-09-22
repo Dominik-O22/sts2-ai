@@ -398,7 +398,7 @@ def run_state() -> dict:
         return {"active": False}
 
 
-def blocker() -> str | None:
+def blocker(starting: bool = True) -> str | None:
     """Why fights cannot be set up from the run as it stands: no run, a dead
     one, a fight in progress, or something the sim has never heard of (a
     colorless card, a relic from an unported act, a potion like Colorless
@@ -412,7 +412,9 @@ def blocker() -> str | None:
         return "no run in progress (start or continue one)"
     if run.get("dead"):
         return "a run that is over"
-    if run.get("in_combat"):
+    # Between jobs the game still counts the fight just won as in progress
+    # until the rewards are left behind, so only a session start checks.
+    if starting and run.get("in_combat"):
         return "a fight in progress (finish it first)"
     # The sim checks names the way it reads a recording's start record,
     # which also names an encounter; any one it knows will do.
@@ -633,10 +635,10 @@ def main() -> None:
             for job in picked:
                 for _ in range(args.repeat):
                     results = run_job(job, pilot, run)
-                    if (why := blocker()) is not None:
-                        print(f"\nstopping: the game has {why}")
-                        return
                 (clean if results and all(ok for ok, _ in results) else failed).append(job.name)
+                if (why := blocker(starting=False)) is not None:
+                    print(f"\nstopping: the game has {why}")
+                    return
             if not args.queue:
                 break
             picked = queued_jobs(jobs)
