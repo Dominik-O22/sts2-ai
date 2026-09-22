@@ -1,0 +1,31 @@
+[project]
+name = "sts2ai"
+version = "0.1.0"
+description = "Training and play loop for the StS2 Ironclad agent"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy>=2",
+    "torch>=2.8",
+    "tensorboard>=2.18",
+]
+
+[build-system]
+requires = ["maturin>=1.9,<2"]
+build-backend = "maturin"
+
+# The Rust extension `sts2ai._sim` comes from sim-py/, the Python package
+# from py/sts2ai/.
+[tool.maturin]
+python-source = "py"
+module-name = "sts2ai._sim"
+manifest-path = "sim-py/Cargo.toml"
+features = ["pyo3/extension-module"]
+
+# Rebuild the extension when the Rust side changes.
+[tool.uv]
+cache-keys = [
+    { file = "pyproject.toml" },
+    { file = "Cargo.toml" },
+    { file = "sim/src/**/*.rs" },
+    { file = "sim-py/src/**/*.rs" },
+]

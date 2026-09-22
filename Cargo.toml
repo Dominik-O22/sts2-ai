@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["sim"]
+members = ["sim", "sim-py"]
 
 [workspace.package]
 edition = "2021"

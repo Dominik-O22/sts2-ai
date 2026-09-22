@@ -1,2 +1,6 @@
 target/
 decompiled/
+.venv/
+runs/
+__pycache__/
+*.egg-info/

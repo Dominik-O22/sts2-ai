@@ -12,12 +12,12 @@ use std::collections::{HashMap, VecDeque};
 use serde_json::{json, Value};
 
 use crate::card::Card;
-use crate::combat::{Action, Combat, EnemySpec, Outcome, RoomKind, Script, Setup};
+use crate::combat::{Action, Combat, Outcome, Script};
+use crate::gen::{card_ref, FightSetup};
 use crate::encounter::Encounter;
 use crate::ids::{CardId, MonsterId, ALL_CARDS, ALL_MONSTERS};
 use crate::potion::PotionId;
-use crate::relic::{Relic, RelicId};
-use crate::rng::Rng;
+use crate::relic::RelicId;
 use crate::types::{Ascension, CreatureRef};
 
 /// `StringHelper.Slugify` on a Rust enum variant name.
@@ -38,11 +38,11 @@ fn table<T: Copy + std::fmt::Debug>(all: &[T], suffix: &str) -> HashMap<String, 
 
 /// Lookups from game id strings to sim ids.
 pub struct Ids {
-    cards: HashMap<String, CardId>,
-    monsters: HashMap<String, MonsterId>,
-    relics: HashMap<String, RelicId>,
-    potions: HashMap<String, PotionId>,
-    encounters: HashMap<String, Encounter>,
+    pub(crate) cards: HashMap<String, CardId>,
+    pub(crate) monsters: HashMap<String, MonsterId>,
+    pub(crate) relics: HashMap<String, RelicId>,
+    pub(crate) potions: HashMap<String, PotionId>,
+    pub(crate) encounters: HashMap<String, Encounter>,
 }
 
 impl Ids {
@@ -174,24 +174,6 @@ fn diff(recorded: &Value, sim: &Value) -> Option<String> {
     None
 }
 
-fn card_ref(ids: &Ids, v: &Value) -> Result<(CardId, bool), String> {
-    let id = v["id"].as_str().ok_or("card without id")?;
-    let card = *ids.cards.get(id).ok_or_else(|| format!("unknown card {id}"))?;
-    Ok((card, v["up"].as_bool().unwrap_or(false)))
-}
-
-/// Enemy specs for the recorded monster list: re-roll the encounter's own
-/// composition until it matches, so positional flags come out right.
-fn specs_for(enc: Encounter, monsters: &[MonsterId]) -> Vec<EnemySpec> {
-    for seed in 0..2000u64 {
-        let specs = enc.monsters(&mut Rng::new(seed));
-        if specs.iter().map(|s| s.id).eq(monsters.iter().copied()) {
-            return specs;
-        }
-    }
-    monsters.iter().map(|&id| EnemySpec { id, flags: Default::default() }).collect()
-}
-
 /// After the sim has no pending choice, compare against `snap`. With a
 /// pending choice, try every answer and keep the first whose result
 /// matches: the recording does not say which card was picked.
@@ -311,53 +293,10 @@ pub fn replay_seeded(text: &str, ids: &Ids, seed: u64) -> Result<Report, String>
     let start = records.first().filter(|r| r["t"] == "start").ok_or("no start record")?;
     let first_snap = records.iter().find(|r| r["t"] == "snapshot").ok_or("no snapshot")?;
 
-    let deck: Vec<Card> = start["deck"]
-        .as_array()
-        .ok_or("start without deck")?
-        .iter()
-        .map(|v| card_ref(ids, v).map(|(id, up)| Card::new(0, id, up)))
-        .collect::<Result<_, _>>()?;
-    let relics: Vec<Relic> = start["relics"]
-        .as_array()
-        .map(|a| {
-            a.iter()
-                .filter_map(|v| {
-                    let name = v.as_str()?;
-                    let id = ids.relics.get(name);
-                    if id.is_none() {
-                        eprintln!("note: unknown relic {name}, ignored");
-                    }
-                    id
-                })
-                .map(|&id| Relic::new(id))
-                .collect()
-        })
-        .unwrap_or_default();
-    let potions: Vec<Option<PotionId>> = start["potions"]
-        .as_array()
-        .map(|a| a.iter().map(|v| v.as_str().and_then(|s| ids.potions.get(s).copied())).collect())
-        .unwrap_or_default();
-    let enc_name = start["encounter"].as_str().unwrap_or("");
-    let enc = *ids.encounters.get(enc_name).ok_or_else(|| format!("unknown encounter {enc_name}"))?;
-    let monsters: Vec<MonsterId> = start["enemies"]
-        .as_array()
-        .ok_or("start without enemies")?
-        .iter()
-        .map(|e| {
-            let id = e["id"].as_str().unwrap_or("");
-            ids.monsters.get(id).copied().ok_or_else(|| format!("unknown monster {id}"))
-        })
-        .collect::<Result<_, _>>()?;
-    let specs = specs_for(enc, &monsters);
-    let asc = Ascension(start["ascension"].as_i64().unwrap_or(0) as u8);
-    for (e, &id) in start["enemies"].as_array().unwrap().iter().zip(&monsters) {
-        check_hp_range(id, e["max_hp"].as_i64().unwrap_or(0) as i32, asc)?;
+    let fs = FightSetup::from_start(start, first_snap, ids)?;
+    for (e, spec) in start["enemies"].as_array().unwrap().iter().zip(&fs.enemies) {
+        check_hp_range(spec.id, e["max_hp"].as_i64().unwrap_or(0) as i32, fs.asc)?;
     }
-    let room = match start["room"].as_str() {
-        Some("Elite") => RoomKind::Elite,
-        Some("Boss") => RoomKind::Boss,
-        _ => RoomKind::Monster,
-    };
 
     // The first shuffle is the initial one: the opening hand in draw order,
     // then the rest of the draw pile.
@@ -374,21 +313,7 @@ pub fn replay_seeded(text: &str, ids: &Ids, seed: u64) -> Result<Report, String>
         generated: VecDeque::new(),
         random_exhausts: vec![],
     };
-    let mut c = Combat::with_script(
-        &Setup {
-            deck: &deck,
-            hp: first_snap["hp"].as_i64().unwrap_or(1) as i32,
-            max_hp: first_snap["max_hp"].as_i64().unwrap_or(1) as i32,
-            max_energy: start["max_energy"].as_i64().unwrap_or(3) as i32,
-            relics: &relics,
-            potions: &potions,
-            enemies: &specs,
-            room,
-            asc,
-            seed,
-        },
-        script,
-    );
+    let mut c = Combat::with_script(&fs.as_setup(seed), script);
     // Enemies that start damaged (the start record is taken at the first decision point).
     for (i, e) in start["enemies"].as_array().unwrap().iter().enumerate() {
         if let (Some(hp), true) = (e["hp"].as_i64(), i < c.enemies.len()) {
@@ -570,7 +495,8 @@ pub fn replay_seeded(text: &str, ids: &Ids, seed: u64) -> Result<Report, String>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::combat::Setup;
+    use crate::combat::{RoomKind, Setup};
+    use crate::relic::Relic;
     use crate::rng::Rng;
 
     fn card_json(id: CardId, up: bool) -> Value {

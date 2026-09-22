@@ -4,7 +4,10 @@
 pub mod card;
 pub mod combat;
 pub mod effect;
+pub mod encode;
 pub mod encounter;
+pub mod env;
+pub mod gen;
 pub mod ids;
 pub mod monster;
 pub mod potion;
