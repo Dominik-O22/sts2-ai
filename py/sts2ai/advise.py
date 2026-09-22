@@ -54,6 +54,12 @@ class Session:
         if status.startswith("diverged"):
             print(f"  {status}")
             return
+        # A fight outside what the sim models, an Underdocks run being the
+        # common case. Say so once and keep following the recordings.
+        if status.startswith("unsupported"):
+            print(f"  cannot follow this fight: {status.removeprefix('unsupported: ')}\n")
+            self.advised = None
+            return
         if status == "ended":
             snapshots, actions, _ = self.sim.counts()
             print(f"  combat over: {snapshots} decision points, {actions} actions\n")

@@ -147,8 +147,9 @@ impl Advisor {
     }
 
     /// Feed one line of the recording. Returns "ok", "decision", "ended",
-    /// "diverged: <why>", or "waiting" before the combat has started.
-    /// A `start` record begins a new combat and drops the old one.
+    /// "diverged: <why>", "unsupported: <why>" for a fight the sim cannot
+    /// build (an Underdocks encounter, say), or "waiting" before the combat
+    /// has started. A `start` record begins a new combat, dropping the old.
     fn feed_line(&mut self, line: &str) -> PyResult<String> {
         let line = line.trim();
         if line.is_empty() {
@@ -166,9 +167,15 @@ impl Advisor {
             // player's HP, so the combat is built from it and the start.
             "snapshot" if self.inner.is_none() => {
                 let Some(start) = self.start.clone() else { return Ok("waiting".into()) };
-                let r = Replayer::new(&start, &rec, self.ids.clone(), self.seed)
-                    .map_err(pyo3::exceptions::PyValueError::new_err)?;
-                self.inner = Some(r);
+                match Replayer::new(&start, &rec, self.ids.clone(), self.seed) {
+                    Ok(r) => self.inner = Some(r),
+                    // Nothing about this fight is followable, so forget the
+                    // start: later snapshots wait quietly for the next one.
+                    Err(e) => {
+                        self.start = None;
+                        return Ok(format!("unsupported: {e}"));
+                    }
+                }
             }
             _ => {}
         }
@@ -280,6 +287,55 @@ fn monster_names() -> Vec<String> {
     std::iter::once("<pad>".to_string()).chain(ALL_MONSTERS.iter().map(|c| format!("{c:?}"))).collect()
 }
 
+/// Every act 1 encounter as (id, act, kind), in the sim's own order. The
+/// recording wizard walks this so it cannot drift from `encounter.rs`.
+#[pyfunction]
+fn encounters() -> Vec<(String, String, String)> {
+    sim::encounter::ALL
+        .iter()
+        .map(|e| (sim::replay::slug(&format!("{e:?}")), format!("{:?}", e.act()), format!("{:?}", e.kind())))
+        .collect()
+}
+
+/// Why the sim cannot build a fight from this recorder `start` record, if it
+/// cannot. One check for every id a run can carry: a card, an enchantment, a
+/// relic, a potion, the encounter, the monsters. A colorless card or an act 2
+/// relic the sim has never heard of comes out here, before the fight rather
+/// than halfway through it.
+#[pyfunction]
+fn start_blocker(start: &str) -> PyResult<Option<String>> {
+    let v: Value = serde_json::from_str(start).map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+    // Only `hp` and `max_hp` are read from the snapshot, so an empty one does.
+    Ok(sim::gen::FightSetup::from_start(&v, &serde_json::json!({}), &Ids::new()).err())
+}
+
+/// What the sim knows about an encounter: each monster with the powers it
+/// starts with and the moves it can show. Tooling describes a fight from
+/// this, so a new act needs no notes written by hand.
+#[pyfunction]
+fn encounter_brief(name: &str, asc: u8) -> PyResult<Vec<(String, Vec<(String, i32)>, Vec<String>)>> {
+    let ids = Ids::new();
+    let enc = *ids.encounter(name).ok_or_else(|| pyo3::exceptions::PyValueError::new_err(format!("unknown encounter {name}")))?;
+    let asc = Ascension(asc);
+    let mut seen: Vec<sim::ids::MonsterId> = vec![];
+    for spec in enc.monsters(&mut sim::rng::Rng::new(0)) {
+        if !seen.contains(&spec.id) {
+            seen.push(spec.id);
+        }
+    }
+    Ok(seen
+        .into_iter()
+        .map(|id| {
+            let powers = sim::monster::Monster::innate_powers(id, asc)
+                .into_iter()
+                .map(|(p, n)| (sim::replay::slug(&format!("{p:?}")), n))
+                .collect();
+            let moves = sim::monster::move_names_of(id, asc).into_iter().map(str::to_string).collect();
+            (sim::replay::slug(&format!("{id:?}")), powers, moves)
+        })
+        .collect())
+}
+
 #[pymodule]
 fn _sim(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<VecEnv>()?;
@@ -287,5 +343,8 @@ fn _sim(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(layout, m)?)?;
     m.add_function(wrap_pyfunction!(card_names, m)?)?;
     m.add_function(wrap_pyfunction!(monster_names, m)?)?;
+    m.add_function(wrap_pyfunction!(encounters, m)?)?;
+    m.add_function(wrap_pyfunction!(start_blocker, m)?)?;
+    m.add_function(wrap_pyfunction!(encounter_brief, m)?)?;
     Ok(())
 }

@@ -56,10 +56,46 @@ pull, the target of a power hit like Juggernaut) are re-rolled: when a
 snapshot does not match, the replay rewinds to the last matching one,
 reseeds the card-selection and target streams, and tries again, up to 64
 times. The report shows how many reseeds a clean
-replay needed. Random card generation is not forced yet.
+replay needed. Cards created mid-combat are logged as `gen` records and
+forced like the shuffles.
 
 A snapshot immediately followed by another snapshot, with no action in
 between, caught the game mid-resolution and is skipped.
+
+## Recording what is missing
+
+`scripts/record.py` walks the encounters with no clean recording, builds a
+deck for each through the dev console, says what the monster does and what
+you have to do to make it show, waits for the fight, then replays it.
+
+```
+uv run python scripts/record.py --list          # status per encounter
+uv run python scripts/record.py --act underdocks
+uv run python scripts/record.py --only WATERFALL_GIANT_BOSS
+uv run python scripts/record.py --repeat 2      # each fight twice
+```
+
+The encounter list, the acts and tiers it filters on, and the description of
+every fight all come from the sim, so a newly ported act appears here with
+nothing written by hand. Only the one-line "what you have to do" advice is
+hand-written, and only for fights where playing straight would not show the
+mechanic.
+
+Before it starts, it asks the sim whether it could build a fight from the
+run as it stands. A colorless card in the deck, a relic from an act that is
+not ported, a Colorless Potion in the belt: any of those makes every fight
+fail on the setup rather than on the rules, and the dev console can add
+things to a run but not take them away, so it says so and stops.
+
+The deck it builds is mostly block with barely any damage. The long move
+cycles are five and six turns, so a deck that kills a boss in three proves
+nothing, and the cards are the plainest in the pool so a divergence points
+at the monster rather than at a card port. Fairy in a Bottle goes in the
+belt before every fight, which buys one death.
+
+Everything is set before `fight`. Powers or block handed out mid-combat by
+the console are not in the `start` record, so the sim never sees them and
+the replay diverges at the next snapshot.
 
 ## Scripting setups from outside the game
 
