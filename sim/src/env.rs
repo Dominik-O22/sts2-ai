@@ -136,6 +136,10 @@ impl VecEnv {
         self.slots.is_empty()
     }
 
+    pub fn asc(&self) -> Ascension {
+        self.cfg.asc
+    }
+
     /// Curriculum knob: which floors generated fights come from. Takes
     /// effect at each env's next reset.
     pub fn set_hard_frac(&mut self, frac: f32) {

@@ -96,6 +96,12 @@ class Envs:
     def set_hard_frac(self, frac: float) -> None:
         self.sim.set_hard_frac(frac)
 
+    def use_holdout(self, seed: int = 0, per_encounter: int = 10) -> int:
+        """Cycle through a fixed generated set covering every encounter."""
+        n = self.sim.use_holdout(seed, per_encounter)
+        self.sim.observe(self.floats, self.ids, self.mask)
+        return n
+
     def load_recordings(self, directory: Path = DEFAULT_RECORDINGS) -> int:
         """Cycle through recorded fights instead of generated ones."""
         n, errors = self.sim.load_recordings(str(directory))

@@ -293,6 +293,15 @@ mod tests {
     }
 
     #[test]
+    fn holdout_is_deterministic_and_covers_every_encounter() {
+        let a = holdout(7, 3, Ascension(10));
+        let b = holdout(7, 3, Ascension(10));
+        assert_eq!(a.len(), 3 * crate::encounter::ALL.len());
+        assert!(a.iter().zip(&b).all(|(x, y)| x.encounter == y.encounter && x.deck.len() == y.deck.len() && x.hp == y.hp));
+        assert!(crate::encounter::ALL.iter().all(|e| a.iter().any(|s| s.encounter == *e)));
+    }
+
+    #[test]
     fn floor_curriculum_orders_encounter_kinds() {
         let mut rng = Rng::new(1);
         for _ in 0..50 {
@@ -324,4 +333,24 @@ pub fn load_recordings(dir: &std::path::Path) -> Result<(Vec<FightSetup>, Vec<St
         }
     }
     Ok((setups, errors))
+}
+
+/// A fixed held-out set: `per_encounter` generated fights against every
+/// act 1 encounter, on floors that encounter can appear on. Seeded, so
+/// every evaluation sees the same decks.
+pub fn holdout(seed: u64, per_encounter: usize, asc: Ascension) -> Vec<FightSetup> {
+    let mut rng = Rng::new(seed);
+    let mut out = Vec::with_capacity(per_encounter * crate::encounter::ALL.len());
+    for &enc in crate::encounter::ALL {
+        for _ in 0..per_encounter {
+            let floor = match enc.kind() {
+                Kind::Weak => 1 + rng.next_int(3) as u32,
+                Kind::Normal => 4 + rng.next_int(12) as u32,
+                Kind::Elite => 5 + rng.next_int(11) as u32,
+                Kind::Boss => BOSS_FLOOR,
+            };
+            out.push(generate_against(&mut rng, floor, asc, enc));
+        }
+    }
+    out
 }

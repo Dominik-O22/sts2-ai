@@ -47,7 +47,8 @@ class Config:
     # elite or boss; normal fights are won almost always by then.
     hard_frac: float = 0.4
     eval_every: int = 50
-    eval_episodes: int = 200
+    # Fights per held-out setup at each eval.
+    eval_repeats: int = 2
     recordings: Path = DEFAULT_RECORDINGS
     run_dir: Path = Path("runs") / time.strftime("%Y%m%d-%H%M%S")
     # Checkpoint to continue from. Skips the floor ramp: the policy already
@@ -236,10 +237,14 @@ def train(cfg: Config) -> Policy:
             )
         if it % cfg.eval_every == 0 or it == start_iter + cfg.iters - 1:
             save_checkpoint(cfg.run_dir / "latest.pt", policy, opt, it, global_step)
+            policy.eval()
+            win, _, by_kind = evaluate(policy, device, cfg.eval_repeats)
+            writer.add_scalar("eval/holdout_win_rate", win, global_step)
+            for k, v in by_kind.items():
+                writer.add_scalar(f"eval/holdout_win_{k}", v, global_step)
+            print(f"eval on holdout: {win:.1%}  " + "  ".join(f"{k} {v:.1%}" for k, v in by_kind.items()))
             if cfg.recordings.is_dir():
-                policy.eval()
-                win, by_enc = evaluate(policy, device, cfg.eval_episodes, cfg.recordings)
+                win, _, _ = evaluate(policy, device, 8, "recordings", cfg.recordings)
                 writer.add_scalar("eval/recorded_win_rate", win, global_step)
-                print(f"eval on recordings: {win:.1%} over {cfg.eval_episodes} fights")
     writer.close()
     return policy

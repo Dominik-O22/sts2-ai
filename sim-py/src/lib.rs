@@ -8,7 +8,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use sim::encode::*;
 use sim::env::{EnvConfig, VecEnv as Inner};
-use sim::gen::{load_recordings, BOSS_FLOOR};
+use sim::gen::{holdout, load_recordings, BOSS_FLOOR};
 use sim::ids::{ALL_CARDS, ALL_MONSTERS};
 use sim::types::Ascension;
 
@@ -20,6 +20,12 @@ struct VecEnv {
 
 /// One finished fight: (env, won, hp_frac, hp_lost, steps, floor, encounter, kind, reward).
 type End = (usize, bool, f32, f32, u32, u32, String, String, f32);
+
+impl VecEnv {
+    fn inner_asc(&self) -> Ascension {
+        self.inner.asc()
+    }
+}
 
 #[pymethods]
 impl VecEnv {
@@ -42,6 +48,16 @@ impl VecEnv {
     /// Curriculum: floors generated fights are drawn from.
     fn set_floors(&mut self, min: u32, max: u32) {
         self.inner.set_floors(min, max);
+    }
+
+    /// Switch to cycling through a fixed generated set: `per_encounter`
+    /// fights against every act 1 encounter, always the same for a seed.
+    #[pyo3(signature = (seed=0, per_encounter=10))]
+    fn use_holdout(&mut self, seed: u64, per_encounter: usize) -> usize {
+        let setups = holdout(seed, per_encounter, self.inner_asc());
+        let n = setups.len();
+        self.inner.set_fixed(setups);
+        n
     }
 
     /// Switch to cycling through the recordings in `dir` (the held-out

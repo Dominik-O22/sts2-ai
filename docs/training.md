@@ -41,7 +41,9 @@ maturin from `sim-py/` into the package `sts2ai._sim`.
 - `py/sts2ai/`: `Envs` owns the numpy buffers, `Policy` embeds card, monster,
   and potion ids and runs an MLP with masked policy and value heads,
   `ppo.py` is a plain PPO with GAE, `evaluate.py` runs the policy greedily
-  on the recordings.
+  on the held-out set: ten generated fights per encounter from a fixed
+  seed (`gen::holdout`). The recordings are a second, sanity-check source;
+  the ones we have are dev-console test fights, not run decks.
 
 ## Curriculum
 
@@ -54,5 +56,5 @@ the boss, since normal fights are nearly always won by then.
 ## What to watch
 
 `episode/win_rate` and `episode/win_boss` (also `win_elite`) in TensorBoard, and
-`eval/recorded_win_rate` every `--eval-every` iterations. The milestone
+`eval/holdout_win_rate` with its per-kind splits every `--eval-every` iterations. The milestone
 in DESIGN.md is 80% on the act 1 boss from real-run decks.
