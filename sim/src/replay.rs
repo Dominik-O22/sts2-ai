@@ -250,8 +250,8 @@ fn adopt_spawn_hp(c: &mut Combat, snap: &Value, known: usize) -> Result<(), Stri
     let rerolled = std::mem::take(&mut c.stats.hp_rerolled);
     for (e, &i) in snap["enemies"].as_array().unwrap_or(&empty).iter().zip(&living) {
         let asc = c.asc;
-        let cr = &mut c.enemies[i].creature;
         let fresh = i >= known;
+        let cr = &mut c.enemies[i].creature;
         if (fresh || rerolled.contains(&i)) && cr.hp == cr.max_hp {
             if let (Some(hp), Some(max)) = (e["hp"].as_i64(), e["max_hp"].as_i64()) {
                 if fresh {
@@ -654,6 +654,7 @@ impl Replayer {
             adopted_offers: vec![],
             unforced: vec![],
             hit_cards: vec![],
+            spawns: vec![],
         };
         let mut c = Combat::with_script(&fs.as_setup(seed), script);
         // Enemies that start damaged (the start record is taken at the first decision point).
@@ -807,6 +808,7 @@ impl Replayer {
                 }
                 self.c.script.unforced.clear();
                 self.c.script.hit_cards.clear();
+                self.c.script.spawns.clear();
                 if std::mem::take(&mut self.snecko_pending) {
                     adopt_hand_costs(&mut self.c, rec);
                 }
@@ -861,6 +863,13 @@ impl Replayer {
                 }
                 if let Some(&id) = rec["card"].as_str().and_then(|s| self.ids.cards.get(s)) {
                     self.c.script.hit_cards.push(id);
+                }
+                Ok(Applied::Ok)
+            }
+            // A monster joined; the Fabricator's random bot follows it.
+            "spawn" => {
+                if let Some(&id) = rec["id"].as_str().and_then(|s| self.ids.monsters.get(s)) {
+                    self.c.script.spawns.push(id);
                 }
                 Ok(Applied::Ok)
             }

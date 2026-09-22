@@ -408,6 +408,13 @@ public static class Recorder
     }
 
     /// A card created mid-combat (Infernal Blade), so random generation can be scripted.
+    /// A monster joining mid-fight, so a random pick of which one (the
+    /// Fabricator's bots) can be scripted.
+    internal static void OnSpawned(Creature creature)
+    {
+        if (creature.Monster is { } m) Event(new() { ["t"] = "spawn", ["id"] = m.Id.Entry });
+    }
+
     internal static void OnGenerated(CardModel card)
     {
         Event(new() { ["t"] = "gen", ["id"] = card.Id.Entry, ["up"] = card.IsUpgraded });
@@ -474,6 +481,12 @@ public sealed class RecorderModel : AbstractModel
     public override Task AfterCardGeneratedForCombat(CardModel card, Player? creator)
     {
         Guard(() => Recorder.OnGenerated(card));
+        return Task.CompletedTask;
+    }
+
+    public override Task AfterCreatureAddedToCombat(Creature creature)
+    {
+        Guard(() => Recorder.OnSpawned(creature));
         return Task.CompletedTask;
     }
 

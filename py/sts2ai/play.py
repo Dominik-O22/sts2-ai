@@ -17,7 +17,8 @@ go to the grid.
 samples its moves so repeated fights differ, and instead of handing a fight
 over it ends it with the console's `win`. That happens on a divergence,
 where the recording already holds what the replay can check, and once HP
-is down to a quarter, so a lost fight never ends the run.
+is down to a quarter with no Fairy in a Bottle left to catch a death, so a
+lost fight never ends the run but a fight runs as long as it safely can.
 """
 
 from __future__ import annotations
@@ -58,6 +59,7 @@ class Pilot(Session):
         # This fight has been ended with `win`; nothing more to do in it.
         self.finished = False
         self.hp: tuple[int, int] = (1, 1)
+        self.fairy = False
         # What the game is waiting on: "play" after `ready`, "select" while
         # a card selection is open, None once a command is in flight.
         self.waiting: str | None = None
@@ -116,6 +118,7 @@ class Pilot(Session):
             case "snapshot":
                 snap = json.loads(line)
                 self.hp = (snap.get("hp", 1), snap.get("max_hp", 1))
+                self.fairy = "FAIRY_IN_A_BOTTLE" in (snap.get("potions") or [])
                 self.feed(line)
             case _:
                 self.feed(line)
@@ -123,8 +126,8 @@ class Pilot(Session):
     def act(self) -> None:
         if self.finished:
             return
-        if self.record and self.waiting == "play" and self.hp[0] * 4 <= self.hp[1]:
-            self.finish("HP is down to a quarter")
+        if self.record and self.waiting == "play" and self.hp[0] * 4 <= self.hp[1] and not self.fairy:
+            self.finish("HP is down to a quarter and the Fairy is spent")
             return
         enough = self.selection.get("picked", 0) >= self.selection.get("min", 1)
         match self.waiting:

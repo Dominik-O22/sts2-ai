@@ -106,7 +106,7 @@ to do" advice and the relic jobs are hand-written.
 With `--pilot`, the policy plays through the bridge (`sts2ai.play --record`).
 It samples its moves so repeats differ, and ends a fight with `win` once the
 sim loses track (the recording up to there is what the replay checks) or HP
-is down to a quarter (so the run survives). The game goes to instant mode
+is down to a quarter with the Fairy in a Bottle spent (so the run survives). The game goes to instant mode
 for the session. Jobs marked `human` hand their fights back to you.
 `--queue` keeps it running on `sts2ai/queue.jsonl`: `{"run": "terms"}`
 for known jobs, `{"job": {"name", "relics", "fights", "setup", "teardown",

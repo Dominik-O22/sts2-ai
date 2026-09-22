@@ -185,6 +185,9 @@ pub struct Script {
     /// Cards the recording saw deal damage since the last snapshot. A
     /// random auto-play (Stampede) picks one of them when it can.
     pub hit_cards: Vec<CardId>,
+    /// Monsters the recording saw join since the last snapshot. A random
+    /// spawn (the Fabricator's bot) takes the first one it can make.
+    pub spawns: Vec<MonsterId>,
 }
 
 /// The parts of `CombatManager.History` that cards and powers read.
@@ -2265,8 +2268,20 @@ impl Combat {
         let was_alive = c.alive();
         c.hp = (c.hp - lost).max(0);
         let mut fairy_used = false;
+        // A monster's powered hit that got through, from a Paper Cuts owner.
+        let paper_cuts = (target == CreatureRef::Player && through && props.is_powered())
+            .then_some(dealer)
+            .flatten()
+            .filter(|d| d.side() == Side::Enemy)
+            .and_then(|d| self.creature(d).power(PowerId::PaperCuts).map(|p| p.amount));
+        let dying = target == CreatureRef::Player && self.player.creature.hp <= 0 && was_alive;
+        // CreatureCmd.Damage runs AfterDamageGiven before it kills: a fatal
+        // hit has already cost the max HP when a Fairy or Lizard Tail heals.
+        if let (true, Some(cuts)) = (dying, paper_cuts) {
+            self.player.creature.max_hp -= cuts;
+        }
         // LizardTail: ShouldDie false once, then heal to half.
-        if target == CreatureRef::Player && self.player.creature.hp <= 0 && was_alive {
+        if dying {
             if let Some(hp) = self.relic_prevent_death() {
                 lost = lost.min(self.player.creature.max_hp);
                 self.player.creature.hp = hp;
@@ -2324,7 +2339,7 @@ impl Combat {
         // then the new max), PainfulStabsPower owes Wounds after the attack.
         if target == CreatureRef::Player && through && props.is_powered() {
             if let Some(d) = dealer.filter(|d| d.side() == Side::Enemy) {
-                if let Some(cuts) = self.creature(d).power(PowerId::PaperCuts).map(|p| p.amount) {
+                if let Some(cuts) = paper_cuts.filter(|_| !dying) {
                     let new_max = self.player.creature.max_hp - cuts;
                     let over = self.player.creature.hp - new_max;
                     if over > 0 {
@@ -2549,7 +2564,9 @@ impl Combat {
             if aggro { &[MonsterId::Zapbot, MonsterId::Stabbot] } else { &[MonsterId::Guardbot, MonsterId::Noisebot] };
         let last = self.enemies[f].monster.vars.last_spawned;
         let options: Vec<MonsterId> = pool.iter().copied().filter(|&m| Some(m) != last).collect();
-        let Some(&id) = self.rngs.monster_ai.pick(&options) else { return };
+        let rolled = self.rngs.monster_ai.pick(&options).copied();
+        let scripted = self.script.spawns.iter().position(|m| options.contains(m));
+        let Some(id) = scripted.map(|i| self.script.spawns.remove(i)).or(rolled) else { return };
         self.enemies[f].monster.vars.last_spawned = Some(id);
         if self.free_slots() == 0 {
             return;
