@@ -32,10 +32,9 @@ import torch
 from sts2ai import _sim
 from sts2ai.env import DEFAULT_RECORDINGS, Layout
 from sts2ai.model import Policy, load_policy, masked_logits
+from sts2ai.search import rollout, spread
 
 ALTERNATIVES = 2
-# A turn is over well within this many actions; a runaway plan is cut here.
-MAX_PLAN_STEPS = 40
 # Plan scores closer than this are value-head noise: the policy's pick
 # keeps the top line, and the search only overrules it by a clear margin.
 # The unit is half an HP fraction, so 0.02 is about three HP.
@@ -158,34 +157,18 @@ class Session:
         """Turn search: print the best line of plays for the rest of the turn
         and return its first action. `policy_pick` is the policy's own first
         play; it keeps the top line unless a plan beats it by `PLAN_MARGIN`."""
-        L, n = self.layout, self.search
+        n = self.search
         forks = self.sim.fork(n, self.groups, seed=int(time.time_ns() % (1 << 31)))
-        floats = np.zeros((n, L.n_floats), np.float32)
-        ids = np.zeros((n, L.n_ids), np.int64)
-        mask = np.zeros((n, L.n_actions), np.bool_)
-        rewards = np.zeros(n, np.float32)
-        forks.observe(floats, ids, mask)
-        mask[:, list(banned)] = False
-        legal = np.flatnonzero(mask[0])
-        first = legal[np.arange(n) % len(legal)]
-        score = np.zeros(n, np.float32)
+        # `self.mask` is this decision's, with the game's refusals out.
+        first = spread(np.flatnonzero(self.mask[0]), n)
         lines: list[list[str]] = [[] for _ in range(n)]
-        for step in range(MAX_PLAN_STEPS):
-            over = np.array(forks.turn_over())
-            if over.all():
-                break
-            logits, value = self.policy(torch.from_numpy(floats).to(self.device), torch.from_numpy(ids).to(self.device))
-            masked = masked_logits(logits, torch.from_numpy(mask).to(self.device))
-            actions = first if step == 0 else torch.distributions.Categorical(logits=masked).sample().cpu().numpy()
+
+        def record(actions: np.ndarray, over: np.ndarray) -> None:
             for i in np.flatnonzero(~over):
                 if (what := forks.describe(i, int(actions[i]))) is not None:
                     lines[i].append(what)
-            forks.step(np.ascontiguousarray(actions, dtype=np.int64), floats, ids, mask, rewards)
-            score += rewards
-        # Plans that ended the turn are scored on where the next turn starts;
-        # a finished fight already paid its terminal reward.
-        _, value = self.policy(torch.from_numpy(floats).to(self.device), torch.from_numpy(ids).to(self.device))
-        score += np.where(forks.is_over(), 0.0, value.cpu().numpy())
+
+        score = rollout(self.policy, self.device, forks, first, record)
         # Best fork per first play, grouped by what the play is: two Strikes
         # in hand are one opening to you.
         by_first: dict[str, int] = {}

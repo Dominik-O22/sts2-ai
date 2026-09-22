@@ -244,6 +244,14 @@ impl VecEnv {
         }
     }
 
+    pub fn combat(&self, i: usize) -> &Combat {
+        &self.slots[i].combat
+    }
+
+    pub fn setup(&self, i: usize) -> &FightSetup {
+        &self.slots[i].setup
+    }
+
     /// Encode every env's current state.
     pub fn observe(&self, floats: &mut [f32], ids: &mut [i64], mask: &mut [bool]) {
         self.check_buffers(floats, ids, mask);
@@ -309,32 +317,43 @@ impl VecEnv {
     }
 }
 
-/// Copies of one combat stepped together, for a search over the rest of
-/// the current turn (the advisor's plan). Each fork forgets the recording's
+/// Copies of a combat stepped together, for a search over the rest of the
+/// current turn (the advisor's plan, `searcheval`). Several roots can share
+/// one batch, each with its own run of copies. Each fork forgets the recording's
 /// script and rolls its own dice, and the draw pile is reshuffled: the
 /// player does not know its order, so the plan must not either. Forks in
 /// the same `group` share a shuffle, so plans in a group are compared on
 /// the same hidden draws.
 pub struct Forks {
     combats: Vec<Combat>,
-    turn: u32,
-    base: Baseline,
+    /// Per copy: the turn its root was on, and the root's baseline.
+    turns: Vec<u32>,
+    bases: Vec<Baseline>,
 }
 
 impl Forks {
     pub fn new(root: &Combat, n: usize, groups: usize, seed: u64) -> Self {
+        Self::of(&[root], n, groups, seed)
+    }
+
+    /// `n` copies of each root, root after root.
+    pub fn of(roots: &[&Combat], n: usize, groups: usize, seed: u64) -> Self {
         let per_group = n.div_ceil(groups.max(1));
-        let combats = (0..n)
-            .map(|i| {
+        let mut out = Self { combats: vec![], turns: vec![], bases: vec![] };
+        for (r, root) in roots.iter().enumerate() {
+            let seed = seed ^ (r as u64).wrapping_mul(0xD6E8_FEB8_6659_FD93);
+            for i in 0..n {
                 let group = i / per_group;
-                let mut c = root.clone();
+                let mut c = (*root).clone();
                 c.script = Default::default();
                 c.rngs = CombatRngs::new(seed ^ (i as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15));
                 Rng::new(seed ^ (group as u64 + 1) << 20).shuffle(&mut c.player.draw);
-                c
-            })
-            .collect();
-        Self { combats, turn: root.player.turn, base: Baseline::of(root) }
+                out.combats.push(c);
+                out.turns.push(root.player.turn);
+                out.bases.push(Baseline::of(root));
+            }
+        }
+        out
     }
 
     pub fn len(&self) -> usize {
@@ -353,7 +372,7 @@ impl Forks {
     /// the fight ended.
     pub fn turn_over(&self, i: usize) -> bool {
         let c = &self.combats[i];
-        c.is_over() || c.player.turn > self.turn
+        c.is_over() || c.player.turn > self.turns[i]
     }
 
     pub fn observe(&self, floats: &mut [f32], ids: &mut [i64], mask: &mut [bool]) {
@@ -369,15 +388,16 @@ impl Forks {
     /// action. Writes the shaped reward of each transition (0 for a fork
     /// that did not move) and the next observation.
     pub fn step(&mut self, actions: &[i64], floats: &mut [f32], ids: &mut [i64], mask: &mut [bool], rewards: &mut [f32]) {
-        let (turn, base) = (self.turn, self.base);
         self.combats
             .par_iter_mut()
+            .zip(self.turns.par_iter())
+            .zip(self.bases.par_iter())
             .zip(actions.par_iter())
             .zip(floats.par_chunks_mut(N_FLOATS))
             .zip(ids.par_chunks_mut(N_IDS))
             .zip(mask.par_chunks_mut(N_ACTIONS))
             .zip(rewards.par_iter_mut())
-            .for_each(|(((((c, &a), f), i), m), r)| {
+            .for_each(|(((((((c, &turn), &base), &a), f), i), m), r)| {
                 *r = 0.0;
                 if !(c.is_over() || c.player.turn > turn) {
                     if let Some(action) = encode::decode(c, a as usize) {

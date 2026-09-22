@@ -53,6 +53,20 @@ impl VecEnv {
         self.inner.set_floors(min, max);
     }
 
+    /// Copies of the current fight in each of `envs`, `n` per env, for a
+    /// turn search over many fights in one batch.
+    #[pyo3(signature = (envs, n, groups=4, seed=0))]
+    fn fork(&self, envs: Vec<usize>, n: usize, groups: usize, seed: u64) -> Forks {
+        let roots: Vec<_> = envs.iter().map(|&i| self.inner.combat(i)).collect();
+        Forks { inner: InnerForks::of(&roots, n, groups, seed) }
+    }
+
+    /// (encounter, kind) of env `i`'s current fight.
+    fn fight(&self, i: usize) -> (String, String) {
+        let s = self.inner.setup(i);
+        (format!("{:?}", s.encounter), format!("{:?}", s.encounter.kind()))
+    }
+
     /// Switch to cycling through a fixed generated set: `per_encounter`
     /// fights against every encounter of the first `acts` acts, always the
     /// same for a seed.
