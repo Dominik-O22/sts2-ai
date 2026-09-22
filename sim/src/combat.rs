@@ -1038,13 +1038,13 @@ impl Combat {
                     }
                 }
                 // Creature.AfterTurnStart: block clears except on player turn 1,
-                // and unless a power (Barricade) or Sturdy Clamp prevents it.
-                if self.player.turn != 1 {
-                    if self.relic_keeps_block() {
-                        self.player.creature.block = self.player.creature.block.min(10);
-                    } else if self.should_clear_block(CreatureRef::Player) {
-                        self.player.creature.block = 0;
-                    }
+                // unless a listener prevents it. Hook.ShouldClearBlock takes the
+                // first preventer in CombatState.IterateHookListeners order:
+                // powers (Barricade keeps everything) before relics (Sturdy
+                // Clamp trims to 10 in AfterPreventingBlockClear).
+                if self.player.turn != 1 && self.should_clear_block(CreatureRef::Player) {
+                    let kept = if self.relic_keeps_block() { 10 } else { 0 };
+                    self.player.creature.block = self.player.creature.block.min(kept);
                 }
                 // Hook.AfterBlockCleared runs for every creature starting its
                 // turn, even when nothing was cleared (turn 1, Barricade,
