@@ -19,7 +19,8 @@ from torch.utils.tensorboard import SummaryWriter
 
 from sts2ai.env import DEFAULT_RECORDINGS, End, Envs
 from sts2ai.evaluate import evaluate
-from sts2ai.model import Policy, load_state, masked_logits
+from sts2ai.model import Policy, checkpoint_vocab, load_state, masked_logits
+from sts2ai.vocab import current_text
 
 BOSS_FLOOR = 16
 
@@ -54,6 +55,9 @@ class Config:
     # Checkpoint to continue from. Skips the floor ramp: the policy already
     # handles the early floors, so fights come from all of act 1 at once.
     resume: Path | None = None
+    # vocab.txt the resumed checkpoint was trained with, for checkpoints
+    # from before the vocabulary was stored in them.
+    old_vocab: Path | None = None
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
     # Speed: fuse the network with torch.compile, and run its matmuls in
     # bfloat16. Advantages, returns, and the loss stay in fp32.
@@ -118,7 +122,10 @@ class Stats:
 
 
 def save_checkpoint(path: Path, policy: Policy, opt: torch.optim.Optimizer, it: int, global_step: int) -> None:
-    torch.save({"policy": policy.state_dict(), "optimizer": opt.state_dict(), "iter": it, "global_step": global_step}, path)
+    torch.save(
+        {"policy": policy.state_dict(), "optimizer": opt.state_dict(), "iter": it, "global_step": global_step, "vocab": current_text()},
+        path,
+    )
 
 
 def train(cfg: Config) -> Policy:
@@ -136,8 +143,8 @@ def train(cfg: Config) -> Policy:
     start_iter, global_step = 1, 0
     if cfg.resume:
         ck = torch.load(cfg.resume, map_location=device)
-        if load_state(policy, ck["policy"]):
-            print("vocabulary grew since the checkpoint: embeddings extended, optimizer state reset")
+        if load_state(policy, ck["policy"], checkpoint_vocab(ck, cfg.old_vocab)):
+            print("vocabulary grew since the checkpoint: weights remapped by name, optimizer state reset")
         else:
             opt.load_state_dict(ck["optimizer"])
         start_iter, global_step = ck["iter"] + 1, ck["global_step"]

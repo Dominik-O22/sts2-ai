@@ -18,6 +18,7 @@ from sts2ai import _sim
 from sts2ai.env import Envs, Layout
 from sts2ai.evaluate import HOLDOUT_PER_ENCOUNTER
 from sts2ai.model import Policy, load_policy, masked_logits
+from sts2ai.vocab import current_text, float_segments, parse
 
 # Power indices from ids.rs, the ones worth printing.
 POWER_NAMES = {0: "Str", 1: "Dex", 2: "Vuln", 3: "Weak", 4: "Frail", 33: "Slippery", 37: "Ringing", 38: "Plow", 43: "Artifact"}
@@ -31,22 +32,38 @@ class Offsets:
     f_player_powers: int
     f_enemies: int
     enemy_feats: int
+    f_hand_enchants: int
+    n_enchants: int
 
     @classmethod
     def of(cls, L: Layout) -> Offsets:
-        f_player_powers = 30  # GLOBAL_LEN
-        n_powers = L.f_hand - f_player_powers
-        f_enemies = L.f_hand + L.max_hand * L.hand_feats + 3 * 2 * (L.card_vocab - 1)
-        return cls(n_powers, f_player_powers, f_enemies, 7 + 15 + n_powers)
+        # `vocab.float_segments` already spells the layout out; deriving the
+        # offsets from it keeps this in step when the observation grows.
+        at, off = 0, {}
+        for name, n, _ in float_segments(L, parse(current_text())):
+            off[name], at = (at, n), at + n
+        f_player_powers, n_powers = off["player_powers"]
+        f_enemies = off["enemy0_base"][0]
+        enemy_feats = off["enemy0_powers"][0] + n_powers - f_enemies
+        f_ench, n_ench = off["hand0_ench"]
+        return cls(n_powers, f_player_powers, f_enemies, enemy_feats, f_ench, n_ench)
 
 
 def powers(vec: np.ndarray) -> str:
     return " ".join(f"{POWER_NAMES.get(i, f'p{i}')}={int(round(v * 10))}" for i, v in enumerate(vec) if v != 0)
 
 
-def describe_state(L: Layout, O: Offsets, f: np.ndarray, ids: np.ndarray, cards: list[str], monsters: list[str]) -> str:
+def describe_state(
+    L: Layout, O: Offsets, f: np.ndarray, ids: np.ndarray, cards: list[str], monsters: list[str], enchants: list[str]
+) -> str:
     hp, block, energy, turn = f[0] * 100, f[3] * 50, f[4] * 5, f[6] * 10
-    hand = [cards[i] for i in ids[L.i_hand : L.i_hand + L.max_hand] if i]
+    hand = []
+    for slot, i in enumerate(ids[L.i_hand : L.i_hand + L.max_hand]):
+        if not i:
+            continue
+        block = f[O.f_hand_enchants + slot * O.n_enchants :][: O.n_enchants]
+        live = [(enchants[j], v) for j, v in enumerate(block) if v]
+        hand.append(cards[i] + "".join(f"+{n}{'' if v < 0 else int(round(v * 3))}" for n, v in live))
     enemies = []
     for s in range(L.max_enemies):
         e = f[O.f_enemies + s * O.enemy_feats :][: O.enemy_feats]
@@ -55,7 +72,7 @@ def describe_state(L: Layout, O: Offsets, f: np.ndarray, ids: np.ndarray, cards:
         intent = f"hits {e[8] * 20:.0f}x{e[9] * 3:.0f}" if e[7] else " ".join(
             n for n, k in [("defend", 11), ("buff", 12), ("debuff", 13), ("status", 16), ("summon", 18), ("stun", 20)] if e[k]
         )
-        enemies.append(f"{monsters[ids[L.i_enemies + s]]} {e[2] * 100:.0f}hp b{e[5] * 30:.0f} [{intent}] {powers(e[22:])}")
+        enemies.append(f"{monsters[ids[L.i_enemies + s]]} {e[2] * 100:.0f}hp b{e[5] * 30:.0f} [{intent}] {powers(e[O.enemy_feats - O.n_powers:])}")
     out = f"T{turn:.0f} hp{hp:.0f} b{block:.0f} e{energy:.0f} {powers(f[O.f_player_powers : L.f_hand])}\n"
     out += "  hand: " + ", ".join(hand) + "\n"
     return out + "".join(f"  vs {e}\n" for e in enemies)
@@ -79,6 +96,7 @@ def describe_action(L: Layout, a: int, ids: np.ndarray, cards: list[str]) -> str
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("checkpoint", type=Path)
+    ap.add_argument("--old-vocab", type=Path, default=None, help="vocab.txt the checkpoint was trained with, if it predates the current sim")
     ap.add_argument("--kind", default="Boss")
     ap.add_argument("--max", type=int, default=3, help="lost fights to print")
     ap.add_argument("--seed", type=int, default=12345)
@@ -87,8 +105,9 @@ def main() -> None:
     L = Layout.load()
     O = Offsets.of(L)
     cards, monsters = _sim.card_names(), _sim.monster_names()
+    enchants = parse(current_text())["enchant"]
     policy = Policy(L).to(device)
-    load_policy(args.checkpoint, policy, device)
+    load_policy(args.checkpoint, policy, device, args.old_vocab)
     policy.eval()
 
     probe = Envs(1, seed=args.seed)
@@ -110,7 +129,7 @@ def main() -> None:
                 if done[i]:
                     continue
                 f, idv = envs.floats[i], envs.ids[i]
-                state = describe_state(L, O, f, idv, cards, monsters)
+                state = describe_state(L, O, f, idv, cards, monsters, enchants)
                 act = describe_action(L, int(actions[i]), idv, cards)
                 logs[i].append(f"{state}  => {act}  (p={probs[i, actions[i]]:.2f}, v={value[i]:.2f})\n")
             for e in envs.step(actions):

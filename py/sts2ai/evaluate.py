@@ -67,13 +67,14 @@ def evaluate(
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("checkpoint", type=Path)
+    ap.add_argument("--old-vocab", type=Path, default=None, help="vocab.txt the checkpoint was trained with, if it predates the current sim")
     ap.add_argument("--source", choices=["holdout", "recordings"], default="holdout")
     ap.add_argument("--repeats", type=int, default=2, help="fights per setup")
     ap.add_argument("--recordings", type=Path, default=DEFAULT_RECORDINGS)
     args = ap.parse_args()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     policy = Policy(Layout.load()).to(device)
-    load_policy(args.checkpoint, policy, device)
+    load_policy(args.checkpoint, policy, device, args.old_vocab)
     policy.eval()
     win, by_enc, by_kind = evaluate(policy, device, args.repeats, args.source, args.recordings)
     for enc, (w, n) in sorted(by_enc.items()):

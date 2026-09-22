@@ -26,7 +26,9 @@ maturin from `sim-py/` into the package `sts2ai._sim`.
   which follows a rest site). Floors 1-3 draw weak
   encounters, 5-15 add elites, 16 is the boss. `FightSetup::from_recording`
   turns a recorder file into the same struct, which is how the recordings
-  become the held-out set.
+  become the held-out set. Encounters from both act 1 variants (Overgrowth
+  and Underdocks) are drawn from one pool: each fight is independent, so
+  there is nothing to gain from keeping them apart.
 - `sim/src/encode.rs`: the fixed observation and action space. Hand and
   choice slots are sorted by (card, upgraded, cost) so the policy sees a
   multiset. Draw, discard, and exhaust piles are count vectors over

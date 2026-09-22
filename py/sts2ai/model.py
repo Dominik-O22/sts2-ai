@@ -105,28 +105,31 @@ def masked_logits(logits: Tensor, mask: Tensor) -> Tensor:
     return logits.masked_fill(~mask, -1e9)
 
 
-def load_state(policy: Policy, state: dict[str, Tensor]) -> bool:
-    """Load weights, allowing embedding tables that grew since the
-    checkpoint (new cards, monsters, moves appended to a vocabulary): old
-    rows are copied, new rows keep their init. Returns whether any grew."""
+def load_state(policy: Policy, state: dict[str, Tensor], old_vocab: str | None) -> bool:
+    """Load weights. When the sim's vocabularies grew since the checkpoint,
+    `old_vocab` (the vocab.txt it was trained with) lets embedding rows and
+    observation columns move by name. Returns whether a remap happened."""
     own = policy.state_dict()
-    grown = False
-    for key, old in state.items():
-        new = own[key]
-        if old.shape == new.shape:
-            continue
-        if old.dim() == 2 and old.shape[1] == new.shape[1] and old.shape[0] < new.shape[0] and ".weight" in key:
-            merged = new.clone()
-            merged[: old.shape[0]] = old
-            state[key] = merged
-            grown = True
-        else:
-            raise ValueError(f"{key}: checkpoint shape {tuple(old.shape)} does not fit {tuple(new.shape)}")
-    policy.load_state_dict(state)
-    return grown
+    if all(t.shape == own[k].shape for k, t in state.items()):
+        policy.load_state_dict(state)
+        return False
+    if old_vocab is None:
+        raise ValueError("checkpoint does not fit the current sim and carries no vocabulary; pass --old-vocab <vocab.txt it was trained with>")
+    from sts2ai.vocab import current_text, parse, remap_state
+
+    policy.load_state_dict(remap_state(state, parse(old_vocab), parse(current_text()), own, policy.layout))
+    return True
 
 
-def load_policy(path: Path, policy: Policy, device: torch.device) -> None:
+def checkpoint_vocab(ck: object, fallback: Path | None) -> str | None:
+    """The vocabulary a checkpoint was trained with: stored in it, or read
+    from `fallback` for checkpoints from before that was recorded."""
+    if isinstance(ck, dict) and isinstance(ck.get("vocab"), str):
+        return ck["vocab"]
+    return fallback.read_text() if fallback else None
+
+
+def load_policy(path: Path, policy: Policy, device: torch.device, old_vocab: Path | None = None) -> None:
     """Load weights from a training checkpoint (or a bare state dict)."""
     ck = torch.load(path, map_location=device)
-    load_state(policy, ck["policy"] if "policy" in ck else ck)
+    load_state(policy, ck["policy"] if "policy" in ck else ck, checkpoint_vocab(ck, old_vocab))
