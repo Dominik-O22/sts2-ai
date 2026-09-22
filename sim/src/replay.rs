@@ -386,6 +386,24 @@ fn adopt_offer(c: &mut Combat, snap: &Value) {
     }
 }
 
+/// A choose-a-card screen (Attack Potion) shows the cards the game rolled;
+/// the `choice` record lists them. Put those on the sim's offer in place of
+/// its own roll, so the pick is made from what the game shows.
+fn adopt_offer_options(c: &mut Combat, ids: &Ids, rec: &Value) {
+    if !c.pending.as_ref().is_some_and(|p| p.then == Then::TakeOffer) {
+        return;
+    }
+    let Some(options) = rec["options"].as_array() else { return };
+    let Ok(cards) = options.iter().map(|v| card_ref(ids, v)).collect::<Result<Vec<_>, _>>() else { return };
+    if cards.len() != c.player.offer.len() {
+        return;
+    }
+    for (k, (id, up)) in c.player.offer.iter_mut().zip(cards) {
+        k.id = id;
+        k.upgraded = up;
+    }
+}
+
 /// Forced rolls still have to be rolls the sim could make.
 fn check_hp_range(id: MonsterId, max_hp: i32, asc: Ascension) -> Result<(), String> {
     let (lo, hi) = crate::monster::Monster::hp_range(id, asc);
@@ -431,6 +449,9 @@ pub struct Replayer {
     /// opened for it (a `choice` record); the `play` record for it, which
     /// the game only writes once the card resolves, is then skipped.
     pre_played: Option<(CardId, bool)>,
+    /// The same for a potion whose effect opened the screen (Attack
+    /// Potion): its `potion` record comes after the pick.
+    pre_potion: Option<PotionId>,
     gate: Gate,
     queue: VecDeque<(usize, Value)>,
     /// Records applied since the last checkpoint, re-applied on a reseed.
@@ -606,6 +627,7 @@ impl Replayer {
             known_enemies,
             snecko_pending: false,
             pre_played: None,
+            pre_potion: None,
             gate: Gate::default(),
             queue: VecDeque::new(),
             since: vec![],
@@ -825,48 +847,73 @@ impl Replayer {
             }
             // The game opened its card-select screen mid-play. The play that
             // opened it has not been reported yet, so apply it now from the
-            // card the record names, which puts the choice in front of the
-            // policy while the player is still looking at it.
+            // card (or potion) the record names, which puts the choice in
+            // front of the policy while the player is still looking at it.
             "choice" => {
-                if self.c.pending.is_some() || self.c.is_over() {
-                    return Ok(self.after_action());
-                }
-                if rec["card"].is_null() || self.pre_played.is_some() {
+                if self.c.is_over() {
                     return Ok(Applied::Ok);
                 }
-                let key = card_ref(&self.ids, &rec["card"])?;
-                match self.play(&rec["card"])? {
-                    // A play the sim cannot place (a target it would need)
-                    // waits for the real record; the advice is late then.
-                    Applied::Diverged(_) => Ok(Applied::Ok),
-                    applied => {
-                        self.pre_played = Some(key);
-                        Ok(applied)
+                if self.c.pending.is_none() {
+                    if !rec["card"].is_null() && self.pre_played.is_none() {
+                        let key = card_ref(&self.ids, &rec["card"])?;
+                        match self.play(&rec["card"])? {
+                            // A play the sim cannot place (a target it would
+                            // need) waits for the real record; the advice is
+                            // late then.
+                            Applied::Diverged(_) => return Ok(Applied::Ok),
+                            _ => self.pre_played = Some(key),
+                        }
+                    } else if let Some(name) = rec["potion"].as_str().filter(|_| self.pre_potion.is_none()) {
+                        if let Applied::Diverged(_) = self.use_potion(name, &Value::Null) {
+                            return Ok(Applied::Ok);
+                        }
+                        self.pre_potion = self.ids.potions.get(name).copied();
                     }
                 }
+                adopt_offer_options(&mut self.c, &self.ids, rec);
+                Ok(self.after_action())
+            }
+            // One card taken from the open choice, or `card: null` when the
+            // selection closed. Written by the bridge, which answers the
+            // game's selections itself; a hand-played recording has none and
+            // the next snapshot settles the choice instead.
+            "picked" => {
+                let Some(p) = self.c.pending.clone() else { return Ok(Applied::Ok) };
+                if rec["card"].is_null() {
+                    if p.can_skip {
+                        self.c.step(Action::Skip);
+                        self.report.actions += 1;
+                    }
+                    return Ok(self.after_action());
+                }
+                let (id, up) = card_ref(&self.ids, &rec["card"])?;
+                let ench = crate::gen::card_ench(&self.ids, &rec["card"])?.map(|e| (e.id, e.amount));
+                let card = |uid: u32| crate::encode::option_card(&self.c, uid).filter(|k| k.id == id && k.upgraded == up);
+                // Copies can differ by enchantment alone.
+                let found = p
+                    .options
+                    .iter()
+                    .position(|&uid| card(uid).is_some_and(|k| k.enchantment.map(|e| (e.id, e.amount)) == ench))
+                    .or_else(|| p.options.iter().position(|&uid| card(uid).is_some()));
+                let Some(i) = found else {
+                    return Ok(Applied::Diverged(format!("game picked {id:?} (upgraded {up}); sim does not offer it")));
+                };
+                // The taken card's `gen` record follows; it is this pick.
+                if p.then == Then::TakeOffer {
+                    self.c.script.adopted_offers.push(id);
+                }
+                self.c.step(Action::Choose(i));
+                self.report.actions += 1;
+                Ok(self.after_action())
             }
             "potion" => {
-                self.at_decision = false;
                 let name = rec["id"].as_str().unwrap_or("");
-                let Some(&pid) = self.ids.potions.get(name) else {
-                    return Ok(Applied::Diverged(format!("unknown potion {name}")));
-                };
-                // Fairy in a Bottle drinks itself when a hit would kill you.
-                // The sim spends it inside the death check rather than as an
-                // action, and the next snapshot checks the belt emptied.
-                if !pid.usable_in_combat() {
+                if self.pre_potion.is_some() && self.pre_potion == self.ids.potions.get(name).copied() {
+                    self.pre_potion = None;
+                    self.at_decision = false;
                     return Ok(Applied::Ok);
                 }
-                let Some(slot) = self.c.potions.iter().position(|p| *p == Some(pid)) else {
-                    return Ok(Applied::Diverged(format!("game used {name}; sim has no such potion")));
-                };
-                let living: Vec<usize> = self.c.present_enemies().collect();
-                let target = rec["target"].as_u64().and_then(|t| living.get(t as usize).copied());
-                self.c.step(Action::UsePotion { slot, target });
-                self.report.actions += 1;
-                clear_per_play(&mut self.c);
-                self.snecko_pending = pid == PotionId::SneckoOil;
-                Ok(self.after_action())
+                Ok(self.use_potion(name, &rec["target"]))
             }
             "turn_start" => {
                 self.at_decision = false;
@@ -898,6 +945,31 @@ impl Replayer {
             }
             other => Err(format!("unknown record type {other}")),
         }
+    }
+
+    /// Apply a potion use: a `potion` record, or the potion of a `choice`
+    /// record. `target` indexes the game's living enemies.
+    fn use_potion(&mut self, name: &str, target: &Value) -> Applied {
+        self.at_decision = false;
+        let Some(&pid) = self.ids.potions.get(name) else {
+            return Applied::Diverged(format!("unknown potion {name}"));
+        };
+        // Fairy in a Bottle drinks itself when a hit would kill you.
+        // The sim spends it inside the death check rather than as an
+        // action, and the next snapshot checks the belt emptied.
+        if !pid.usable_in_combat() {
+            return Applied::Ok;
+        }
+        let Some(slot) = self.c.potions.iter().position(|p| *p == Some(pid)) else {
+            return Applied::Diverged(format!("game used {name}; sim has no such potion"));
+        };
+        let living: Vec<usize> = self.c.present_enemies().collect();
+        let target = target.as_u64().and_then(|t| living.get(t as usize).copied());
+        self.c.step(Action::UsePotion { slot, target });
+        self.report.actions += 1;
+        clear_per_play(&mut self.c);
+        self.snecko_pending = pid == PotionId::SneckoOil;
+        self.after_action()
     }
 
     /// Apply a `play` record (or the card of a `choice` record).
@@ -1097,6 +1169,61 @@ mod tests {
         }
     }
 
+    /// A bridge command names its card well enough that the game, picking
+    /// by the mod's rule (id and upgrade, then enchantment and cost), takes
+    /// a copy the policy cannot tell from the one it meant.
+    #[test]
+    fn commands_name_the_card_meant() {
+        let key = |c: &Combat, k: &Card| {
+            let ench = k.enchantment.map(|e| (e.id, e.amount, e.disabled));
+            (k.id, k.upgraded, ench, if k.def().x_cost { -1 } else { c.cost(k) })
+        };
+        // `Bridge.Find` in the mod.
+        let find = |c: &Combat, cards: &[&Card], want: &Value| -> Option<(CardId, bool, Option<(EnchantmentId, i32, bool)>, i32)> {
+            let named = cards.iter().filter(|k| slug(&format!("{:?}", k.id)) == want["id"] && Value::Bool(k.upgraded) == want["up"]);
+            let score = |k: &&&Card| {
+                let ench = k.enchantment.as_ref().map_or(Value::Null, ench_json);
+                let cost = if k.def().x_cost { -1 } else { c.cost(k) };
+                (ench == want["ench"]) as u8 * 2 + (want["cost"].is_null() || want["cost"] == cost) as u8
+            };
+            // First best, as `OrderByDescending(..).FirstOrDefault()` takes it.
+            let best = named.clone().map(|k| score(&k)).max()?;
+            named.into_iter().find(|k| score(k) == best).map(|k| key(c, k))
+        };
+        let mut rng = Rng::new(11);
+        for i in 0..200u64 {
+            let mut c = crate::gen::generate(&mut rng, 1 + (i % 16) as u32, Ascension(10)).combat(i);
+            let mut m = vec![false; crate::encode::N_ACTIONS];
+            let mut steps = 0;
+            while !c.is_over() && steps < 300 {
+                crate::encode::mask(&c, &mut m);
+                let legal: Vec<usize> = (0..m.len()).filter(|&i| m[i]).collect();
+                for &index in &legal {
+                    let cmd = command(&c, index).expect("a legal action has a command");
+                    match crate::encode::decode(&c, index).unwrap() {
+                        Action::PlayCard { hand_idx, target } => {
+                            let hand: Vec<&Card> = c.player.hand.iter().collect();
+                            assert_eq!(find(&c, &hand, &cmd["card"]), Some(key(&c, &c.player.hand[hand_idx])), "{cmd}");
+                            let living: Vec<usize> = c.present_enemies().collect();
+                            assert_eq!(cmd["target"].as_u64().map(|t| living[t as usize]), target);
+                        }
+                        Action::Choose(o) => {
+                            let p = c.pending.as_ref().unwrap();
+                            let options: Vec<&Card> =
+                                p.options.iter().filter_map(|&u| crate::encode::option_card(&c, u)).collect();
+                            let meant = crate::encode::option_card(&c, p.options[o]).unwrap();
+                            assert_eq!(find(&c, &options, &cmd["card"]), Some(key(&c, meant)), "{cmd}");
+                        }
+                        _ => {}
+                    }
+                }
+                let a = crate::encode::decode(&c, legal[rng.next_int(legal.len())]).unwrap();
+                c.step(a);
+                steps += 1;
+            }
+        }
+    }
+
     /// Record a sim playout in the recorder's format, then replay it in a
     /// sim with a different seed. The forced shuffles, HP, and moves must
     /// make the replay match at every decision point.
@@ -1157,4 +1284,35 @@ mod tests {
             assert!(decisions >= whole.snapshots);
         }
     }
+}
+
+/// The bridge command that makes the game take action `index` (an index
+/// into the encoded action space), or None if it is not legal now. The
+/// inverse of the records above: cards are named by id, upgrade, cost and
+/// enchantment rather than hand slot, since the sim's hand order is its own, and
+/// targets index the game's living enemies. The mod's `Bridge.cs` reads it.
+pub fn command(c: &Combat, index: usize) -> Option<Value> {
+    let name = |id: &dyn std::fmt::Debug| slug(&format!("{id:?}"));
+    let card = |k: &Card| {
+        let mut v = json!({ "id": name(&k.id), "up": k.upgraded, "cost": if k.def().x_cost { -1 } else { c.cost(k) } });
+        if let Some(e) = &k.enchantment {
+            v["ench"] = ench_json(e);
+        }
+        v
+    };
+    let target = |t: Option<usize>| t.and_then(|e| c.present_enemies().position(|i| i == e));
+    Some(match crate::encode::decode(c, index)? {
+        Action::PlayCard { hand_idx, target: t } => {
+            json!({ "cmd": "play", "card": card(&c.player.hand[hand_idx]), "target": target(t) })
+        }
+        Action::UsePotion { slot, target: t } => {
+            json!({ "cmd": "potion", "slot": slot, "id": name(&c.potions.get(slot).copied().flatten()?), "target": target(t) })
+        }
+        Action::EndTurn => json!({ "cmd": "end" }),
+        Action::Choose(i) => {
+            let uid = *c.pending.as_ref()?.options.get(i)?;
+            json!({ "cmd": "pick", "card": card(crate::encode::option_card(c, uid)?) })
+        }
+        Action::Skip => json!({ "cmd": "done" }),
+    })
 }

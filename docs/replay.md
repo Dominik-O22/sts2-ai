@@ -47,6 +47,12 @@ One JSON object per line:
   potions, and each enemy's HP, block, powers, and next move.
 - `play` (card, hand index, target), `potion` (id, target), `shuffle` (the
   resulting draw order), `turn_start`, `end` (won, HP).
+- `choice`: a card selection opened. Names the card in the play pile or the
+  potion that just left the belt, and the options. With the bridge
+  answering, it also carries `min` and `max`.
+- `picked`: one card the bridge took from the open selection, then one with
+  `card: null` when it closed. Hand-played recordings have none, and the
+  replay infers the pick from the next snapshot instead.
 
 ## What the replay forces versus checks
 
@@ -177,6 +183,12 @@ record that follows. A choice whose card the sim cannot place (a target
 it would need) waits for the real record, and the advice is late for it
 as before.
 
+A potion that opens a choice (Attack Potion) works the same way through
+the `potion` field. The options also replace the sim's own roll for a
+choose-a-card screen, so the pick is made from the cards the game shows.
+
 `--replay` feeds an existing recording as if it were being written, which
 is how the advisor is tested. Divergences print and the advisor keeps
 going.
+
+To let the policy play instead of advising, see `docs/bridge.md`.

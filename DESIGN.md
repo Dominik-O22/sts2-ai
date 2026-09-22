@@ -80,9 +80,15 @@ Change one here before changing the code that depends on it.
 
 ## Real-game interface
 
-- A Harmony bridge mod (C#) forked from STS2MCP or auto-spire, whichever reads cleaner,
-  plus a recording endpoint. Own bridge only if both are too tangled.
-- Runs in-process, localhost. A Python player process drives the loop with the trained model.
+- Own bridge, in the recorder mod, not a fork of STS2MCP or auto-spire. The recorder
+  already had the state the sim needs, and the game has the entry points: a card play is
+  `TryManualPlay`, and every in-combat card choice goes through `CardSelectCmd`'s
+  selector hook, the one tests and AutoSlay use. No Harmony. (2026-09-22)
+- Runs in-process, localhost TCP, JSON lines. A Python player process drives the loop with
+  the trained model. The bridge streams the recorder's records, so the player keeps the sim
+  in sync the same way the replay does.
+- Combat only. The player hands control back at the reward screen and the human plays the
+  overworld until the run value network exists.
 - dotnet SDK is installed on this machine for the mod build.
 
 ## Long term (after the combat slice)

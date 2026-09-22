@@ -47,11 +47,12 @@ forces versus checks, and the dev console commands.
 ## Commands
 
 ```
-cd sim && cargo test --release              # 48 tests
+cd sim && cargo test --release              # 53 tests
 cd sim && cargo run --release --bin replay  # every recording against the sim
 uv sync --reinstall-package sts2ai          # rebuild the Python extension
 uv run python -m sts2ai.vocab               # checkpoint remap self-check
-./scripts/build-mod.sh                      # recorder mod, needs a game restart
+./scripts/build-mod.sh                      # recorder mod + bridge, needs a game restart
+uv run python -m sts2ai.play runs/<run>/latest.pt --search 256   # policy plays combats
 uv run python -m sts2ai.train --iters 500
 ```
 

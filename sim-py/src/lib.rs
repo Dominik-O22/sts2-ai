@@ -12,7 +12,7 @@ use sim::encode::*;
 use sim::env::{EnvConfig, Forks as InnerForks, VecEnv as Inner};
 use sim::gen::{holdout, load_recordings, BOSS_FLOOR};
 use sim::ids::{ALL_CARDS, ALL_MONSTERS};
-use sim::replay::{Ids, Replayer, Step};
+use sim::replay::{command, Ids, Replayer, Step};
 use sim::types::Ascension;
 
 /// A batch of combats. See `sim::env::VecEnv`.
@@ -193,6 +193,16 @@ impl Advisor {
         }
     }
 
+    /// Release the held snapshot whether or not it settles at once. The
+    /// bridge says when the game is waiting on the player, so the snapshot
+    /// is a real decision point and may take a reseed to match.
+    fn settle(&mut self) -> String {
+        match self.inner.as_mut() {
+            Some(r) => status(r.finish()),
+            None => "waiting".into(),
+        }
+    }
+
     /// True when the sim is settled at a decision point.
     fn at_decision(&self) -> bool {
         self.inner.as_ref().is_some_and(Replayer::at_decision)
@@ -200,6 +210,11 @@ impl Advisor {
 
     fn is_over(&self) -> bool {
         self.inner.as_ref().is_some_and(|r| r.combat().is_over())
+    }
+
+    /// True when the sim has a card choice open (a pick or a skip is legal).
+    fn choosing(&self) -> bool {
+        self.inner.as_ref().is_some_and(|r| r.combat().pending.is_some())
     }
 
     /// Fill `floats [1, N_FLOATS]`, `ids [1, N_IDS]`, `mask [1, N_ACTIONS]`
@@ -218,6 +233,12 @@ impl Advisor {
     /// An action index in plain words, or None if it is not legal now.
     fn describe(&self, index: usize) -> PyResult<Option<String>> {
         Ok(describe(self.combat()?, index))
+    }
+
+    /// The bridge command (a JSON line) that makes the game take action
+    /// `index`, or None if it is not legal now (`sim::replay::command`).
+    fn command(&self, index: usize) -> PyResult<Option<String>> {
+        Ok(command(self.combat()?, index).map(|v| v.to_string()))
     }
 
     /// Turn, energy, HP, and the enemies with their intents.

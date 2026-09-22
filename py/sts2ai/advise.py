@@ -7,7 +7,7 @@
 Follows the newest file the recorder mod writes, keeps a sim combat in
 sync with the game the way the replay harness does (docs/replay.md), and
 prints what the policy would do at every decision point. You play the
-moves yourself; nothing is sent back to the game.
+moves yourself; `sts2ai.play` is the same session sending its pick back.
 
 With `--search N`, each decision also runs a turn search: N copies of the
 sim play the rest of the turn under the policy, every legal first action
@@ -102,14 +102,22 @@ class Session:
             self.advised = None
             return
         if status == "decision":
-            key = self.sim.counts()
-            if key != self.advised:
-                self.advised = key
-                self.advise()
+            self.on_decision()
+
+    def on_decision(self) -> None:
+        """The sim reached a decision point: advise, once per point."""
+        key = self.sim.counts()
+        if key != self.advised:
+            self.advised = key
+            self.advise()
 
     @torch.no_grad()
-    def advise(self) -> None:
+    def advise(self, banned: set[int] = frozenset()) -> int | None:
+        """Print the advice for the current decision point and return the
+        action index it recommends, None if nothing is legal. `banned`
+        actions are masked out: the game refused them."""
         self.sim.observe(self.floats, self.ids, self.mask)
+        self.mask[0, list(banned)] = False
         logits, _ = self.policy(
             torch.from_numpy(self.floats).to(self.device), torch.from_numpy(self.ids).to(self.device)
         )
@@ -121,21 +129,29 @@ class Session:
                 merged[action] = merged.get(action, 0.0) + float(probs[index])
         print(self.sim.summary())
         ranked = sorted(merged.items(), key=lambda kv: -kv[1])
+        if not ranked:
+            return None
         # With search on, the plan is the advice; the policy's own pick only
         # breaks ties inside it.
-        if self.search and ranked:
-            self.plan(ranked[0][0])
+        if self.search:
+            pick = self.plan(ranked[0][0], banned)
         else:
             for rank, (action, p) in enumerate(ranked[: 1 + ALTERNATIVES]):
                 arrow = "->" if rank == 0 else "  "
                 print(f"  {arrow} {action:<38} {p:5.1%}")
+            best = ranked[0][0]
+            pick = max(
+                (int(i) for i in np.flatnonzero(self.mask[0]) if self.sim.describe(int(i)) == best),
+                key=lambda i: probs[i],
+            )
         print()
+        return pick
 
     @torch.no_grad()
-    def plan(self, policy_pick: str) -> None:
-        """Turn search: print the best line of plays for the rest of the turn.
-        `policy_pick` is the policy's own first play; it keeps the top line
-        unless a plan beats it by `PLAN_MARGIN`."""
+    def plan(self, policy_pick: str, banned: set[int] = frozenset()) -> int:
+        """Turn search: print the best line of plays for the rest of the turn
+        and return its first action. `policy_pick` is the policy's own first
+        play; it keeps the top line unless a plan beats it by `PLAN_MARGIN`."""
         L, n = self.layout, self.search
         forks = self.sim.fork(n, self.groups, seed=int(time.time_ns() % (1 << 31)))
         floats = np.zeros((n, L.n_floats), np.float32)
@@ -143,6 +159,7 @@ class Session:
         mask = np.zeros((n, L.n_actions), np.bool_)
         rewards = np.zeros(n, np.float32)
         forks.observe(floats, ids, mask)
+        mask[:, list(banned)] = False
         legal = np.flatnonzero(mask[0])
         first = legal[np.arange(n) % len(legal)]
         score = np.zeros(n, np.float32)
@@ -179,6 +196,7 @@ class Session:
         for rank, i in enumerate(ranked[: 1 + ALTERNATIVES]):
             arrow = "=>" if rank == 0 else "  "
             print(f"  {arrow} plan {score[i]:+.2f}: " + " | ".join(lines[i]))
+        return int(first[ranked[0]])
 
 
 def newest(directory: Path) -> Path | None:

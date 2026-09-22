@@ -11,6 +11,9 @@
 //     the sim must replay verbatim: card plays, potion uses, shuffles (the
 //     resulting order), turn starts, and combat end. No Harmony: its native
 //     patch helper does not load on every Linux setup.
+//
+// Every line also goes to the bridge (Bridge.cs), which lets a Python
+// player act on it.
 
 using System.Text.Json;
 using Godot;
@@ -78,6 +81,7 @@ public static class Recorder
             var tree = (SceneTree)Engine.GetMainLoop();
             tree.Connect(SceneTree.SignalName.ProcessFrame, Callable.From(Poll));
             GD.Print("[sts2ai] recorder ready");
+            Bridge.Start();
         }
         catch (Exception ex)
         {
@@ -92,6 +96,7 @@ public static class Recorder
         try
         {
             Commands.Poll();
+            Bridge.Poll();
             var cm = CombatManager.Instance;
             if (!cm.IsInProgress) return;
             var sync = RunManager.Instance.ActionQueueSynchronizer;
@@ -110,20 +115,7 @@ public static class Recorder
                 if (!_choiceOpen && _file != null)
                 {
                     _choiceOpen = true;
-                    var playing = me.PlayerCombatState?.PlayPile.Cards.FirstOrDefault();
-                    Dictionary<string, object?>? card = null;
-                    if (playing != null)
-                    {
-                        card = CardRef(playing);
-                        int idx = _lastHand.FindIndex(c => ReferenceEquals(c, playing));
-                        card["hand_idx"] = idx < 0 ? null : idx;
-                    }
-                    Event(new()
-                    {
-                        ["t"] = "choice",
-                        ["card"] = card,
-                        ["options"] = me.PlayerCombatState?.Hand.Cards.Select(CardRef).ToList(),
-                    });
+                    Choice(me, me.PlayerCombatState?.Hand.Cards ?? new List<CardModel>(), null);
                 }
                 return;
             }
@@ -134,7 +126,11 @@ public static class Recorder
             if (_file != null && PotionInFlight(me)) return;
 
             string snap = JsonSerializer.Serialize(Snapshot(state, me), Json);
-            if (snap == _lastSnapshot) return;
+            if (snap == _lastSnapshot)
+            {
+                Bridge.Settled(snap);
+                return;
+            }
             if (_file == null) Open(state, me);
             _lastSnapshot = snap;
             _lastHand = me.PlayerCombatState!.Hand.Cards.ToList();
@@ -186,6 +182,14 @@ public static class Recorder
 
     private static void OnCombatSetUp(CombatState state)
     {
+        // An abandoned run or a quit to menu ends a combat without
+        // CombatEnded. Close what it left open, or this combat's records
+        // would land in that file with no start record of their own.
+        if (_file != null)
+        {
+            GD.Print("[sts2ai] previous combat never ended; closing its recording");
+            Close();
+        }
         _early = new();
         var me = LocalContext.GetMe(state);
         _relicState = me == null
@@ -211,6 +215,7 @@ public static class Recorder
 
     private static void Close()
     {
+        Bridge.CombatOver();
         _opening = null;
         _file?.Flush();
         _file?.Dispose();
@@ -223,6 +228,7 @@ public static class Recorder
         if (_file == null) return;
         _file.WriteLine(line);
         _file.Flush();
+        Bridge.Record(line);
     }
 
     private static void Event(Dictionary<string, object?> e)
@@ -233,6 +239,52 @@ public static class Recorder
             return;
         }
         Write(JsonSerializer.Serialize(e, Json));
+    }
+
+    // A `choice` record: a card-select screen (or the bridge, standing in
+    // for one) is up. It names what opened it, the card in the play pile or
+    // the potion that just left the belt, so the replay can apply that
+    // early; `min` and `max` only when the bridge knows them.
+    private static void Choice(Player me, IEnumerable<CardModel> options, (int min, int max)? range)
+    {
+        var playing = me.PlayerCombatState?.PlayPile.Cards.FirstOrDefault();
+        Dictionary<string, object?>? card = null;
+        if (playing != null)
+        {
+            card = CardRef(playing);
+            int idx = _lastHand.FindIndex(c => ReferenceEquals(c, playing));
+            card["hand_idx"] = idx < 0 ? null : idx;
+        }
+        var now = me.PotionSlots;
+        string? potion = null;
+        for (int i = 0; i < _potionBaseline.Count && i < now.Count; i++)
+            if (_potionBaseline[i] != null && now[i] == null) potion = _potionBaseline[i]!.Id.Entry;
+        var e = new Dictionary<string, object?>
+        {
+            ["t"] = "choice",
+            ["card"] = card,
+            ["options"] = options.Select(CardRef).ToList(),
+        };
+        if (potion != null) e["potion"] = potion;
+        if (range is var (min, max))
+        {
+            e["min"] = min;
+            e["max"] = max;
+        }
+        Event(e);
+    }
+
+    /// The bridge is answering a card selection.
+    internal static void OnSelection(IReadOnlyList<CardModel> options, int min, int max)
+    {
+        var me = LocalContext.GetMe(CombatManager.Instance.DebugOnlyGetState());
+        if (me != null) Choice(me, options, (min, max));
+    }
+
+    /// One card the bridge took from the open selection; null when it closed.
+    internal static void OnPicked(CardModel? card)
+    {
+        Event(new() { ["t"] = "picked", ["card"] = card == null ? null : CardRef(card) });
     }
 
     // ---- state ------------------------------------------------------------

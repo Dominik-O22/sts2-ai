@@ -142,7 +142,7 @@ pub fn hand_order(c: &Combat) -> Vec<usize> {
 }
 
 /// A pending option's card: piles first, then the offer screen.
-fn option_card(c: &Combat, uid: u32) -> Option<&Card> {
+pub(crate) fn option_card(c: &Combat, uid: u32) -> Option<&Card> {
     c.find_card(uid).or_else(|| c.player.offer.iter().find(|k| k.uid == uid))
 }
 
