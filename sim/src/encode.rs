@@ -315,6 +315,123 @@ pub fn card_name(index: usize) -> Option<String> {
     ALL_CARDS.get(index.checked_sub(1)?).map(|id: &CardId| format!("{id:?}"))
 }
 
+/// A `CamelCase` id as words, dropping the character suffix ids carry
+/// (`StrikeIronclad` is just "Strike" to a player).
+fn words(name: &str) -> String {
+    let mut out = String::with_capacity(name.len() + 4);
+    for (i, ch) in name.chars().enumerate() {
+        if ch.is_ascii_uppercase() && i > 0 {
+            out.push(' ');
+        }
+        out.push(ch);
+    }
+    out.strip_suffix(" Ironclad").map(str::to_string).unwrap_or(out)
+}
+
+/// An enemy as "Nibbit (left)": the name plus where it sits on screen,
+/// which is how the player tells two of the same monster apart.
+fn enemy_name(c: &Combat, enemy: usize) -> String {
+    let present: Vec<usize> = c.present_enemies().collect();
+    let name = words(&format!("{:?}", c.enemies[enemy].monster.id));
+    let Some(slot) = present.iter().position(|&i| i == enemy) else { return name };
+    let place = match (present.len(), slot) {
+        (1, _) => return name,
+        (_, 0) => "left".to_string(),
+        (n, s) if s == n - 1 => "right".to_string(),
+        (3, 1) => "middle".to_string(),
+        (_, s) => format!("#{}", s + 1),
+    };
+    format!("{name} ({place})")
+}
+
+/// What a pending choice does with the card picked.
+fn choice_verb(then: Then) -> &'static str {
+    match then {
+        Then::Exhaust | Then::ExhaustMany => "exhaust",
+        Then::Upgrade => "upgrade",
+        Then::MoveTo(Pile::Hand) | Then::ToHandFreeThisTurn => "take",
+        Then::MoveTo(Pile::DrawTop) => "draw next",
+        Then::MoveTo(Pile::DrawBottom) => "bury",
+        Then::MoveTo(Pile::Discard) => "discard",
+        Then::MoveTo(Pile::Exhaust) => "exhaust",
+        Then::FreeThisCombat => "make free",
+        Then::TakeOffer => "take",
+        Then::DiscardThenDraw { .. } => "discard",
+    }
+}
+
+/// Plain words for an action index, the way the advisor reads it out:
+/// "Bash -> Nibbit (left)", "End turn", "Choose: exhaust Strike".
+/// `None` when the index is not legal right now.
+pub fn describe(c: &Combat, index: usize) -> Option<String> {
+    let card = |k: &Card| {
+        let name = words(&format!("{:?}", k.id));
+        if k.upgraded {
+            format!("{name}+")
+        } else {
+            name
+        }
+    };
+    Some(match decode(c, index)? {
+        Action::PlayCard { hand_idx, target } => {
+            let name = card(&c.player.hand[hand_idx]);
+            match target {
+                Some(e) => format!("{name} -> {}", enemy_name(c, e)),
+                None => name,
+            }
+        }
+        Action::UsePotion { slot, target } => {
+            let name = words(&format!("{:?}", c.potions.get(slot).copied().flatten()?));
+            match target {
+                Some(e) => format!("Use {name} -> {}", enemy_name(c, e)),
+                None => format!("Use {name}"),
+            }
+        }
+        Action::EndTurn => "End turn".to_string(),
+        Action::Choose(i) => {
+            let pending = c.pending.as_ref()?;
+            let uid = *pending.options.get(i)?;
+            format!("Choose: {} {}", choice_verb(pending.then), card(option_card(c, uid)?))
+        }
+        Action::Skip => "Skip".to_string(),
+    })
+}
+
+/// A monster move name (`HISS_MOVE`) as words.
+fn move_words(name: &str) -> String {
+    let name = name.strip_suffix("_MOVE").unwrap_or(name);
+    name.split('_')
+        .map(|w| {
+            let mut c = w.chars();
+            c.next().map_or(String::new(), |f| f.to_ascii_uppercase().to_string() + &c.as_str().to_ascii_lowercase())
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Turn, energy, HP and the board, one line, for the advisor's header.
+pub fn summary(c: &Combat) -> String {
+    let p = &c.player;
+    let block = |n: i32| if n > 0 { format!(" ({n} block)") } else { String::new() };
+    let enemies: Vec<String> = c
+        .present_enemies()
+        .map(|i| {
+            let e = &c.enemies[i];
+            let intent = move_words(e.monster.next_move_name().unwrap_or("?"));
+            format!("{} {}/{}{} {intent}", enemy_name(c, i), e.creature.hp, e.creature.max_hp, block(e.creature.block))
+        })
+        .collect();
+    format!(
+        "turn {} | {} energy | HP {}/{}{} | {}",
+        p.turn,
+        p.energy,
+        p.creature.hp,
+        p.creature.max_hp,
+        block(p.creature.block),
+        enemies.join(", ")
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
