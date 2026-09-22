@@ -54,6 +54,20 @@ pub fn allow_negative(id: PowerId) -> bool {
     matches!(id, PowerId::Strength | PowerId::Dexterity | PowerId::Shrink)
 }
 
+/// `PowerModel.GetTypeForAmount == Debuff`: a negative counter that allows
+/// negatives (Strength loss, the permanent Shrink) counts as a debuff, and a
+/// negative amount of a plain debuff counts as a buff. All three
+/// `allow_negative` powers are `Counter` stacks on their canonical model.
+pub fn is_debuff_for_amount(id: PowerId, amount: i32) -> bool {
+    if allow_negative(id) && amount < 0 {
+        return true;
+    }
+    if !allow_negative(id) && is_debuff(id) && amount < 0 {
+        return false;
+    }
+    is_debuff(id)
+}
+
 /// `PowerStackType.Single`: hidden amount, never stacks above 1.
 pub fn is_single(id: PowerId) -> bool {
     matches!(

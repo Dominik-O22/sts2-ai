@@ -9,7 +9,7 @@ use crate::effect::{AttackTargets, CardFilter, Effect, GenPool, Pile, Then};
 use crate::ids::{CardId, MonsterId, PowerId};
 use crate::monster::{Flags, Monster};
 use crate::potion::{PotionId, Target as PotionTarget};
-use crate::power::{is_debuff, is_single, Power};
+use crate::power::{is_debuff, is_debuff_for_amount, is_single, Power};
 use crate::relic::Relic;
 use crate::rng::CombatRngs;
 use crate::types::{Ascension, CardType, CreatureRef, Keyword, Side, TargetType, ValueProp};
@@ -1638,14 +1638,16 @@ impl Combat {
         let mut out = vec![];
         let in_play = self.player.play.last().map(|c| c.uid);
         let amount = self.relic_modify_power_amount(target, id, amount, in_play);
-        // ArtifactPower.cs: negate a debuff and spend a charge.
-        if is_debuff(id) && amount > 0 && self.creature(target).power(PowerId::Artifact).is_some() {
+        // ArtifactPower.cs: negate a debuff (by GetTypeForAmount, so Strength
+        // loss and the permanent -1 Shrink count) and spend a charge.
+        if is_debuff_for_amount(id, amount) && self.creature(target).power(PowerId::Artifact).is_some() {
             self.modify_power(target, PowerId::Artifact, -1);
             return vec![];
         }
-        let exists = self.creature(target).power(id).is_some();
-        if exists {
-            if is_single(id) {
+        let existing = self.creature(target).power(id).map(|p| p.amount);
+        if let Some(cur) = existing {
+            // ShrinkPower.StackType: an infinite (-1) Shrink is a Single stack.
+            if is_single(id) || (id == PowerId::Shrink && cur < 0) {
                 return vec![];
             }
             out.extend(Power::new(id, 0).on_applied(target, amount));
