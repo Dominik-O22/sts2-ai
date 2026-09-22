@@ -72,6 +72,8 @@ from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import game  # scripts/game.py: the game window, for what the console cannot do
+
 ROOT = Path(__file__).resolve().parent.parent
 GAME_DIR = Path.home() / ".local/share/SlayTheSpire2/sts2ai"
 RECORDINGS = GAME_DIR / "recordings"
@@ -615,13 +617,18 @@ def main() -> None:
     else:
         picked = []
 
-    if (why := blocker()) is not None:
-        sys.exit(f"\ncannot set fights up: the game has {why}.")
     if not picked and not args.queue:
         print("\nnothing to record.")
         return
-    print(f"\n{len(picked)} to go. start the game, open a run, and stay out of combat.")
-    input("enter when ready: ")
+    # Unattended, the session opens the game and the saved run itself.
+    if args.pilot and not run_state().get("active"):
+        print("\nopening the game and continuing the saved run...")
+        game.continue_run()
+    if (why := blocker()) is not None:
+        sys.exit(f"\ncannot set fights up: the game has {why}.")
+    if not args.pilot:
+        print(f"\n{len(picked)} to go. start the game, open a run, and stay out of combat.")
+        input("enter when ready: ")
     if args.plain:
         send(PLAIN)
     run = None if args.no_deck else Run()
