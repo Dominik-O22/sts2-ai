@@ -651,6 +651,21 @@ impl Power {
         }
     }
 
+    /// `BeforeDamageReceived` on the owner: ThornsPower hits the attacker
+    /// back, killing blow or not.
+    pub fn before_damage_received(&self, owner: CreatureRef, props: ValueProp, dealer: Option<CreatureRef>) -> Vec<Effect> {
+        match (self.id, dealer) {
+            (PowerId::Thorns, Some(d)) if props.is_powered() => vec![Effect::Damage {
+                target: d,
+                amount: self.amount as f64,
+                props: ValueProp::UNPOWERED,
+                dealer: Some(owner),
+                card: None,
+            }],
+            _ => vec![],
+        }
+    }
+
     /// `AfterDamageReceived` on the owner. `own_turn` is whether the owner's
     /// side is acting.
     pub fn after_damage_received(
@@ -678,14 +693,6 @@ impl Power {
             PowerId::Inferno if unblocked > 0 && own_turn => {
                 vec![Effect::DamageAllEnemies { amount: self.amount as f64, props: ValueProp::UNPOWERED, dealer: owner }]
             }
-            // ThornsPower.cs: hit the attacker back.
-            PowerId::Thorns if props.is_powered() && dealer.is_some() => vec![Effect::Damage {
-                target: dealer.unwrap(),
-                amount: self.amount as f64,
-                props: ValueProp::UNPOWERED,
-                dealer: Some(owner),
-                card: None,
-            }],
             // SlipperyPower.cs: one charge per unblocked hit.
             PowerId::Slippery if unblocked >= 1 => vec![Effect::DecrementPower { target: owner, id: self.id }],
             // ShriekPower.cs: dropping to the threshold stuns it into Terror.

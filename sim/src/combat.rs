@@ -2362,11 +2362,20 @@ impl Combat {
             // OnUseWrapper ran for the automatic use, so its after hooks fire.
             out.push(Effect::AfterPotionUsed);
         }
+        // CreatureCmd.Damage skips Hook.AfterDamageReceived for a hit that
+        // killed its target, and only then kills: a death a Fairy in a Bottle
+        // or Lizard Tail prevents still gets no Flame Barrier or Thorns.
+        let killed = dying || (was_alive && !self.creature(target).alive());
         for p in &self.creature(target).powers {
-            out.extend(p.after_damage_received(target, lost, props, dealer, own_turn, hp_after));
+            out.extend(p.before_damage_received(target, props, dealer));
         }
-        if target == CreatureRef::Player {
-            out.extend(self.relic_after_damage_received(lost, props, own_turn));
+        if !killed {
+            for p in &self.creature(target).powers {
+                out.extend(p.after_damage_received(target, lost, props, dealer, own_turn, hp_after));
+            }
+            if target == CreatureRef::Player {
+                out.extend(self.relic_after_damage_received(lost, props, own_turn));
+            }
         }
         // BurrowedPower.AfterBlockBroken: the Tunneler is stunned back to Bite
         // and loses the burrow.
