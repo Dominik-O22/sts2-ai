@@ -20,6 +20,7 @@ from torch.utils.tensorboard import SummaryWriter
 from sts2ai.env import DEFAULT_RECORDINGS, End, Envs, has_recordings
 from sts2ai.evaluate import evaluate
 from sts2ai.model import Policy, checkpoint_layout, checkpoint_vocab, load_state, masked_logits
+from sts2ai.search import rollout, spread
 from sts2ai.vocab import current_text
 
 BOSS_FLOOR = 16
@@ -51,6 +52,24 @@ class Config:
     # Once the ramp is done, this fraction of fights is forced onto an
     # elite or boss; normal fights are won almost always by then.
     hard_frac: float = 0.4
+    # Search distillation (expert iteration): each iteration, this many
+    # envs get a turn search (`search.py`) over the policy's `search_top`
+    # favourite first actions, `search_copies` copies shared between them,
+    # and the policy is also trained toward the search's choice there. The
+    # target is the policy's own distribution tilted by what the search
+    # found (Gumbel AlphaZero's completed-Q improvement): each searched
+    # action's logit moves by (its mean score - the policy's expected
+    # score) / `search_temp`; unsearched actions keep theirs. A search that
+    # cannot tell moves apart leaves the policy as it was. 0 turns it off.
+    search_states: int = 0
+    search_copies: int = 128
+    search_top: int = 8
+    search_temp: float = 0.05
+    search_coef: float = 0.5
+    # Recent search targets kept for the update, oldest dropped first; the
+    # loss waits until `search_warmup` are in, so it does not fit a handful.
+    search_buffer: int = 16384
+    search_warmup: int = 4096
     eval_every: int = 50
     # Fights per held-out setup at each eval.
     eval_repeats: int = 2
@@ -126,6 +145,63 @@ class Stats:
         return out
 
 
+class SearchTargets:
+    """Ring buffer of (observation, mask, search distribution) on the
+    training device."""
+
+    def __init__(self, size: int, layout, device: torch.device):
+        self.floats = torch.zeros((size, layout.n_floats), device=device)
+        self.ids = torch.zeros((size, layout.n_ids), dtype=torch.long, device=device)
+        self.mask = torch.zeros((size, layout.n_actions), dtype=torch.bool, device=device)
+        self.target = torch.zeros((size, layout.n_actions), device=device)
+        self.size, self.next, self.full = size, 0, False
+
+    def __len__(self) -> int:
+        return self.size if self.full else self.next
+
+    def add(self, floats: np.ndarray, ids: np.ndarray, mask: np.ndarray, target: np.ndarray) -> None:
+        for k in range(len(floats)):
+            i = self.next
+            self.floats[i] = torch.from_numpy(floats[k])
+            self.ids[i] = torch.from_numpy(ids[k])
+            self.mask[i] = torch.from_numpy(mask[k])
+            self.target[i] = torch.from_numpy(target[k])
+            self.next = (i + 1) % self.size
+            self.full |= self.next == 0
+
+    def sample(self, n: int) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+        idx = torch.randint(len(self), (n,), device=self.floats.device)
+        return self.floats[idx], self.ids[idx], self.mask[idx], self.target[idx]
+
+
+@torch.no_grad()
+def search_targets(policy: Policy, device: torch.device, envs: Envs, cfg: Config, seed: int):
+    """Turn search on `cfg.search_states` random envs with a choice to make.
+    Returns their observations, masks, and the search's distribution over
+    first actions."""
+    choice = np.flatnonzero(envs.mask.sum(axis=1) > 1)
+    roots = np.random.choice(choice, min(cfg.search_states, len(choice)), replace=False)
+    n = cfg.search_copies
+    logits, _ = policy(torch.from_numpy(envs.floats[roots]).to(device), torch.from_numpy(envs.ids[roots]).to(device))
+    logits = masked_logits(logits.float(), torch.from_numpy(envs.mask[roots]).to(device)).cpu().numpy()
+    tops = [np.argsort(-logits[r])[: min(cfg.search_top, int(envs.mask[i].sum()))] for r, i in enumerate(roots)]
+    forks = envs.sim.fork([int(i) for i in roots], n, seed=seed)
+    first = np.concatenate([spread(top, n) for top in tops])
+    score = rollout(policy, device, forks, first)
+    target = np.zeros((len(roots), envs.mask.shape[1]), np.float32)
+    for r in range(len(roots)):
+        f, sc = first[r * n : (r + 1) * n], score[r * n : (r + 1) * n]
+        acts = np.unique(f)
+        q = np.array([sc[f == a].mean() for a in acts])
+        prior = np.exp(logits[r, acts] - logits[r, acts].max())
+        v = float((prior * q).sum() / prior.sum())
+        tilted = logits[r].copy()
+        tilted[acts] += (q - v) / cfg.search_temp
+        p = np.exp(tilted - tilted.max())
+        target[r] = p / p.sum()
+    return envs.floats[roots], envs.ids[roots], envs.mask[roots], target
+
+
 def save_checkpoint(path: Path, policy: Policy, opt: torch.optim.Optimizer, it: int, global_step: int) -> None:
     """Weights, optimizer, and what the sim looked like: the vocabulary
     (remappable) and the layout (checked, not remappable)."""
@@ -153,6 +229,7 @@ def train(cfg: Config) -> Policy:
     net = torch.compile(policy) if cfg.compile and device.type == "cuda" else policy
     autocast = torch.autocast(device.type, dtype=torch.bfloat16, enabled=cfg.bf16 and device.type == "cuda")
     roll = Rollout(cfg, envs, device)
+    searched = SearchTargets(cfg.search_buffer, envs.layout, device) if cfg.search_states else None
     stats = Stats()
     start_iter, global_step = 1, 0
     if cfg.resume:
@@ -198,6 +275,8 @@ def train(cfg: Config) -> Policy:
                 _, last_value = net(floats, ids)
             adv, returns = roll.advantages(last_value.float(), cfg.gamma, cfg.lam)
         global_step += cfg.steps * cfg.envs
+        if searched is not None:
+            searched.add(*search_targets(policy, device, envs, cfg, seed=cfg.seed * 1_000_003 + it))
 
         # Update.
         policy.train()
@@ -213,7 +292,7 @@ def train(cfg: Config) -> Policy:
             "returns": returns.reshape(B),
         }
         mb = B // cfg.minibatches
-        losses = {"policy": 0.0, "value": 0.0, "entropy": 0.0, "clipfrac": 0.0, "approx_kl": 0.0}
+        losses = {"policy": 0.0, "value": 0.0, "entropy": 0.0, "clipfrac": 0.0, "approx_kl": 0.0, "search": 0.0}
         n_updates = 0
         for _ in range(cfg.epochs):
             perm = torch.randperm(B, device=device)
@@ -231,6 +310,14 @@ def train(cfg: Config) -> Policy:
                 vl = 0.5 * (value - flat["returns"][idx]).pow(2).mean()
                 ent = dist.entropy().mean()
                 loss = pg + cfg.value_coef * vl - cfg.entropy * ent
+                if searched is not None and len(searched) >= cfg.search_warmup:
+                    s_floats, s_ids, s_mask, s_target = searched.sample(min(len(searched), mb // 8))
+                    with autocast:
+                        s_logits, _ = net(s_floats, s_ids)
+                    logp_all = torch.log_softmax(masked_logits(s_logits.float(), s_mask), dim=1)
+                    ce = -(s_target * logp_all).sum(dim=1).mean()
+                    loss = loss + cfg.search_coef * ce
+                    losses["search"] += ce.item()
                 opt.zero_grad(set_to_none=True)
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(policy.parameters(), cfg.max_grad_norm)
