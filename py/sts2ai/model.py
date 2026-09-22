@@ -105,7 +105,28 @@ def masked_logits(logits: Tensor, mask: Tensor) -> Tensor:
     return logits.masked_fill(~mask, -1e9)
 
 
+def load_state(policy: Policy, state: dict[str, Tensor]) -> bool:
+    """Load weights, allowing embedding tables that grew since the
+    checkpoint (new cards, monsters, moves appended to a vocabulary): old
+    rows are copied, new rows keep their init. Returns whether any grew."""
+    own = policy.state_dict()
+    grown = False
+    for key, old in state.items():
+        new = own[key]
+        if old.shape == new.shape:
+            continue
+        if old.dim() == 2 and old.shape[1] == new.shape[1] and old.shape[0] < new.shape[0] and ".weight" in key:
+            merged = new.clone()
+            merged[: old.shape[0]] = old
+            state[key] = merged
+            grown = True
+        else:
+            raise ValueError(f"{key}: checkpoint shape {tuple(old.shape)} does not fit {tuple(new.shape)}")
+    policy.load_state_dict(state)
+    return grown
+
+
 def load_policy(path: Path, policy: Policy, device: torch.device) -> None:
     """Load weights from a training checkpoint (or a bare state dict)."""
     ck = torch.load(path, map_location=device)
-    policy.load_state_dict(ck["policy"] if "policy" in ck else ck)
+    load_state(policy, ck["policy"] if "policy" in ck else ck)

@@ -503,3 +503,65 @@ mod tests {
         assert_eq!(seen, (0..c.player.hand.len()).collect::<Vec<_>>());
     }
 }
+
+/// Every vocabulary the policy embeds, in index order, one `kind name`
+/// per line. `sim/vocab.txt` pins it: the model's embedding rows mean
+/// whatever they were trained on, so entries may be appended but never
+/// moved. Regenerate with `cargo run --release --example vocab > vocab.txt`.
+pub fn vocab_text() -> String {
+    let mut out = String::new();
+    for id in ALL_CARDS {
+        out += &format!("card {id:?}\n");
+    }
+    for id in ALL_POWERS {
+        out += &format!("power {id:?}\n");
+    }
+    for id in ALL_MONSTERS {
+        out += &format!("monster {id:?}\n");
+    }
+    for id in relic::ALL {
+        out += &format!("relic {id:?}\n");
+    }
+    for id in potion::ALL {
+        out += &format!("potion {id:?}\n");
+    }
+    for name in monster::all_move_names() {
+        out += &format!("move {name}\n");
+    }
+    out
+}
+
+#[cfg(test)]
+mod vocab_tests {
+    /// Pinned entries must still be at the same index; only appends are
+    /// allowed. See `vocab_text`.
+    #[test]
+    fn vocabulary_order_is_pinned() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/vocab.txt");
+        let pinned = std::fs::read_to_string(path).expect("sim/vocab.txt missing; run `cargo run --release --example vocab > vocab.txt` in sim/");
+        let current = super::vocab_text();
+        let by_kind = |s: &str| -> std::collections::BTreeMap<String, Vec<String>> {
+            let mut m: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+            for line in s.lines() {
+                let (kind, name) = line.split_once(' ').unwrap();
+                m.entry(kind.to_string()).or_default().push(name.to_string());
+            }
+            m
+        };
+        let (pinned, current) = (by_kind(&pinned), by_kind(&current));
+        for (kind, names) in &pinned {
+            let now = &current[kind];
+            for (i, name) in names.iter().enumerate() {
+                assert_eq!(
+                    now.get(i).map(String::as_str),
+                    Some(name.as_str()),
+                    "{kind} vocabulary changed at index {i}: pinned {name}, now {:?}. Append new ids at the end, then regenerate sim/vocab.txt with `cargo run --release --example vocab > vocab.txt`.",
+                    now.get(i)
+                );
+            }
+            if now.len() > names.len() {
+                panic!("{kind} vocabulary grew by {}; regenerate sim/vocab.txt with `cargo run --release --example vocab > vocab.txt` and commit it", now.len() - names.len());
+            }
+        }
+    }
+}

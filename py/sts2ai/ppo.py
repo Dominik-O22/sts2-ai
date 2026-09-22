@@ -19,7 +19,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 from sts2ai.env import DEFAULT_RECORDINGS, End, Envs
 from sts2ai.evaluate import evaluate
-from sts2ai.model import Policy, masked_logits
+from sts2ai.model import Policy, load_state, masked_logits
 
 BOSS_FLOOR = 16
 
@@ -136,8 +136,10 @@ def train(cfg: Config) -> Policy:
     start_iter, global_step = 1, 0
     if cfg.resume:
         ck = torch.load(cfg.resume, map_location=device)
-        policy.load_state_dict(ck["policy"])
-        opt.load_state_dict(ck["optimizer"])
+        if load_state(policy, ck["policy"]):
+            print("vocabulary grew since the checkpoint: embeddings extended, optimizer state reset")
+        else:
+            opt.load_state_dict(ck["optimizer"])
         start_iter, global_step = ck["iter"] + 1, ck["global_step"]
         print(f"resumed {cfg.resume} at iteration {ck['iter']}")
     cfg.run_dir.mkdir(parents=True, exist_ok=True)
