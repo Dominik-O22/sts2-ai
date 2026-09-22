@@ -20,8 +20,12 @@ def main() -> None:
     defaults = Config()
     for f in fields(Config):
         default = getattr(defaults, f.name)
+        flag = f"--{f.name.replace('_', '-')}"
+        if isinstance(default, bool):
+            ap.add_argument(flag, action=argparse.BooleanOptionalAction, default=default)
+            continue
         kind = Path if default is None or isinstance(default, Path) else type(default)
-        ap.add_argument(f"--{f.name.replace('_', '-')}", type=kind, default=default)
+        ap.add_argument(flag, type=kind, default=default)
     args = ap.parse_args()
     train(Config(**vars(args)))
 

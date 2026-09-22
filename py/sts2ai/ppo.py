@@ -54,6 +54,10 @@ class Config:
     # handles the early floors, so fights come from all of act 1 at once.
     resume: Path | None = None
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
+    # Speed: fuse the network with torch.compile, and run its matmuls in
+    # bfloat16. Advantages, returns, and the loss stay in fp32.
+    compile: bool = True
+    bf16: bool = True
 
 
 class Rollout:
@@ -123,6 +127,9 @@ def train(cfg: Config) -> Policy:
     envs = Envs(cfg.envs, seed=cfg.seed, max_floor=cfg.floor_start)
     policy = Policy(envs.layout).to(device)
     opt = torch.optim.Adam(policy.parameters(), lr=cfg.lr, eps=1e-5)
+    # `net` is what runs; `policy` keeps the plain module for checkpoints.
+    net = torch.compile(policy) if cfg.compile and device.type == "cuda" else policy
+    autocast = torch.autocast(device.type, dtype=torch.bfloat16, enabled=cfg.bf16 and device.type == "cuda")
     roll = Rollout(cfg, envs, device)
     stats = Stats()
     start_iter, global_step = 1, 0
@@ -150,19 +157,21 @@ def train(cfg: Config) -> Policy:
                 floats = torch.from_numpy(envs.floats).to(device)
                 ids = torch.from_numpy(envs.ids).to(device)
                 mask = torch.from_numpy(envs.mask).to(device)
-                logits, value = policy(floats, ids)
-                dist = torch.distributions.Categorical(logits=masked_logits(logits, mask))
+                with autocast:
+                    logits, value = net(floats, ids)
+                dist = torch.distributions.Categorical(logits=masked_logits(logits.float(), mask))
                 action = dist.sample()
                 roll.floats[t], roll.ids[t], roll.mask[t] = floats, ids, mask
-                roll.actions[t], roll.logp[t], roll.values[t] = action, dist.log_prob(action), value
+                roll.actions[t], roll.logp[t], roll.values[t] = action, dist.log_prob(action), value.float()
                 ends = envs.step(action.cpu().numpy())
                 roll.rewards[t] = torch.from_numpy(envs.rewards).to(device)
                 roll.dones[t] = torch.from_numpy(envs.dones).to(device)
                 stats.add(ends)
             floats = torch.from_numpy(envs.floats).to(device)
             ids = torch.from_numpy(envs.ids).to(device)
-            _, last_value = policy(floats, ids)
-            adv, returns = roll.advantages(last_value, cfg.gamma, cfg.lam)
+            with autocast:
+                _, last_value = net(floats, ids)
+            adv, returns = roll.advantages(last_value.float(), cfg.gamma, cfg.lam)
         global_step += cfg.steps * cfg.envs
 
         # Update.
@@ -185,7 +194,9 @@ def train(cfg: Config) -> Policy:
             perm = torch.randperm(B, device=device)
             for start in range(0, B, mb):
                 idx = perm[start : start + mb]
-                logits, value = policy(flat["floats"][idx], flat["ids"][idx])
+                with autocast:
+                    logits, value = net(flat["floats"][idx], flat["ids"][idx])
+                logits, value = logits.float(), value.float()
                 dist = torch.distributions.Categorical(logits=masked_logits(logits, flat["mask"][idx]))
                 logp = dist.log_prob(flat["actions"][idx])
                 ratio = torch.exp(logp - flat["logp"][idx])
