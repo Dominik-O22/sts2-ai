@@ -18,6 +18,25 @@ from torch import Tensor, nn
 from sts2ai.env import Layout
 
 
+class KeyedHead(nn.Module):
+    """Scores each of `[B, K, item_dim]` items against the `[B, state_dim]`
+    state: one hidden layer over (state, item), then `out_dim` logits per
+    item. The state is projected once and broadcast, which is the same
+    function as a linear layer over the concatenation without building
+    the `[B, K, state_dim]` tensor."""
+
+    def __init__(self, state_dim: int, item_dim: int, out_dim: int, hidden: int = 128):
+        super().__init__()
+        self.state = nn.Linear(state_dim, hidden)
+        self.item = nn.Linear(item_dim, hidden, bias=False)
+        self.out = nn.Linear(hidden, out_dim)
+        nn.init.orthogonal_(self.out.weight, gain=0.01)
+        nn.init.zeros_(self.out.bias)
+
+    def forward(self, state: Tensor, items: Tensor) -> Tensor:
+        return self.out(torch.relu(self.state(state).unsqueeze(1) + self.item(items)))
+
+
 def _head(in_dim: int, out_dim: int, hidden: int = 128) -> nn.Sequential:
     head = nn.Sequential(nn.Linear(in_dim, hidden), nn.ReLU(), nn.Linear(hidden, out_dim))
     nn.init.orthogonal_(head[-1].weight, gain=0.01)
@@ -48,9 +67,9 @@ class Policy(nn.Module):
             + L.max_potions * potion_dim
         )
         self.torso = nn.Sequential(nn.Linear(in_dim, hidden), nn.ReLU(), nn.Linear(hidden, hidden), nn.ReLU())
-        self.play = _head(hidden + card_dim + L.hand_feats, L.targets)
-        self.use_potion = _head(hidden + potion_dim + 1, L.targets)
-        self.choose = _head(hidden + card_dim + L.choice_feats, 1)
+        self.play = KeyedHead(hidden, card_dim + L.hand_feats, L.targets)
+        self.use_potion = KeyedHead(hidden, potion_dim + 1, L.targets)
+        self.choose = KeyedHead(hidden, card_dim + L.choice_feats, 1)
         self.end_or_skip = _head(hidden, 2)
         self.v = nn.Linear(hidden, 1)
         nn.init.orthogonal_(self.v.weight, gain=1.0)
@@ -70,15 +89,12 @@ class Policy(nn.Module):
         )
         h = self.torso(x)
 
-        def with_state(items: Tensor, feats: Tensor) -> Tensor:
-            return torch.cat([h.unsqueeze(1).expand(-1, items.shape[1], -1), items, feats], dim=2)
-
         hand_feats = floats[:, L.f_hand : L.f_hand + L.max_hand * L.hand_feats].view(B, L.max_hand, L.hand_feats)
         potion_feats = floats[:, L.f_potions : L.f_potions + L.max_potions].unsqueeze(2)
         choice_feats = floats[:, L.f_choices : L.f_choices + L.max_choices * L.choice_feats].view(B, L.max_choices, L.choice_feats)
-        play = self.play(with_state(hand, hand_feats)).flatten(1)
-        potion = self.use_potion(with_state(potions, potion_feats)).flatten(1)
-        choose = self.choose(with_state(choices, choice_feats)).squeeze(2)
+        play = self.play(h, torch.cat([hand, hand_feats], dim=2)).flatten(1)
+        potion = self.use_potion(h, torch.cat([potions, potion_feats], dim=2)).flatten(1)
+        choose = self.choose(h, torch.cat([choices, choice_feats], dim=2)).squeeze(2)
         end_skip = self.end_or_skip(h)
         logits = torch.cat([play, potion, end_skip[:, :1], choose, end_skip[:, 1:]], dim=1)
         return logits, self.v(h).squeeze(-1)
