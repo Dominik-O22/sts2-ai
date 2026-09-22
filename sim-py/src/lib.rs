@@ -246,6 +246,19 @@ impl Advisor {
         Ok(summary(self.combat()?))
     }
 
+    /// Whether ending the turn now leaves the player alive once the enemy
+    /// turn is over, played out on a copy (their rolled moves, the player's
+    /// block, a Fairy in a Bottle catching a death). The recording pilot
+    /// asks before it ends a turn.
+    fn end_turn_survives(&self) -> PyResult<bool> {
+        let mut c = self.combat()?.clone();
+        if c.is_over() || c.pending.is_some() {
+            return Ok(true);
+        }
+        c.step(sim::combat::Action::EndTurn);
+        Ok(c.outcome != Some(sim::combat::Outcome::Lost))
+    }
+
     /// Decision points matched, actions applied, reseeds needed.
     fn counts(&self) -> PyResult<(usize, usize, u32)> {
         let r = self.inner.as_ref().ok_or_else(|| pyo3::exceptions::PyValueError::new_err("no combat yet"))?;
