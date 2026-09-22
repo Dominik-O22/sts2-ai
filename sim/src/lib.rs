@@ -677,6 +677,28 @@ mod tests {
         assert!(!c.is_over());
     }
 
+    /// Decimillipede: a segment killed while the others live stays in the
+    /// fight, plays dead for a turn, then reattaches with 25 HP.
+    #[test]
+    fn decimillipede_segment_reattaches() {
+        let specs = encounter::Encounter::DecimillipedeElite.monsters(&mut rng::Rng::new(1));
+        let mut c = with_relics(&[], &specs, 1);
+        c.enemies[0].creature.hp = 1;
+        c.player.hand.insert(0, card::Card::new(900, ids::CardId::StrikeIronclad, false));
+        c.player.energy = 1;
+        c.step(Action::PlayCard { hand_idx: 0, target: Some(0) });
+        assert!(!c.is_over(), "the other segments still live");
+        assert!(c.enemies[0].reviving && c.living_enemies().count() == 2);
+        assert_eq!(c.enemies[0].monster.next_move_name(), Some("DEAD_MOVE"));
+        c.player.creature.hp = 999;
+        c.step(Action::EndTurn);
+        assert_eq!(c.enemies[0].monster.next_move_name(), Some("REATTACH_MOVE"));
+        assert_eq!(c.enemies[0].creature.hp, 0);
+        c.step(Action::EndTurn);
+        assert_eq!(c.enemies[0].creature.hp, 25);
+        assert!(!c.enemies[0].reviving);
+    }
+
     /// Pael's Eye: a turn with nothing played burns the hand and comes round
     /// again before the enemy moves, once a combat.
     #[test]

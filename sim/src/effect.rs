@@ -162,6 +162,21 @@ pub enum Effect {
     OfferRandom { pool: GenPool, count: u32, free: bool, retain: bool },
     /// `Then::TakeOffer` for the picked uid.
     TakeOffer { uid: u32 },
+    /// `EnergyCost.AddThisCombat`: a card's cost moves for the rest of the
+    /// combat (Frantic Escape).
+    CostThisCombat { uid: u32, delta: i32 },
+    /// A monster move's continuation that reads the state as the move
+    /// resolves (Bowlbug Rock's stagger, Entomancer's hive). See
+    /// `Combat::monster_step`.
+    MonsterStep { me: CreatureRef, step: u8 },
+    /// Knowledge Demon's Curse of Knowledge: a compulsory pick between two
+    /// curse cards, whose power lands instead of the card.
+    OfferCurse { cards: [CardId; 2], disintegration: i32 },
+    /// `ReattachPower.DoReattach`: a dead segment comes back with `hp`.
+    Reattach { target: CreatureRef, hp: i32 },
+    /// `ToughEgg.HatchMove`: shed every power but Minion and re-roll HP as a
+    /// hatchling.
+    Hatch { target: CreatureRef },
     /// `CardModel.CreateClone` of a card into the hand (Music Box).
     CloneToHand { uid: u32, ethereal: bool },
     /// A relic's continuation that has to read the state as it stands when

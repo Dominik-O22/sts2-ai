@@ -239,15 +239,21 @@ fn settle(c: &Combat, snap: &Value, depth: u32) -> Result<Combat, String> {
 /// Enemies spawned since the last snapshot rolled their HP in the sim; the
 /// recording only shows the game's roll now. Adopt it while they are still
 /// undamaged, which is when the roll is the only difference.
+/// A hatched Tough Egg re-rolls its HP the same way, so it is adopted too,
+/// minus the range check, which is the egg's and not the hatchling's.
 fn adopt_spawn_hp(c: &mut Combat, snap: &Value, known: usize) -> Result<(), String> {
     let empty = vec![];
     let living: Vec<usize> = c.present_enemies().collect();
+    let rerolled = std::mem::take(&mut c.stats.hp_rerolled);
     for (e, &i) in snap["enemies"].as_array().unwrap_or(&empty).iter().zip(&living) {
         let asc = c.asc;
         let cr = &mut c.enemies[i].creature;
-        if i >= known && cr.hp == cr.max_hp {
+        let fresh = i >= known;
+        if (fresh || rerolled.contains(&i)) && cr.hp == cr.max_hp {
             if let (Some(hp), Some(max)) = (e["hp"].as_i64(), e["max_hp"].as_i64()) {
-                check_hp_range(c.enemies[i].monster.id, max as i32, asc)?;
+                if fresh {
+                    check_hp_range(c.enemies[i].monster.id, max as i32, asc)?;
+                }
                 let cr = &mut c.enemies[i].creature;
                 cr.max_hp = max as i32;
                 cr.hp = hp as i32;
@@ -324,6 +330,44 @@ fn adopt_hand_costs(c: &mut Combat, snap: &Value) {
                 c.player.hand[i].cost_this_turn = Some(cost as i32);
             }
         }
+    }
+}
+
+/// Two copies of a card differ only by a cost change one of them carries
+/// (Touch of Insanity's free card), and a recorded shuffle names cards by id
+/// alone, so the replay may have drawn the other copy. When the hand holds
+/// the wrong one and the right one sits in another pile, swap them.
+fn adopt_copy_costs(c: &mut Combat, snap: &Value) {
+    type Key = (String, bool, i64);
+    let key = |c: &Combat, k: &Card| -> Key {
+        let cost = if k.def().x_cost { -1 } else { i64::from(c.cost(k)) };
+        (slug(&format!("{:?}", k.id)), k.upgraded, cost)
+    };
+    let empty = vec![];
+    let mut have: Vec<Option<Key>> = c.player.hand.iter().map(|k| Some(key(c, k))).collect();
+    let mut missing: Vec<Key> = vec![];
+    for r in snap["hand"].as_array().unwrap_or(&empty) {
+        let want: Key = (r["id"].as_str().unwrap_or("").to_string(), r["up"].as_bool().unwrap_or(false), r["cost"].as_i64().unwrap_or(0));
+        match have.iter().position(|h| h.as_ref() == Some(&want)) {
+            Some(i) => have[i] = None,
+            None => missing.push(want),
+        }
+    }
+    for want in missing {
+        let Some(h) = have.iter().position(|k| k.as_ref().is_some_and(|k| k.0 == want.0 && k.1 == want.1)) else { continue };
+        let p = &c.player;
+        let found = [&p.draw, &p.discard, &p.exhaust]
+            .iter()
+            .enumerate()
+            .find_map(|(n, pile)| pile.iter().position(|k| key(c, k) == want).map(|j| (n, j)));
+        let pl = &mut c.player;
+        match found {
+            Some((0, j)) => std::mem::swap(&mut pl.hand[h], &mut pl.draw[j]),
+            Some((1, j)) => std::mem::swap(&mut pl.hand[h], &mut pl.discard[j]),
+            Some((_, j)) => std::mem::swap(&mut pl.hand[h], &mut pl.exhaust[j]),
+            None => continue,
+        }
+        have[h] = None;
     }
 }
 
@@ -757,6 +801,7 @@ impl Replayer {
                     adopt_hand_costs(&mut self.c, rec);
                 }
                 adopt_confused_costs(&mut self.c, rec);
+                adopt_copy_costs(&mut self.c, rec);
                 adopt_offer(&mut self.c, rec);
                 adopt_layout(&mut self.c, rec, false);
                 if let Err(e) = adopt_spawn_hp(&mut self.c, rec, self.known_enemies) {

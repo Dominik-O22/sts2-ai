@@ -267,8 +267,14 @@ fn encounter_for(rng: &mut Rng, floor: u32) -> Encounter {
     encounter_of_kind(rng, kind)
 }
 
+/// The encounters the generator draws from: act 1 only, since the run
+/// states it rolls are act 1 run states.
+fn act_one() -> impl Iterator<Item = Encounter> {
+    crate::encounter::ALL.iter().copied().filter(|e| e.act().index() == 0)
+}
+
 pub fn encounter_of_kind(rng: &mut Rng, kind: Kind) -> Encounter {
-    let pool: Vec<Encounter> = crate::encounter::ALL.iter().copied().filter(|e| e.kind() == kind).collect();
+    let pool: Vec<Encounter> = act_one().filter(|e| e.kind() == kind).collect();
     *rng.pick(&pool).unwrap()
 }
 
@@ -402,9 +408,9 @@ mod tests {
     fn holdout_is_deterministic_and_covers_every_encounter() {
         let a = holdout(7, 3, Ascension(10));
         let b = holdout(7, 3, Ascension(10));
-        assert_eq!(a.len(), 3 * crate::encounter::ALL.len());
+        assert_eq!(a.len(), 3 * act_one().count());
         assert!(a.iter().zip(&b).all(|(x, y)| x.encounter == y.encounter && x.deck.len() == y.deck.len() && x.hp == y.hp));
-        assert!(crate::encounter::ALL.iter().all(|e| a.iter().any(|s| s.encounter == *e)));
+        assert!(act_one().all(|e| a.iter().any(|s| s.encounter == e)));
     }
 
     #[test]
@@ -455,8 +461,8 @@ pub fn load_recordings(dir: &std::path::Path) -> Result<(Vec<FightSetup>, Vec<St
 /// every evaluation sees the same decks.
 pub fn holdout(seed: u64, per_encounter: usize, asc: Ascension) -> Vec<FightSetup> {
     let mut rng = Rng::new(seed);
-    let mut out = Vec::with_capacity(per_encounter * crate::encounter::ALL.len());
-    for &enc in crate::encounter::ALL {
+    let mut out = vec![];
+    for enc in act_one() {
         for _ in 0..per_encounter {
             let floor = match enc.kind() {
                 Kind::Weak => 1 + rng.next_int(3) as u32,
