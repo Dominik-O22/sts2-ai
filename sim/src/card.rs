@@ -791,7 +791,8 @@ impl Card {
                     vec![]
                 }
             }
-            // Rampage: permanent damage growth handled at FinishCardPlay via `extra_damage`.
+            // Rampage: the growth into `extra_damage` is applied by the
+            // combat loop as this step starts.
             (Rampage, 1) => vec![],
             _ => vec![],
         }

@@ -182,6 +182,9 @@ pub struct Script {
     /// snapshot. A `gen` record that arrives after the roll (Crossbow's turn
     /// start card follows `turn_start`) rewrites the newest of them.
     pub unforced: Vec<CardId>,
+    /// Cards the recording saw deal damage since the last snapshot. A
+    /// random auto-play (Stampede) picks one of them when it can.
+    pub hit_cards: Vec<CardId>,
 }
 
 /// The parts of `CombatManager.History` that cards and powers read.
@@ -1268,12 +1271,7 @@ impl Combat {
                 self.push_front_all(subs);
             }
             Effect::FinishCardPlay { uid } => {
-                // Rampage/Thrash growth after the play, Rupture's deferred Strength.
-                if let Some(c) = self.find_card_mut(uid) {
-                    if c.id == CardId::Rampage {
-                        c.extra_damage += c.vars().magic;
-                    }
-                }
+                // Rupture's deferred Strength.
                 let owed = std::mem::take(&mut self.stats.rupture_pending);
                 if owed > 0 {
                     self.queue.push_front(Effect::ApplyPower {
@@ -1306,6 +1304,12 @@ impl Combat {
                 self.push_front_all(subs);
             }
             Effect::CardStep { uid, target, step } => {
+                // Rampage.OnPlay grows its damage right after the hit, once
+                // per play and before any after-play hook (Razor Tooth) can
+                // upgrade the increase.
+                if let Some(c) = self.find_card_mut(uid).filter(|c| c.id == CardId::Rampage && step == 1) {
+                    c.extra_damage += c.vars().magic;
+                }
                 let Some(card) = self.find_card(uid).cloned() else { return };
                 let subs = card.step(self, target, step);
                 self.push_front_all(subs);
@@ -1335,7 +1339,19 @@ impl Combat {
             Effect::AutoPlayRandomAttack => {
                 let uids: Vec<u32> =
                     self.player.hand.iter().filter(|c| filter_ok(CardFilter::PlayableAttack, c)).map(|c| c.uid).collect();
-                if let Some(&uid) = self.rngs.shuffle.pick(&uids) {
+                let rolled = self.rngs.shuffle.pick(&uids).copied();
+                let scripted = self.script.hit_cards.iter().enumerate().find_map(|(i, &id)| {
+                    let uid = self.player.hand.iter().find(|c| c.id == id && uids.contains(&c.uid))?.uid;
+                    Some((i, uid))
+                });
+                let pick = match scripted {
+                    Some((i, uid)) => {
+                        self.script.hit_cards.remove(i);
+                        Some(uid)
+                    }
+                    None => rolled,
+                };
+                if let Some(uid) = pick {
                     self.queue.push_front(Effect::AutoPlay { uid, force_exhaust: false });
                 }
             }
@@ -2450,6 +2466,18 @@ impl Combat {
             .powers
             .retain(|p| !(matches!(p.id, PowerId::Constrict | PowerId::Shrink) && p.applier == Some(me)));
         out.extend(self.relic_after_enemy_death());
+        // Creature.RemoveAllPowersAfterDeath, once every death hook has read
+        // them: a power stays only if it outlives its owner
+        // (`ShouldPowerBeRemovedAfterOwnerDeath`). IllusionPower's
+        // `ShouldPowerBeRemovedOnDeath` also keeps an illusion's buffs and
+        // temporary debuffs, which is what it revives with.
+        let illusion = self.enemies[i].creature.power(PowerId::Illusion).is_some();
+        self.enemies[i].creature.powers.retain(|p| {
+            matches!(
+                p.id,
+                PowerId::SteamEruption | PowerId::Minion | PowerId::Adaptable | PowerId::PainfulStabs | PowerId::Reattach
+            ) || (illusion && (!is_debuff(p.id) || crate::power::temp_power(p.id).is_some()))
+        });
         out
     }
 

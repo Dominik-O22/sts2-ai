@@ -210,6 +210,15 @@ public static class Recorder
         PollinousCore p => p.TurnsSeen,
         FakeVenerableTeaSet v => v.GainEnergyInNextCombat ? 1 : 0,
         FurCoat f => r.Owner.RunState.CurrentMapPoint is { } at && f.GetMarkedCoords()?.Contains(at.coord) == true ? 1 : 0,
+        Girya g => g.TimesLifted,
+        PenNib p => p.AttacksPlayed,
+        Nunchaku n => n.AttacksPlayed,
+        TuningFork t => t.SkillsPlayed,
+        JossPaper j => j.CardsExhausted,
+        HappyFlower h => h.TurnsSeen,
+        Pendulum p => p.TurnsSeen,
+        LizardTail l => l.WasUsed ? 1 : 0,
+        VenerableTeaSet v => v.GainEnergyInNextCombat ? 1 : 0,
         _ => null,
     };
 

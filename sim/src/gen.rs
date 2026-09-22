@@ -127,7 +127,10 @@ impl FightSetup {
                         let &id = ids.relics.get(name).ok_or_else(|| format!("unknown relic {name}"))?;
                         let mut r = Relic::new(id);
                         if let Some(n) = start["relic_state"][name].as_i64() {
-                            r.counter = relic_counter(id, n as i32);
+                            match id {
+                                RelicId::LizardTail | RelicId::VenerableTeaSet => r.flag = n != 0,
+                                _ => r.counter = relic_counter(id, n as i32),
+                            }
                         }
                         Ok(r)
                     })
@@ -182,11 +185,15 @@ impl FightSetup {
 }
 
 /// A relic's `counter` from the value the recorder logs for it at combat
-/// setup (`Recorder.RelicState`), which is the game's own field.
+/// setup (`Recorder.RelicState`), which is the game's own field. Lizard
+/// Tail and the Venerable Tea Set log a bool that goes into `flag`.
 fn relic_counter(id: RelicId, game: i32) -> i32 {
     match id {
-        // CardsPlayed only matters modulo the four it fires on.
+        // Counts that only matter modulo the play or turn they fire on,
+        // which is how the sim keeps them.
         RelicId::IronClub => game % 4,
+        RelicId::PenNib => game % 10,
+        RelicId::HappyFlower | RelicId::Pendulum => game % 3,
         _ => game,
     }
 }

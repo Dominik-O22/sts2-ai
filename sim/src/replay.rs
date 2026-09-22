@@ -646,6 +646,7 @@ impl Replayer {
             random_exhausts,
             adopted_offers: vec![],
             unforced: vec![],
+            hit_cards: vec![],
         };
         let mut c = Combat::with_script(&fs.as_setup(seed), script);
         // Enemies that start damaged (the start record is taken at the first decision point).
@@ -797,6 +798,7 @@ impl Replayer {
                     return Ok(Applied::Ok);
                 }
                 self.c.script.unforced.clear();
+                self.c.script.hit_cards.clear();
                 if std::mem::take(&mut self.snecko_pending) {
                     adopt_hand_costs(&mut self.c, rec);
                 }
@@ -849,6 +851,9 @@ impl Replayer {
                 if let (true, Some(t)) = (targeted, rec["target"].as_u64()) {
                     self.c.script.random_targets.push_back(t as usize);
                 }
+                if let Some(&id) = rec["card"].as_str().and_then(|s| self.ids.cards.get(s)) {
+                    self.c.script.hit_cards.push(id);
+                }
                 Ok(Applied::Ok)
             }
             "gen" => {
@@ -885,7 +890,9 @@ impl Replayer {
             }
             "play" => {
                 let key = card_ref(&self.ids, rec)?;
-                if self.pre_played.take() == Some(key) {
+                // By id only: the play record shows the card after it
+                // resolved, which Razor Tooth may have upgraded.
+                if self.pre_played.take().map(|(id, _)| id) == Some(key.0) {
                     return Ok(self.after_action());
                 }
                 self.play(rec)
@@ -1039,6 +1046,14 @@ impl Replayer {
         // interchangeable, but which one leaves the hand changes
         // the discard order and so later random picks.
         let want_idx = rec["hand_idx"].as_u64().map(|i| i as usize);
+        // The play record shows the card after it resolved, so a card its
+        // own play upgraded (Razor Tooth) reads as upgraded. The snapshot
+        // before it shows it as it sat in hand.
+        let up = want_idx
+            .and_then(|i| self.last_hand.get(i))
+            .filter(|k| k["id"] == rec["id"])
+            .and_then(|k| k["up"].as_bool())
+            .unwrap_or(up);
         // The cost the recording showed at that index, which is the
         // only thing separating two otherwise identical cards.
         let want_cost = want_idx.and_then(|i| self.last_hand.get(i)).and_then(|k| k["cost"].as_i64());
