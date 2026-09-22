@@ -97,6 +97,7 @@ public static class Recorder
         {
             Commands.Poll();
             Bridge.Poll();
+            WriteRunState();
             var cm = CombatManager.Instance;
             if (!cm.IsInProgress) return;
             var sync = RunManager.Instance.ActionQueueSynchronizer;
@@ -141,6 +142,45 @@ public static class Recorder
         {
             GD.PrintErr($"[sts2ai] poll failed: {ex.Message}");
         }
+    }
+
+    // ---- run state --------------------------------------------------------
+
+    private static string _lastRunState = "";
+    private static int _runStateFrame;
+
+    /// `sts2ai/run.json`: the run as it stands, in or out of combat, for
+    /// scripts that set fights up (scripts/record.py). Rewritten whenever it
+    /// changes, checked every 15 frames. `active` is false with no run.
+    private static void WriteRunState()
+    {
+        if (++_runStateFrame % 15 != 0) return;
+        var run = RunManager.Instance.DebugOnlyGetState();
+        var me = run == null ? null : LocalContext.GetMe(run);
+        var state = me == null
+            ? new Dictionary<string, object?> { ["active"] = false }
+            : new Dictionary<string, object?>
+            {
+                ["active"] = true,
+                ["ascension"] = run!.AscensionLevel,
+                ["room"] = run.CurrentRoom?.RoomType.ToString(),
+                ["in_combat"] = CombatManager.Instance.IsInProgress,
+                ["dead"] = me.Creature.IsDead,
+                ["hp"] = me.Creature.CurrentHp,
+                ["max_hp"] = me.Creature.MaxHp,
+                ["gold"] = me.Gold,
+                ["deck"] = me.Deck.Cards.Select(CardRef).ToList(),
+                ["relics"] = me.Relics.Select(r => r.Id.Entry).ToList(),
+                ["relic_state"] = me.Relics.Select(r => (r, n: RelicState(r))).Where(x => x.n != null)
+                    .GroupBy(x => x.r.Id.Entry).ToDictionary(g => g.Key, g => g.First().n!.Value),
+                ["potions"] = me.PotionSlots.Select(p => p?.Id.Entry).ToList(),
+            };
+        string json = JsonSerializer.Serialize(state, Json);
+        if (json == _lastRunState) return;
+        _lastRunState = json;
+        string path = Path.Combine(OS.GetUserDataDir(), "sts2ai", "run.json");
+        File.WriteAllText(path + ".tmp", json);
+        File.Move(path + ".tmp", path, overwrite: true);
     }
 
     private static void Open(CombatState state, Player me)

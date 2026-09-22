@@ -114,17 +114,14 @@ def loadout_for(job: "Job") -> Loadout:
 
 
 class Run:
-    """The run's deck, setup relics and max HP, read from the newest
-    recording when the session starts and kept up to date with every change
-    this script sends, so `reach` only sends the difference."""
-
-    def __init__(self) -> None:
-        start = json.loads(newest_start() or "{}")
-        self.deck = Counter(c["id"] for c in start.get("deck", []))
-        self.relics = Counter(start.get("relics", []))
-        self.max_hp = newest_max_hp()
+    """Brings the run to a loadout, reading what it carries from the mod's
+    `run.json` each time, so `reach` only sends the difference."""
 
     def reach(self, target: Loadout) -> None:
+        state = run_state()
+        self.deck = Counter(c["id"] for c in state.get("deck", []))
+        self.relics = Counter(state.get("relics", []))
+        self.max_hp = state.get("max_hp", 80)
         commands = []
         for card in sorted(set(self.deck) | set(target.deck)):
             diff = target.deck.get(card, 0) - self.deck[card]
@@ -392,37 +389,34 @@ def is_finished(path: Path) -> bool:
         return False
 
 
-def newest_start() -> str | None:
-    """The `start` record of the most recent recording, which describes the
-    run as it stands: deck, enchantments, relics, potions."""
-    files = sorted([*RECORDINGS.glob("*.jsonl"), *DEV.glob("*.jsonl")], key=lambda p: p.name)
-    for path in reversed(files):
-        for line in path.read_text().splitlines():
-            if '"t":"start"' in line or '"t": "start"' in line:
-                return line
-    return None
-
-
-def newest_max_hp() -> int:
-    """Max HP at the first decision point of the most recent recording."""
-    files = sorted([*RECORDINGS.glob("*.jsonl"), *DEV.glob("*.jsonl")], key=lambda p: p.name)
-    for path in reversed(files):
-        for line in path.read_text().splitlines():
-            if '"t":"snapshot"' in line:
-                return json.loads(line).get("max_hp", 80)
-    return 80
+def run_state() -> dict:
+    """The run as the game has it right now: `sts2ai/run.json`, which the
+    mod rewrites whenever it changes (deck, relics, potions, HP, room)."""
+    try:
+        return json.loads((GAME_DIR / "run.json").read_text())
+    except (OSError, json.JSONDecodeError):
+        return {"active": False}
 
 
 def blocker() -> str | None:
-    """Something the run is carrying that the sim has never heard of, so every
-    fight will fail on the setup rather than on the rules. A colorless card, a
-    relic from an act that is not ported yet, a potion like Colorless Potion.
-    Cards and relics come off with `remove_card` and `relic remove`; a potion
-    has no remove command, so it has to be used up."""
+    """Why fights cannot be set up from the run as it stands: no run, a dead
+    one, a fight in progress, or something the sim has never heard of (a
+    colorless card, a relic from an unported act, a potion like Colorless
+    Potion), which would make every fight fail on the setup rather than on
+    the rules. Cards and relics come off with `remove_card` and `relic
+    remove`; a potion has no remove command, so it has to be used up."""
     from sts2ai import _sim
 
-    start = newest_start()
-    return _sim.start_blocker(start) if start else None
+    run = run_state()
+    if not run.get("active"):
+        return "no run in progress (start or continue one)"
+    if run.get("dead"):
+        return "a run that is over"
+    if run.get("in_combat"):
+        return "a fight in progress (finish it first)"
+    # The sim checks names the way it reads a recording's start record,
+    # which also names an encounter; any one it knows will do.
+    return _sim.start_blocker(json.dumps({**run, "t": "start", "encounter": "NIBBITS_WEAK", "enemies": [{"id": "NIBBIT"}]}))
 
 
 def wait_for_fight(enc: str, before: set[Path], yours: bool) -> Path | None:
@@ -620,11 +614,7 @@ def main() -> None:
         picked = []
 
     if (why := blocker()) is not None:
-        sys.exit(
-            f"\nthe run is carrying something the sim does not know: {why}\n"
-            "every fight would fail on the setup, not on the rules. a card or relic can come\n"
-            "off with `remove_card` or `relic remove`; a potion needs using or a new run."
-        )
+        sys.exit(f"\ncannot set fights up: the game has {why}.")
     if not picked and not args.queue:
         print("\nnothing to record.")
         return
@@ -643,8 +633,8 @@ def main() -> None:
             for job in picked:
                 for _ in range(args.repeat):
                     results = run_job(job, pilot, run)
-                    if results and results[-1][1].startswith("ERR") and (why := blocker()) is not None:
-                        print(f"\nstopping: the run is carrying {why}")
+                    if (why := blocker()) is not None:
+                        print(f"\nstopping: the game has {why}")
                         return
                 (clean if results and all(ok for ok, _ in results) else failed).append(job.name)
             if not args.queue:
