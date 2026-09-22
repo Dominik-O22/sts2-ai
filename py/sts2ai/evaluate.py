@@ -2,8 +2,9 @@
 
     uv run python -m sts2ai.evaluate runs/<name>/latest.pt [--source holdout|recordings]
 
-`holdout` is a fixed generated set: ten fights per act 1 encounter on
-floors that encounter appears on, the same decks every time. `recordings`
+`holdout` is a fixed generated set: ten fights per encounter on floors
+that encounter appears on, the same decks every time; `--acts 1` keeps it
+to act 1, the set checkpoints before set-4 were measured on. `recordings`
 are fights the recorder mod saw in real runs: the decks a person built,
 which is the number that says whether the advisor can be trusted. The
 generator's decks are not those decks (docs/training.md, Real decks).
@@ -24,6 +25,12 @@ from sts2ai.model import Policy, load_policy, masked_logits
 HOLDOUT_PER_ENCOUNTER = 10
 
 
+def act_of(floor: int) -> int:
+    """The act (1-based) a generated fight's floor is in. Recordings carry
+    floor 0 and count as act 1."""
+    return max(0, floor - 1) // 16 + 1
+
+
 @torch.no_grad()
 def evaluate(
     policy: Policy,
@@ -32,6 +39,7 @@ def evaluate(
     source: str = "holdout",
     recordings: Path = DEFAULT_RECORDINGS,
     seed: int = 12345,
+    acts: int = 3,
 ) -> tuple[float, dict[str, tuple[int, int]], dict[str, float]]:
     """Plays every setup in the set `repeats` times (different shuffles),
     one env per setup so each gets exactly that many fights. Returns the
@@ -39,10 +47,10 @@ def evaluate(
     if source == "recordings" and not has_recordings(recordings):
         raise SystemExit(f"no run recordings in {recordings}; play with the recorder mod on (dev-console fights sit in dev/)")
     probe = Envs(1, seed=seed)
-    n = probe.use_holdout(seed, HOLDOUT_PER_ENCOUNTER) if source == "holdout" else probe.load_recordings(recordings)
+    n = probe.use_holdout(seed, HOLDOUT_PER_ENCOUNTER, acts) if source == "holdout" else probe.load_recordings(recordings)
     envs = Envs(n, seed=seed)
     if source == "holdout":
-        envs.use_holdout(seed, HOLDOUT_PER_ENCOUNTER)
+        envs.use_holdout(seed, HOLDOUT_PER_ENCOUNTER, acts)
     else:
         envs.load_recordings(recordings)
     per_env = [0] * n
@@ -61,8 +69,12 @@ def evaluate(
     for e in ends:
         w, n = by_enc[e.encounter]
         by_enc[e.encounter] = (w + e.won, n + 1)
+    # Act 1 keys stay plain ("boss"), later acts get a prefix ("a2_boss").
     by_kind = {
-        k.lower(): float(np.mean(won)) for k in ("Weak", "Normal", "Elite", "Boss") if (won := [e.won for e in ends if e.kind == k])
+        f"{'' if a == 1 else f'a{a}_'}{k.lower()}": float(np.mean(won))
+        for a in (1, 2, 3)
+        for k in ("Weak", "Normal", "Elite", "Boss")
+        if (won := [e.won for e in ends if e.kind == k and act_of(e.floor) == a])
     }
     return float(np.mean([e.won for e in ends])), dict(by_enc), by_kind
 
@@ -74,12 +86,13 @@ def main() -> None:
     ap.add_argument("--source", choices=["holdout", "recordings"], default="holdout")
     ap.add_argument("--repeats", type=int, default=2, help="fights per setup")
     ap.add_argument("--recordings", type=Path, default=DEFAULT_RECORDINGS)
+    ap.add_argument("--acts", type=int, default=3, help="acts the holdout covers")
     args = ap.parse_args()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     policy = Policy(Layout.load()).to(device)
     load_policy(args.checkpoint, policy, device, args.old_vocab)
     policy.eval()
-    win, by_enc, by_kind = evaluate(policy, device, args.repeats, args.source, args.recordings)
+    win, by_enc, by_kind = evaluate(policy, device, args.repeats, args.source, args.recordings, acts=args.acts)
     for enc, (w, n) in sorted(by_enc.items()):
         print(f"{enc:32s} {w:4d}/{n:<4d} {w / n:6.1%}")
     print("  ".join(f"{k} {v:.1%}" for k, v in by_kind.items()))

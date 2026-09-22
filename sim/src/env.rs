@@ -9,7 +9,7 @@ use rayon::prelude::*;
 use crate::combat::{Combat, Outcome, RoomKind};
 use crate::encode::{self, N_ACTIONS, N_FLOATS, N_IDS};
 use crate::encounter::{Encounter, Kind};
-use crate::gen::{encounter_of_kind, generate, generate_against, FightSetup, BOSS_FLOOR};
+use crate::gen::{act_floor, encounter_of_kind, generate, generate_against, FightSetup, BOSS_FLOOR, LAST_FLOOR};
 use crate::rng::{CombatRngs, Rng};
 use crate::types::{Ascension, AscensionLevel};
 
@@ -29,7 +29,7 @@ pub struct EnvConfig {
 
 impl Default for EnvConfig {
     fn default() -> Self {
-        Self { asc: Ascension(10), min_floor: 1, max_floor: BOSS_FLOOR, max_steps: 500, hard_frac: 0.0 }
+        Self { asc: Ascension(10), min_floor: 1, max_floor: LAST_FLOOR, max_steps: 500, hard_frac: 0.0 }
     }
 }
 
@@ -133,17 +133,31 @@ struct Slot {
 }
 
 impl Slot {
+    /// Start the next fight. One already over before the first decision
+    /// (Whispering Earring can win turn 1 on its own) is skipped: there is
+    /// nothing in it to act on.
     fn reset(&mut self, index: usize, n: usize, cfg: &EnvConfig, fixed: &[FightSetup]) {
+        loop {
+            self.roll(index, n, cfg, fixed);
+            if !self.combat.is_over() {
+                return;
+            }
+        }
+    }
+
+    fn roll(&mut self, index: usize, n: usize, cfg: &EnvConfig, fixed: &[FightSetup]) {
         self.setup = if !fixed.is_empty() {
             fixed[(index + self.resets * n) % fixed.len()].clone()
         } else if self.rng.next_float(1.0) < cfg.hard_frac {
-            let (kind, floor) = if self.rng.next_int(2) == 0 {
+            // An act the floor range reaches, then its boss or an elite.
+            let act = act_floor(cfg.min_floor).0 + self.rng.next_int((act_floor(cfg.max_floor).0 - act_floor(cfg.min_floor).0 + 1) as usize) as u32;
+            let (kind, local) = if self.rng.next_int(2) == 0 {
                 (Kind::Boss, BOSS_FLOOR)
             } else {
                 (Kind::Elite, 5 + self.rng.next_int((BOSS_FLOOR - 5) as usize) as u32)
             };
-            let enc = encounter_of_kind(&mut self.rng, kind);
-            generate_against(&mut self.rng, floor, cfg.asc, enc)
+            let enc = encounter_of_kind(&mut self.rng, act, kind);
+            generate_against(&mut self.rng, act * BOSS_FLOOR + local, cfg.asc, enc)
         } else {
             let floor = cfg.min_floor + self.rng.next_int((cfg.max_floor - cfg.min_floor + 1) as usize) as u32;
             generate(&mut self.rng, floor, cfg.asc)
@@ -214,8 +228,8 @@ impl VecEnv {
     }
 
     pub fn set_floors(&mut self, min: u32, max: u32) {
-        self.cfg.min_floor = min.clamp(1, BOSS_FLOOR);
-        self.cfg.max_floor = max.clamp(self.cfg.min_floor, BOSS_FLOOR);
+        self.cfg.min_floor = min.clamp(1, LAST_FLOOR);
+        self.cfg.max_floor = max.clamp(self.cfg.min_floor, LAST_FLOOR);
     }
 
     /// Evaluate on fixed setups (the recordings) instead of generated ones.

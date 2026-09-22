@@ -22,9 +22,10 @@ maturin from `sim-py/` into the package `sts2ai._sim`.
 - `sim/src/gen.rs`: `generate(rng, floor, asc)` rolls a run state for a
   fight on that floor: starter deck plus about two picks per three floors,
   occasional upgrades and removals, a relic every four floors, potions in a
-  third of the slots, HP between 40% and 100% (70% and up at the boss,
-  which follows a rest site). Floors 1-3 draw weak
-  encounters, 5-15 add elites, 16 is the boss. `FightSetup::from_recording`
+  third of the slots, an Ancient relic per act after the first, HP between
+  40% and 100% (70% and up at the boss, which follows a rest site). Floors
+  run 1 to 48, sixteen per act: in each act the first floors draw weak
+  encounters (3 in act 1, 2 later), 5-15 add elites, the 16th is the boss. `FightSetup::from_recording`
   turns a recorder file into the same struct, which is how the recordings
   become the held-out set. Encounters from both act 1 variants (Overgrowth
   and Underdocks) are drawn from one pool: each fight is independent, so
@@ -75,8 +76,8 @@ maturin from `sim-py/` into the package `sts2ai._sim`.
 ## Curriculum
 
 `--floor-start 4 --floor-ramp 500`: fights come from floors 1 to
-`max_floor`, and `max_floor` grows from 4 to 16 over the first 500
-iterations. Weak fights stay in the mix so the policy keeps them. Once the
+`max_floor`, and `max_floor` grows from 4 to the last boss floor
+(16 x `--acts`, 48 by default) over the first 500 iterations. Weak fights stay in the mix so the policy keeps them. Once the
 ramp is done, `--hard-frac 0.4` forces that share of fights onto an elite or
 the boss, since normal fights are nearly always won by then.
 

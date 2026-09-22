@@ -10,7 +10,7 @@ use pyo3::types::PyDict;
 use serde_json::Value;
 use sim::encode::*;
 use sim::env::{EnvConfig, Forks as InnerForks, VecEnv as Inner};
-use sim::gen::{holdout, load_recordings, BOSS_FLOOR};
+use sim::gen::{holdout, load_recordings, ACTS, LAST_FLOOR};
 use sim::ids::{ALL_CARDS, ALL_MONSTERS};
 use sim::replay::{command, Ids, Replayer, Step};
 use sim::types::Ascension;
@@ -33,7 +33,7 @@ impl VecEnv {
 #[pymethods]
 impl VecEnv {
     #[new]
-    #[pyo3(signature = (n, seed=0, asc=10, min_floor=1, max_floor=BOSS_FLOOR, max_steps=500, hard_frac=0.0))]
+    #[pyo3(signature = (n, seed=0, asc=10, min_floor=1, max_floor=LAST_FLOOR, max_steps=500, hard_frac=0.0))]
     fn new(n: usize, seed: u64, asc: u8, min_floor: u32, max_floor: u32, max_steps: u32, hard_frac: f32) -> Self {
         let cfg = EnvConfig { asc: Ascension(asc), min_floor, max_floor, max_steps, hard_frac };
         Self { inner: Inner::new(n, seed, cfg) }
@@ -54,10 +54,11 @@ impl VecEnv {
     }
 
     /// Switch to cycling through a fixed generated set: `per_encounter`
-    /// fights against every act 1 encounter, always the same for a seed.
-    #[pyo3(signature = (seed=0, per_encounter=10))]
-    fn use_holdout(&mut self, seed: u64, per_encounter: usize) -> usize {
-        let setups = holdout(seed, per_encounter, self.inner_asc());
+    /// fights against every encounter of the first `acts` acts, always the
+    /// same for a seed.
+    #[pyo3(signature = (seed=0, per_encounter=10, acts=ACTS))]
+    fn use_holdout(&mut self, seed: u64, per_encounter: usize, acts: u32) -> usize {
+        let setups = holdout(seed, per_encounter, self.inner_asc(), acts);
         let n = setups.len();
         self.inner.set_fixed(setups);
         n

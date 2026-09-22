@@ -1,5 +1,5 @@
-//! Fight setups for training. A generator rolls plausible act 1 run states
-//! keyed on the floor the fight happens at (DESIGN.md, Training: "wide, not
+//! Fight setups for training. A generator rolls plausible run states keyed
+//! on the floor the fight happens at, across all three acts (DESIGN.md, Training: "wide, not
 //! clever"), and `FightSetup::from_recording` reads the recorder's `start`
 //! record so real fights form the held-out set.
 
@@ -39,8 +39,19 @@ const INERT_RELICS: &[&str] = &[
     "WAR_HAMMER", "WINGED_BOOTS", "WONGO_CUSTOMER_APPRECIATION_BADGE", "WONGOS_MYSTERY_TICKET", "YUMMY_COOKIE",
 ];
 
-/// Last floor of act 1: the boss room.
+/// Floors per act, the last one the boss room. Real acts run 13 to 15
+/// rooms plus the Ancient and the boss; one length for all keeps a floor's
+/// act a division.
 pub const BOSS_FLOOR: u32 = 16;
+/// Acts the generator rolls fights for.
+pub const ACTS: u32 = 3;
+/// The last boss room of the run.
+pub const LAST_FLOOR: u32 = BOSS_FLOOR * ACTS;
+
+/// Which act (0-based) a run floor is in, and the floor within that act.
+pub fn act_floor(floor: u32) -> (u32, u32) {
+    ((floor - 1) / BOSS_FLOOR, (floor - 1) % BOSS_FLOOR + 1)
+}
 
 /// An owned `Setup`: everything a combat needs from the run.
 #[derive(Clone, Debug)]
@@ -258,47 +269,49 @@ fn enchant_one(rng: &mut Rng, deck: &mut [Card]) {
     deck[i].enchant(id, rng.next_int(3) as i32 + 1);
 }
 
-/// Which encounters a floor can hold. Floors 1-3 are the weak pool, the
-/// boss floor is a boss, elites appear from floor 5 (`Overgrowth.cs`
-/// places the first elite after the weak stretch).
+/// Which encounters a floor can hold. The first floors of an act are the
+/// weak pool (`NumberOfWeakEncounters`: 3 in act 1, 2 after), the act's
+/// last floor is its boss, elites appear from its floor 5.
 fn encounter_for(rng: &mut Rng, floor: u32) -> Encounter {
-    let kind = if floor >= BOSS_FLOOR {
+    let (act, local) = act_floor(floor);
+    let weak = if act == 0 { 3 } else { 2 };
+    let kind = if local == BOSS_FLOOR {
         Kind::Boss
-    } else if floor <= 3 {
+    } else if local <= weak {
         Kind::Weak
-    } else if floor >= 5 && rng.next_int(4) == 0 {
+    } else if local >= 5 && rng.next_int(4) == 0 {
         Kind::Elite
     } else {
         Kind::Normal
     };
-    encounter_of_kind(rng, kind)
+    encounter_of_kind(rng, act, kind)
 }
 
-/// The encounters the generator draws from: act 1 only, since the run
-/// states it rolls are act 1 run states.
-fn act_one() -> impl Iterator<Item = Encounter> {
-    crate::encounter::ALL.iter().copied().filter(|e| e.act().index() == 0)
+/// The encounters of act `act` (0-based); act 1 is Overgrowth and
+/// Underdocks together.
+fn act_encounters(act: u32) -> impl Iterator<Item = Encounter> {
+    crate::encounter::ALL.iter().copied().filter(move |e| e.act().index() as u32 == act)
 }
 
-pub fn encounter_of_kind(rng: &mut Rng, kind: Kind) -> Encounter {
-    let pool: Vec<Encounter> = act_one().filter(|e| e.kind() == kind).collect();
+pub fn encounter_of_kind(rng: &mut Rng, act: u32, kind: Kind) -> Encounter {
+    let pool: Vec<Encounter> = act_encounters(act).filter(|e| e.kind() == kind).collect();
     *rng.pick(&pool).unwrap()
 }
 
-/// Roll a run state for a fight on `floor` (1 to `BOSS_FLOOR`), against an
-/// encounter the floor can hold. Numbers
-/// are rough act 1 averages: about two card picks per three floors, an
-/// upgrade every six floors, a relic every four, potions used as fast as
-/// they come.
+/// Roll a run state for a fight on `floor` (1 to `LAST_FLOOR`), against an
+/// encounter the floor can hold. Numbers are rough act 1 averages, kept for
+/// the later acts: about two card picks per three floors, an upgrade every
+/// six floors, a relic every four, potions used as fast as they come, and
+/// an Ancient relic at the start of each act after the first.
 pub fn generate(rng: &mut Rng, floor: u32, asc: Ascension) -> FightSetup {
-    let floor = floor.clamp(1, BOSS_FLOOR);
+    let floor = floor.clamp(1, LAST_FLOOR);
     let encounter = encounter_for(rng, floor);
     generate_against(rng, floor, asc, encounter)
 }
 
 /// `generate` for a chosen encounter, used to oversample elites and bosses.
 pub fn generate_against(rng: &mut Rng, floor: u32, asc: Ascension, encounter: Encounter) -> FightSetup {
-    let floor = floor.clamp(1, BOSS_FLOOR);
+    let floor = floor.clamp(1, LAST_FLOOR);
     let mut deck = ironclad_starter_deck();
     if asc.has(AscensionLevel::AscendersBane) {
         deck.push(Card::new(0, CardId::AscendersBane, false));
@@ -353,6 +366,11 @@ pub fn generate_against(rng: &mut Rng, floor: u32, asc: Ascension, encounter: En
         let i = rng.next_int(relic_pool.len());
         relics.push(Relic::new(relic_pool.swap_remove(i)));
     }
+    let mut ancients = relic::ANCIENT.to_vec();
+    for _ in 0..act_floor(floor).0 {
+        let i = rng.next_int(ancients.len());
+        relics.push(Relic::new(ancients.swap_remove(i)));
+    }
     let slots = if relics.iter().any(|r| r.id == RelicId::PotionBelt) { 4 } else { 2 };
     let potions: Vec<Option<PotionId>> =
         (0..slots).map(|_| if rng.next_int(3) == 0 { Some(*rng.pick(potion::ALL).unwrap()) } else { None }).collect();
@@ -396,7 +414,7 @@ mod tests {
     fn generated_setups_run_to_completion() {
         let mut rng = Rng::new(42);
         for i in 0..300u64 {
-            let floor = 1 + (i % BOSS_FLOOR as u64) as u32;
+            let floor = 1 + (i % LAST_FLOOR as u64) as u32;
             let s = generate(&mut rng, floor, Ascension(10));
             assert!(s.deck.len() >= 8 && s.hp >= 1 && s.hp <= s.max_hp);
             assert_eq!(s.relics[0].id, RelicId::BurningBlood);
@@ -413,11 +431,11 @@ mod tests {
 
     #[test]
     fn holdout_is_deterministic_and_covers_every_encounter() {
-        let a = holdout(7, 3, Ascension(10));
-        let b = holdout(7, 3, Ascension(10));
-        assert_eq!(a.len(), 3 * act_one().count());
+        let a = holdout(7, 3, Ascension(10), ACTS);
+        let b = holdout(7, 3, Ascension(10), ACTS);
+        assert_eq!(a.len(), 3 * crate::encounter::ALL.len());
         assert!(a.iter().zip(&b).all(|(x, y)| x.encounter == y.encounter && x.deck.len() == y.deck.len() && x.hp == y.hp));
-        assert!(act_one().all(|e| a.iter().any(|s| s.encounter == e)));
+        assert!(a.iter().all(|s| act_floor(s.floor).0 == s.encounter.act().index() as u32));
     }
 
     #[test]
@@ -436,6 +454,9 @@ mod tests {
             assert_eq!(generate(&mut rng, 1, Ascension(10)).encounter.kind(), Kind::Weak);
             assert_eq!(generate(&mut rng, BOSS_FLOOR, Ascension(10)).encounter.kind(), Kind::Boss);
             assert_ne!(generate(&mut rng, 4, Ascension(10)).encounter.kind(), Kind::Elite);
+            let s = generate(&mut rng, LAST_FLOOR, Ascension(10));
+            assert_eq!((s.encounter.act().index(), s.encounter.kind()), (2, Kind::Boss));
+            assert_eq!(generate(&mut rng, BOSS_FLOOR + 1, Ascension(10)).encounter.act().index(), 1);
         }
     }
 }
@@ -464,20 +485,23 @@ pub fn load_recordings(dir: &std::path::Path) -> Result<(Vec<FightSetup>, Vec<St
 }
 
 /// A fixed held-out set: `per_encounter` generated fights against every
-/// act 1 encounter, on floors that encounter can appear on. Seeded, so
+/// encounter of `acts`, on floors that encounter can appear on. Seeded, so
 /// every evaluation sees the same decks.
-pub fn holdout(seed: u64, per_encounter: usize, asc: Ascension) -> Vec<FightSetup> {
+pub fn holdout(seed: u64, per_encounter: usize, asc: Ascension, acts: u32) -> Vec<FightSetup> {
     let mut rng = Rng::new(seed);
     let mut out = vec![];
-    for enc in act_one() {
-        for _ in 0..per_encounter {
-            let floor = match enc.kind() {
-                Kind::Weak => 1 + rng.next_int(3) as u32,
-                Kind::Normal => 4 + rng.next_int(12) as u32,
-                Kind::Elite => 5 + rng.next_int(11) as u32,
-                Kind::Boss => BOSS_FLOOR,
-            };
-            out.push(generate_against(&mut rng, floor, asc, enc));
+    for act in 0..acts.clamp(1, ACTS) {
+        let weak = if act == 0 { 3 } else { 2 };
+        for enc in act_encounters(act) {
+            for _ in 0..per_encounter {
+                let local = match enc.kind() {
+                    Kind::Weak => 1 + rng.next_int(weak as usize) as u32,
+                    Kind::Normal => weak + 1 + rng.next_int((BOSS_FLOOR - weak - 1) as usize) as u32,
+                    Kind::Elite => 5 + rng.next_int(11) as u32,
+                    Kind::Boss => BOSS_FLOOR,
+                };
+                out.push(generate_against(&mut rng, act * BOSS_FLOOR + local, asc, enc));
+            }
         }
     }
     out

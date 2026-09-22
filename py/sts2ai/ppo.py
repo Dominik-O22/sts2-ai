@@ -42,8 +42,10 @@ class Config:
     value_coef: float = 0.5
     max_grad_norm: float = 0.5
     seed: int = 0
+    # Acts fights come from, each `BOSS_FLOOR` floors long.
+    acts: int = 3
     # Curriculum: fights come from floors 1..max_floor, and max_floor grows
-    # linearly from `floor_start` to the boss floor over `floor_ramp` iters.
+    # linearly from `floor_start` to the last boss floor over `floor_ramp` iters.
     floor_start: int = 4
     floor_ramp: int = 500
     # Once the ramp is done, this fraction of fights is forced onto an
@@ -55,7 +57,7 @@ class Config:
     recordings: Path = DEFAULT_RECORDINGS
     run_dir: Path = Path("runs") / time.strftime("%Y%m%d-%H%M%S")
     # Checkpoint to continue from. Skips the floor ramp: the policy already
-    # handles the early floors, so fights come from all of act 1 at once.
+    # handles the early floors, so fights come from every act at once.
     resume: Path | None = None
     # vocab.txt the resumed checkpoint was trained with, for checkpoints
     # from before the vocabulary was stored in them.
@@ -168,7 +170,8 @@ def train(cfg: Config) -> Policy:
     step0 = global_step
     t0 = time.time()
     for it in range(start_iter, start_iter + cfg.iters):
-        max_floor = BOSS_FLOOR if cfg.resume else min(BOSS_FLOOR, cfg.floor_start + (BOSS_FLOOR - cfg.floor_start) * it // max(1, cfg.floor_ramp))
+        last = BOSS_FLOOR * cfg.acts
+        max_floor = last if cfg.resume else min(last, cfg.floor_start + (last - cfg.floor_start) * it // max(1, cfg.floor_ramp))
         envs.set_floors(1, max_floor)
         envs.set_hard_frac(cfg.hard_frac if max_floor >= BOSS_FLOOR else 0.0)
 
@@ -259,7 +262,7 @@ def train(cfg: Config) -> Policy:
         if it % cfg.eval_every == 0 or it == start_iter + cfg.iters - 1:
             save_checkpoint(cfg.run_dir / "latest.pt", policy, opt, it, global_step)
             policy.eval()
-            win, _, by_kind = evaluate(policy, device, cfg.eval_repeats)
+            win, _, by_kind = evaluate(policy, device, cfg.eval_repeats, acts=cfg.acts)
             writer.add_scalar("eval/holdout_win_rate", win, global_step)
             for k, v in by_kind.items():
                 writer.add_scalar(f"eval/holdout_win_{k}", v, global_step)
