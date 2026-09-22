@@ -173,15 +173,27 @@ fn encounter_for(rng: &mut Rng, floor: u32) -> Encounter {
     } else {
         Kind::Normal
     };
+    encounter_of_kind(rng, kind)
+}
+
+pub fn encounter_of_kind(rng: &mut Rng, kind: Kind) -> Encounter {
     let pool: Vec<Encounter> = crate::encounter::ALL.iter().copied().filter(|e| e.kind() == kind).collect();
     *rng.pick(&pool).unwrap()
 }
 
-/// Roll a run state for a fight on `floor` (1 to `BOSS_FLOOR`). Numbers
+/// Roll a run state for a fight on `floor` (1 to `BOSS_FLOOR`), against an
+/// encounter the floor can hold. Numbers
 /// are rough act 1 averages: about two card picks per three floors, an
 /// upgrade every six floors, a relic every four, potions used as fast as
 /// they come.
 pub fn generate(rng: &mut Rng, floor: u32, asc: Ascension) -> FightSetup {
+    let floor = floor.clamp(1, BOSS_FLOOR);
+    let encounter = encounter_for(rng, floor);
+    generate_against(rng, floor, asc, encounter)
+}
+
+/// `generate` for a chosen encounter, used to oversample elites and bosses.
+pub fn generate_against(rng: &mut Rng, floor: u32, asc: Ascension, encounter: Encounter) -> FightSetup {
     let floor = floor.clamp(1, BOSS_FLOOR);
     let mut deck = ironclad_starter_deck();
     if asc.has(AscensionLevel::AscendersBane) {
@@ -235,7 +247,6 @@ pub fn generate(rng: &mut Rng, floor: u32, asc: Ascension) -> FightSetup {
     let potions: Vec<Option<PotionId>> =
         (0..slots).map(|_| if rng.next_int(3) == 0 { Some(*rng.pick(potion::ALL).unwrap()) } else { None }).collect();
 
-    let encounter = encounter_for(rng, floor);
     let room = match encounter.kind() {
         Kind::Elite => RoomKind::Elite,
         Kind::Boss => RoomKind::Boss,

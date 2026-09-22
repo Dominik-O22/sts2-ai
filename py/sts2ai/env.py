@@ -60,6 +60,7 @@ class End(NamedTuple):
     steps: int
     floor: int
     encounter: str
+    kind: str
     reward: float
 
 
@@ -91,6 +92,9 @@ class Envs:
 
     def set_floors(self, lo: int, hi: int) -> None:
         self.sim.set_floors(lo, hi)
+
+    def set_hard_frac(self, frac: float) -> None:
+        self.sim.set_hard_frac(frac)
 
     def load_recordings(self, directory: Path = DEFAULT_RECORDINGS) -> int:
         """Cycle through recorded fights instead of generated ones."""

@@ -43,6 +43,9 @@ class Config:
     # linearly from `floor_start` to the boss floor over `floor_ramp` iters.
     floor_start: int = 4
     floor_ramp: int = 500
+    # Once the ramp is done, this fraction of fights is forced onto an
+    # elite or boss; normal fights are won almost always by then.
+    hard_frac: float = 0.4
     eval_every: int = 50
     eval_episodes: int = 200
     recordings: Path = DEFAULT_RECORDINGS
@@ -102,11 +105,10 @@ class Stats:
             "ep_len": float(np.mean([e.steps for e in self.ends])),
             "reward": float(np.mean([e.reward for e in self.ends])),
         }
-        by_floor = {"weak": (1, 3), "normal": (4, 15), "boss": (16, 16)}
-        for name, (lo, hi) in by_floor.items():
-            won = [e.won for e in self.ends if lo <= e.floor <= hi]
+        for kind in ("Weak", "Normal", "Elite", "Boss"):
+            won = [e.won for e in self.ends if e.kind == kind]
             if won:
-                out[f"win_{name}"] = float(np.mean(won))
+                out[f"win_{kind.lower()}"] = float(np.mean(won))
         return out
 
 
@@ -139,6 +141,7 @@ def train(cfg: Config) -> Policy:
     for it in range(start_iter, start_iter + cfg.iters):
         max_floor = BOSS_FLOOR if cfg.resume else min(BOSS_FLOOR, cfg.floor_start + (BOSS_FLOOR - cfg.floor_start) * it // max(1, cfg.floor_ramp))
         envs.set_floors(1, max_floor)
+        envs.set_hard_frac(cfg.hard_frac if max_floor >= BOSS_FLOOR else 0.0)
 
         # Rollout.
         policy.eval()

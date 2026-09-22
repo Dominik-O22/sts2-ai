@@ -8,8 +8,8 @@ use rayon::prelude::*;
 
 use crate::combat::{Combat, Outcome};
 use crate::encode::{self, N_ACTIONS, N_FLOATS, N_IDS};
-use crate::encounter::Encounter;
-use crate::gen::{generate, FightSetup, BOSS_FLOOR};
+use crate::encounter::{Encounter, Kind};
+use crate::gen::{encounter_of_kind, generate, generate_against, FightSetup, BOSS_FLOOR};
 use crate::rng::Rng;
 use crate::types::Ascension;
 
@@ -21,11 +21,15 @@ pub struct EnvConfig {
     pub max_floor: u32,
     /// A fight still running after this many actions counts as lost.
     pub max_steps: u32,
+    /// Fraction of resets that skip the floor roll and take an elite (on a
+    /// floor from 5 up) or the boss instead, half each. The rest of the
+    /// resets still roll elites and bosses at their natural rate.
+    pub hard_frac: f32,
 }
 
 impl Default for EnvConfig {
     fn default() -> Self {
-        Self { asc: Ascension(10), min_floor: 1, max_floor: BOSS_FLOOR, max_steps: 500 }
+        Self { asc: Ascension(10), min_floor: 1, max_floor: BOSS_FLOOR, max_steps: 500, hard_frac: 0.0 }
     }
 }
 
@@ -40,6 +44,7 @@ pub struct EpisodeEnd {
     pub steps: u32,
     pub floor: u32,
     pub encounter: Encounter,
+    pub kind: Kind,
     pub reward: f32,
 }
 
@@ -66,11 +71,19 @@ struct Slot {
 
 impl Slot {
     fn reset(&mut self, index: usize, n: usize, cfg: &EnvConfig, fixed: &[FightSetup]) {
-        self.setup = if fixed.is_empty() {
+        self.setup = if !fixed.is_empty() {
+            fixed[(index + self.resets * n) % fixed.len()].clone()
+        } else if self.rng.next_float(1.0) < cfg.hard_frac {
+            let (kind, floor) = if self.rng.next_int(2) == 0 {
+                (Kind::Boss, BOSS_FLOOR)
+            } else {
+                (Kind::Elite, 5 + self.rng.next_int((BOSS_FLOOR - 5) as usize) as u32)
+            };
+            let enc = encounter_of_kind(&mut self.rng, kind);
+            generate_against(&mut self.rng, floor, cfg.asc, enc)
+        } else {
             let floor = cfg.min_floor + self.rng.next_int((cfg.max_floor - cfg.min_floor + 1) as usize) as u32;
             generate(&mut self.rng, floor, cfg.asc)
-        } else {
-            fixed[(index + self.resets * n) % fixed.len()].clone()
         };
         self.resets += 1;
         self.steps = 0;
@@ -87,6 +100,7 @@ impl Slot {
             steps: self.steps,
             floor: self.setup.floor,
             encounter: self.setup.encounter,
+            kind: self.setup.encounter.kind(),
             reward: terminal_reward(c),
         }
     }
@@ -124,6 +138,10 @@ impl VecEnv {
 
     /// Curriculum knob: which floors generated fights come from. Takes
     /// effect at each env's next reset.
+    pub fn set_hard_frac(&mut self, frac: f32) {
+        self.cfg.hard_frac = frac.clamp(0.0, 1.0);
+    }
+
     pub fn set_floors(&mut self, min: u32, max: u32) {
         self.cfg.min_floor = min.clamp(1, BOSS_FLOOR);
         self.cfg.max_floor = max.clamp(self.cfg.min_floor, BOSS_FLOOR);
@@ -243,6 +261,15 @@ mod tests {
             ended += ends.len();
         }
         assert!(ended > n, "fights should have ended and restarted");
+    }
+
+    #[test]
+    fn hard_frac_forces_elites_and_bosses() {
+        let cfg = EnvConfig { hard_frac: 1.0, ..Default::default() };
+        let env = VecEnv::new(200, 3, cfg);
+        assert!(env.slots.iter().all(|s| matches!(s.setup.encounter.kind(), Kind::Elite | Kind::Boss)));
+        assert!(env.slots.iter().any(|s| s.setup.encounter.kind() == Kind::Boss));
+        assert!(env.slots.iter().any(|s| s.setup.encounter.kind() == Kind::Elite));
     }
 
     #[test]

@@ -47,10 +47,12 @@ maturin from `sim-py/` into the package `sts2ai._sim`.
 
 `--floor-start 4 --floor-ramp 500`: fights come from floors 1 to
 `max_floor`, and `max_floor` grows from 4 to 16 over the first 500
-iterations. Weak fights stay in the mix so the policy keeps them.
+iterations. Weak fights stay in the mix so the policy keeps them. Once the
+ramp is done, `--hard-frac 0.4` forces that share of fights onto an elite or
+the boss, since normal fights are nearly always won by then.
 
 ## What to watch
 
-`episode/win_rate` and `episode/win_boss` in TensorBoard, and
+`episode/win_rate` and `episode/win_boss` (also `win_elite`) in TensorBoard, and
 `eval/recorded_win_rate` every `--eval-every` iterations. The milestone
 in DESIGN.md is 80% on the act 1 boss from real-run decks.

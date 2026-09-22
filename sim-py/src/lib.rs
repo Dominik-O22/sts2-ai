@@ -18,20 +18,25 @@ struct VecEnv {
     inner: Inner,
 }
 
-/// One finished fight: (env, won, hp_frac, hp_lost, steps, floor, encounter, reward).
-type End = (usize, bool, f32, f32, u32, u32, String, f32);
+/// One finished fight: (env, won, hp_frac, hp_lost, steps, floor, encounter, kind, reward).
+type End = (usize, bool, f32, f32, u32, u32, String, String, f32);
 
 #[pymethods]
 impl VecEnv {
     #[new]
-    #[pyo3(signature = (n, seed=0, asc=10, min_floor=1, max_floor=BOSS_FLOOR, max_steps=500))]
-    fn new(n: usize, seed: u64, asc: u8, min_floor: u32, max_floor: u32, max_steps: u32) -> Self {
-        let cfg = EnvConfig { asc: Ascension(asc), min_floor, max_floor, max_steps };
+    #[pyo3(signature = (n, seed=0, asc=10, min_floor=1, max_floor=BOSS_FLOOR, max_steps=500, hard_frac=0.0))]
+    fn new(n: usize, seed: u64, asc: u8, min_floor: u32, max_floor: u32, max_steps: u32, hard_frac: f32) -> Self {
+        let cfg = EnvConfig { asc: Ascension(asc), min_floor, max_floor, max_steps, hard_frac };
         Self { inner: Inner::new(n, seed, cfg) }
     }
 
     fn __len__(&self) -> usize {
         self.inner.len()
+    }
+
+    /// Curriculum: fraction of resets forced onto an elite or boss.
+    fn set_hard_frac(&mut self, frac: f32) {
+        self.inner.set_hard_frac(frac);
     }
 
     /// Curriculum: floors generated fights are drawn from.
@@ -89,7 +94,7 @@ impl VecEnv {
         let ends = py.detach(|| self.inner.step(a, f, i, m, r, d));
         Ok(ends
             .into_iter()
-            .map(|e| (e.env, e.won, e.hp_frac, e.hp_lost, e.steps, e.floor, format!("{:?}", e.encounter), e.reward))
+            .map(|e| (e.env, e.won, e.hp_frac, e.hp_lost, e.steps, e.floor, format!("{:?}", e.encounter), format!("{:?}", e.kind), e.reward))
             .collect())
     }
 }
