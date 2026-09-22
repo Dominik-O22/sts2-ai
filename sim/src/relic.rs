@@ -41,6 +41,10 @@ pub enum RelicId {
     DragonFruit, GhostSeed, GnarledHammer, Kifuda, LavaLamp, LeesWaffle, MembershipCard,
     MiniatureTent, MysticLighter, Orrery, PunchDagger, RingingTriangle, RoyalStamp,
     ScreamingFlagon, SlingOfCourage, TheAbacus, Toolbox, WingCharm,
+    // Ancient
+    PaelsFlesh,
+    /// Run-time only (a card pick when obtained); nothing in combat.
+    LeadPaperweight,
 }
 
 /// Every relic, for generators and tests.
@@ -70,6 +74,7 @@ pub const ALL: &[RelicId] = &[
     RelicId::LeesWaffle, RelicId::MembershipCard, RelicId::MiniatureTent, RelicId::MysticLighter, RelicId::Orrery,
     RelicId::PunchDagger, RelicId::RingingTriangle, RelicId::RoyalStamp, RelicId::ScreamingFlagon,
     RelicId::SlingOfCourage, RelicId::TheAbacus, RelicId::Toolbox, RelicId::WingCharm,
+    RelicId::PaelsFlesh, RelicId::LeadPaperweight,
 ];
 
 /// A relic instance on the run.
@@ -268,13 +273,17 @@ impl Combat {
         n
     }
 
-    /// `Hook.ModifyMaxEnergy` for relics (Bread after turn 1).
+    /// `Hook.ModifyMaxEnergy` for relics: Bread after turn 1, Pael's Flesh
+    /// from turn 3.
     pub(crate) fn relic_modify_max_energy(&self, amount: i32) -> i32 {
+        let mut a = amount;
         if self.has_relic(RelicId::Bread) && self.player.turn > 1 {
-            amount + 1
-        } else {
-            amount
+            a += 1;
         }
+        if self.has_relic(RelicId::PaelsFlesh) && self.player.turn >= 3 {
+            a += 1;
+        }
+        a
     }
 
     /// `Hook.AfterSideTurnStart` for relics (player side).

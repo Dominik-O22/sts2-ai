@@ -64,7 +64,7 @@ impl Default for Ids {
 }
 
 /// What a replay found.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Report {
     /// Recorded decision points that matched.
     pub snapshots: usize,
@@ -72,6 +72,8 @@ pub struct Report {
     pub actions: usize,
     /// First mismatch, with the record index it happened at.
     pub divergence: Option<(usize, String)>,
+    /// Times an unscripted random pick had to be re-rolled to match.
+    pub reseeds: u32,
 }
 
 impl Report {
@@ -288,7 +290,7 @@ fn force_moves(c: &mut Combat, snap: &Value) -> Result<(), String> {
 }
 
 fn failed(report: &Report, n: usize, msg: String) -> Report {
-    Report { snapshots: report.snapshots, actions: report.actions, divergence: Some((n, msg)) }
+    Report { snapshots: report.snapshots, actions: report.actions, divergence: Some((n, msg)), reseeds: report.reseeds }
 }
 
 /// Replay one recording. `text` is the JSONL file contents. Outcomes the
@@ -317,7 +319,19 @@ pub fn replay_seeded(text: &str, ids: &Ids, seed: u64) -> Result<Report, String>
         .collect::<Result<_, _>>()?;
     let relics: Vec<Relic> = start["relics"]
         .as_array()
-        .map(|a| a.iter().filter_map(|v| ids.relics.get(v.as_str()?)).map(|&id| Relic::new(id)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| {
+                    let name = v.as_str()?;
+                    let id = ids.relics.get(name);
+                    if id.is_none() {
+                        eprintln!("note: unknown relic {name}, ignored");
+                    }
+                    id
+                })
+                .map(|&id| Relic::new(id))
+                .collect()
+        })
         .unwrap_or_default();
     let potions: Vec<Option<PotionId>> = start["potions"]
         .as_array()
@@ -382,14 +396,36 @@ pub fn replay_seeded(text: &str, ids: &Ids, seed: u64) -> Result<Report, String>
         }
     }
 
-    let mut report = Report { snapshots: 0, actions: 0, divergence: None };
+    let mut report = Report { snapshots: 0, actions: 0, divergence: None, reseeds: 0 };
     let mut known_enemies = c.enemies.len();
     let mut snecko_pending = false;
-    for (n, rec) in records.iter().enumerate().skip(1) {
+    // A snapshot followed by another snapshot with no action in between caught
+    // the game mid-resolution (the recorder polls between a card's exhaust and
+    // the draw it triggers, for example). Only the last one is a decision point.
+    let transient = |n: usize| {
+        records[n + 1..]
+            .iter()
+            .find(|r| !matches!(r["t"].as_str(), Some("hit" | "exhaust")))
+            .is_some_and(|r| r["t"] == "snapshot")
+    };
+    // Random picks among existing cards (Aggression's pull, an unrecorded
+    // random exhaust) are not scripted. When a snapshot does not match, rewind
+    // to the last matching one, re-roll that stream, and try again.
+    const RESEED_LIMIT: u32 = 64;
+    let mut checkpoint = (c.clone(), 0usize, known_enemies, report.clone());
+    let mut tries = 0u32;
+    let mut n = 1;
+    while n < records.len() {
+        let rec = &records[n];
         match rec["t"].as_str().unwrap_or("") {
             "snapshot" => {
                 // The game can snapshot once more after the last enemy dies.
                 if c.is_over() && rec["enemies"].as_array().is_some_and(|a| a.is_empty()) {
+                    n += 1;
+                    continue;
+                }
+                if transient(n) {
+                    n += 1;
                     continue;
                 }
                 if std::mem::take(&mut snecko_pending) {
@@ -401,8 +437,23 @@ pub fn replay_seeded(text: &str, ids: &Ids, seed: u64) -> Result<Report, String>
                 known_enemies = c.enemies.len();
                 match settle(&c, rec, 0) {
                     Ok(k) => c = k,
-                    Err(e) => return Ok(failed(&report, n, e)),
+                    Err(e) => {
+                        if tries >= RESEED_LIMIT || c.rngs.card_selection == checkpoint.0.rngs.card_selection {
+                            return Ok(failed(&report, n, e));
+                        }
+                        tries += 1;
+                        let (ck, ck_n, ck_known, ck_report) = &checkpoint;
+                        report = Report { reseeds: report.reseeds + 1, ..ck_report.clone() };
+                        c = ck.clone();
+                        c.rngs.card_selection = crate::rng::Rng::new(seed ^ 0x06 ^ (u64::from(tries) << 32));
+                        known_enemies = *ck_known;
+                        snecko_pending = false;
+                        n = ck_n + 1;
+                        continue;
+                    }
                 }
+                tries = 0;
+                checkpoint = (c.clone(), n, known_enemies, report.clone());
                 if let Err(e) = force_moves(&mut c, rec) {
                     return Ok(failed(&report, n, e));
                 }
@@ -506,6 +557,7 @@ pub fn replay_seeded(text: &str, ids: &Ids, seed: u64) -> Result<Report, String>
             }
             other => return Err(format!("unknown record type {other}")),
         }
+        n += 1;
     }
     Ok(report)
 }

@@ -1659,6 +1659,14 @@ impl Combat {
             out.extend(p.on_applied(target, amount));
             self.creature_mut(target).powers.push(p);
         }
+        // Inferno.OnPlay / CrimsonMantle.OnPlay: `IncrementSelfDamage` on the
+        // power the card applied. `data` is the self-damage the power deals
+        // at turn start.
+        if matches!(id, PowerId::Inferno | PowerId::CrimsonMantle) {
+            if let Some(p) = self.creature_mut(target).powers.iter_mut().find(|p| p.id == id) {
+                p.data += 1;
+            }
+        }
         // Hook.AfterPowerAmountChanged: Vicious watches Vulnerable the player applied.
         if applier == Some(CreatureRef::Player) {
             for p in &self.player.creature.powers {

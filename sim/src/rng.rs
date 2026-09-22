@@ -3,7 +3,7 @@
 //! Simulator). What we keep is the split into named streams, so replay
 //! injection can override one stream without disturbing the others.
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Rng {
     s: [u64; 4],
 }
