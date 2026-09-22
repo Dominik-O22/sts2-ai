@@ -43,6 +43,10 @@ The deck is the point. A fast deck kills a boss in three turns and proves
 nothing: the long move cycles are five and six turns. So the deck is mostly
 block and barely any damage, and it is built from the plainest cards in the
 pool, so a divergence points at the monster rather than at some card port.
+Each job has a loadout (`STANDARD`, or `FORTRESS` for act 2 and 3 elites
+and bosses): the exact deck, setup relics and a floor on max HP. Before a
+job, only the difference from what the run carries goes to the console, so
+sessions no longer pile cards and relics on top of each other.
 
 Everything is set before `fight`. Powers or block handed out mid-combat by
 the console are not in the recording's `start` record, so the sim never
@@ -63,6 +67,7 @@ import json
 import subprocess
 import sys
 import time
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -71,20 +76,69 @@ GAME_DIR = Path.home() / ".local/share/SlayTheSpire2/sts2ai"
 RECORDINGS = GAME_DIR / "recordings"
 DEV = RECORDINGS / "dev"
 
-# Block, a trickle of damage, and nothing with a fiddly port. Applied once
-# per session: `card ... Deck` edits the run deck, so it accumulates.
-DECK = [
-    "remove_card ASCENDERS_BANE Deck",
-    "remove_card STRIKE_IRONCLAD Deck",
-    "remove_card STRIKE_IRONCLAD Deck",
-    *["card SHRUG_IT_OFF Deck"] * 4,
-    *["card BLOOD_WALL Deck"] * 2,
-    *["card IMPERVIOUS Deck"] * 2,
-    *["card IRON_WAVE Deck"] * 2,
-    "card FEEL_NO_PAIN Deck",
-    "relic add ANCHOR",
-    "relic add BAG_OF_PREPARATION",
-]
+@dataclass
+class Loadout:
+    """What the run should carry into a job's fights: the exact deck, the
+    setup relics, and at least this much max HP."""
+
+    deck: dict[str, int]
+    relics: dict[str, int]
+    max_hp: int
+
+
+# Block, a trickle of damage, and nothing with a fiddly port.
+STANDARD = Loadout(
+    {"STRIKE_IRONCLAD": 3, "DEFEND_IRONCLAD": 4, "BASH": 1, "SHRUG_IT_OFF": 4, "BLOOD_WALL": 2,
+     "IMPERVIOUS": 2, "IRON_WAVE": 2, "FEEL_NO_PAIN": 1},
+    {"ANCHOR": 1, "BAG_OF_PREPARATION": 1},
+    80,
+)
+# For act 2 and 3 elites and bosses, whose cycles outlast the standard deck:
+# block that stays (Barricade) and grows (Stone Armor, Feel No Pain), still
+# little damage, so the fight runs long rather than ending early.
+FORTRESS = Loadout(
+    {**STANDARD.deck, "IMPERVIOUS": 3, "FEEL_NO_PAIN": 2, "BARRICADE": 1, "STONE_ARMOR": 2, "FLAME_BARRIER": 2},
+    STANDARD.relics,
+    150,
+)
+# Relics that raise max HP on pickup, and keep it when they come off again.
+MAX_HP_RELICS = [("MANGO", 14), ("PEAR", 10), ("STRAWBERRY", 7)]
+
+
+def loadout_for(job: "Job") -> Loadout:
+    hard = job.tags & {"elite", "boss"} and job.tags & {"hive", "glory"}
+    return FORTRESS if hard else STANDARD
+
+
+class Run:
+    """The run's deck, setup relics and max HP, read from the newest
+    recording when the session starts and kept up to date with every change
+    this script sends, so `reach` only sends the difference."""
+
+    def __init__(self) -> None:
+        start = json.loads(newest_start() or "{}")
+        self.deck = Counter(c["id"] for c in start.get("deck", []))
+        self.relics = Counter(start.get("relics", []))
+        self.max_hp = newest_max_hp()
+
+    def reach(self, target: Loadout) -> None:
+        commands = []
+        for card in sorted(set(self.deck) | set(target.deck)):
+            diff = target.deck.get(card, 0) - self.deck[card]
+            commands += [f"card {card} Deck"] * diff + [f"remove_card {card} Deck"] * -diff
+            self.deck[card] += diff
+        for relic, want in target.relics.items():
+            diff = want - self.relics[relic]
+            commands += [f"relic add {relic}"] * diff + [f"relic remove {relic}"] * -diff
+            self.relics[relic] += diff
+        for relic, gain in MAX_HP_RELICS:
+            while self.max_hp + gain <= target.max_hp or (self.max_hp < target.max_hp and relic == "STRAWBERRY"):
+                commands += [f"relic add {relic}", f"relic remove {relic}"]
+                self.max_hp += gain
+        if commands:
+            print(f"    loadout: {len(commands)} console lines")
+            send(commands, quiet=True)
+
 
 # Topped up before every fight. Fairy in a Bottle buys one death, which is
 # the difference between seeing a boss cycle and seeing half of one.
@@ -346,6 +400,16 @@ def newest_start() -> str | None:
     return None
 
 
+def newest_max_hp() -> int:
+    """Max HP at the first decision point of the most recent recording."""
+    files = sorted([*RECORDINGS.glob("*.jsonl"), *DEV.glob("*.jsonl")], key=lambda p: p.name)
+    for path in reversed(files):
+        for line in path.read_text().splitlines():
+            if '"t":"snapshot"' in line:
+                return json.loads(line).get("max_hp", 80)
+    return 80
+
+
 def blocker() -> str | None:
     """Something the run is carrying that the sim has never heard of, so every
     fight will fail on the setup rather than on the rules. A colorless card, a
@@ -452,7 +516,7 @@ def fight(enc: str, job: Job, pilot: Pilot | None) -> tuple[bool, str, Path | No
     return ok, line, path
 
 
-def run_job(job: Job, pilot: Pilot | None) -> list[tuple[bool, str]]:
+def run_job(job: Job, pilot: Pilot | None, run: Run | None) -> list[tuple[bool, str]]:
     """Set up, run every step, tear down. Returns each fight's result."""
     print(f"\n=== {job.name}" + (" (yours)" if job.human and pilot else ""))
     if job.relics:
@@ -460,6 +524,8 @@ def run_job(job: Job, pilot: Pilot | None) -> list[tuple[bool, str]]:
     if job.advice:
         print(f"    you:     {job.advice}")
     results = []
+    if run is not None:
+        run.reach(loadout_for(job))
     send([f"relic add {r}" for r in job.relics], quiet=True)
     try:
         for step in job.steps:
@@ -563,9 +629,7 @@ def main() -> None:
     input("enter when ready: ")
     if args.plain:
         send(PLAIN)
-    if not args.no_deck:
-        print("building the deck...")
-        send(DECK, quiet=True)
+    run = None if args.no_deck else Run()
 
     pilot = Pilot(args.pilot) if args.pilot else None
     # Unattended, the animations are only time: instant mode, put back after.
@@ -575,7 +639,7 @@ def main() -> None:
         while True:
             for job in picked:
                 for _ in range(args.repeat):
-                    results = run_job(job, pilot)
+                    results = run_job(job, pilot, run)
                     if results and results[-1][1].startswith("ERR") and (why := blocker()) is not None:
                         print(f"\nstopping: the run is carrying {why}")
                         return
