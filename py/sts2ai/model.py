@@ -1,5 +1,6 @@
 """Policy and value network (DESIGN.md, Decision engine): id embeddings for
-the cards in hand and on offer, the enemies, and the potions, concatenated
+the cards in hand and on offer, the enemies and their next moves, and the
+potions, concatenated
 with the dense features and run through an MLP with a masked policy head."""
 
 from __future__ import annotations
@@ -13,16 +14,19 @@ from sts2ai.env import Layout
 
 
 class Policy(nn.Module):
-    def __init__(self, layout: Layout, hidden: int = 512, card_dim: int = 32, monster_dim: int = 16, potion_dim: int = 8):
+    def __init__(
+        self, layout: Layout, hidden: int = 512, card_dim: int = 32, monster_dim: int = 16, move_dim: int = 8, potion_dim: int = 8
+    ):
         super().__init__()
         self.layout = layout
         self.card = nn.Embedding(layout.card_vocab, card_dim, padding_idx=0)
         self.monster = nn.Embedding(layout.monster_vocab, monster_dim, padding_idx=0)
+        self.move = nn.Embedding(layout.move_vocab, move_dim, padding_idx=0)
         self.potion = nn.Embedding(layout.potion_vocab, potion_dim, padding_idx=0)
         in_dim = (
             layout.n_floats
             + (layout.max_hand + layout.max_choices) * card_dim
-            + layout.max_enemies * monster_dim
+            + layout.max_enemies * (monster_dim + move_dim)
             + layout.max_potions * potion_dim
         )
         self.torso = nn.Sequential(
@@ -45,12 +49,14 @@ class Policy(nn.Module):
         enemies = ids[:, L.i_enemies : L.i_enemies + L.max_enemies]
         potions = ids[:, L.i_potions : L.i_potions + L.max_potions]
         choices = ids[:, L.i_choices : L.i_choices + L.max_choices]
+        moves = ids[:, L.i_moves : L.i_moves + L.max_enemies]
         x = torch.cat(
             [
                 floats,
                 self.card(hand).flatten(1),
                 self.card(choices).flatten(1),
                 self.monster(enemies).flatten(1),
+                self.move(moves).flatten(1),
                 self.potion(potions).flatten(1),
             ],
             dim=1,

@@ -37,6 +37,13 @@ class Layout:
     i_enemies: int
     i_potions: int
     i_choices: int
+    i_moves: int
+    move_vocab: int
+    f_hand: int
+    hand_feats: int
+    f_potions: int
+    f_choices: int
+    choice_feats: int
 
     @classmethod
     def load(cls) -> Layout:

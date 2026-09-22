@@ -119,6 +119,13 @@ fn layout(py: Python<'_>) -> PyResult<Bound<'_, PyDict>> {
         ("i_enemies", I_ENEMIES),
         ("i_potions", I_POTIONS),
         ("i_choices", I_CHOICES),
+        ("i_moves", I_MOVES),
+        ("move_vocab", move_vocab()),
+        ("f_hand", F_HAND),
+        ("hand_feats", HAND_FEATS),
+        ("f_potions", F_POTIONS),
+        ("f_choices", F_CHOICES),
+        ("choice_feats", CHOICE_FEATS),
     ] {
         d.set_item(k, v)?;
     }

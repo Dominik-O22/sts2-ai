@@ -825,3 +825,40 @@ fn graph(id: MonsterId, asc: Ascension, flags: Flags) -> (Vec<State>, usize) {
         }
     }
 }
+
+/// Every move name any act 1 monster can show as its next move, for the
+/// policy's move vocabulary. Built once from every graph variant.
+pub fn all_move_names() -> &'static [&'static str] {
+    static NAMES: std::sync::OnceLock<Vec<&'static str>> = std::sync::OnceLock::new();
+    NAMES.get_or_init(|| {
+        let mut names = vec!["STUNNED", "REVIVE_MOVE"];
+        let variants = [
+            Flags::default(),
+            Flags { is_alone: true, ..Default::default() },
+            Flags { is_front: true, ..Default::default() },
+            Flags { middle: true, ..Default::default() },
+            Flags { starts_with_dance: true, ..Default::default() },
+            Flags { start_stunned: true, ..Default::default() },
+        ];
+        for &id in crate::ids::ALL_MONSTERS {
+            for flags in variants {
+                for asc in [Ascension(0), Ascension(10)] {
+                    for s in graph(id, asc, flags).0 {
+                        if let State::Move { name, .. } = s {
+                            if !names.contains(&name) {
+                                names.push(name);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        names
+    })
+}
+
+/// Index into `all_move_names`.
+pub fn move_index(name: &str) -> Option<usize> {
+    static INDEX: std::sync::OnceLock<std::collections::HashMap<&'static str, usize>> = std::sync::OnceLock::new();
+    INDEX.get_or_init(|| all_move_names().iter().enumerate().map(|(i, &n)| (n, i)).collect()).get(name).copied()
+}

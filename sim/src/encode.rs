@@ -9,8 +9,9 @@
 
 use crate::card::Card;
 use crate::combat::{Action, Combat, RoomKind};
+use crate::effect::{Pile, Then};
 use crate::ids::{CardId, ALL_CARDS, ALL_MONSTERS, ALL_POWERS};
-use crate::monster::Intent;
+use crate::monster::{self, Intent};
 use crate::potion;
 use crate::relic;
 use crate::types::CreatureRef;
@@ -45,7 +46,9 @@ pub const N_ACTIONS: usize = A_SKIP + 1;
 
 // Float feature layout.
 pub const F_GLOBAL: usize = 0;
-const GLOBAL_LEN: usize = 20;
+/// Scalars, then a one-hot of the pending choice's kind (`THEN_KINDS`).
+const GLOBAL_LEN: usize = 20 + THEN_KINDS;
+const THEN_KINDS: usize = 10;
 pub const F_PLAYER_POWERS: usize = F_GLOBAL + GLOBAL_LEN;
 pub const F_HAND: usize = F_PLAYER_POWERS + N_POWERS;
 pub const HAND_FEATS: usize = 7;
@@ -66,7 +69,31 @@ pub const I_HAND: usize = 0;
 pub const I_ENEMIES: usize = I_HAND + MAX_HAND;
 pub const I_POTIONS: usize = I_ENEMIES + MAX_ENEMIES;
 pub const I_CHOICES: usize = I_POTIONS + MAX_POTIONS;
-pub const N_IDS: usize = I_CHOICES + MAX_CHOICES;
+/// Each enemy's next move, by `monster::all_move_names` index.
+pub const I_MOVES: usize = I_CHOICES + MAX_CHOICES;
+pub const N_IDS: usize = I_MOVES + MAX_ENEMIES;
+
+/// Move embedding vocabulary; 0 is the pad. Not a const: the names come
+/// from the monster graphs.
+pub fn move_vocab() -> usize {
+    monster::all_move_names().len() + 1
+}
+
+/// What a pending choice does with the pick, as a small class index.
+fn then_kind(then: Then) -> usize {
+    match then {
+        Then::Exhaust => 0,
+        Then::Upgrade => 1,
+        Then::MoveTo(Pile::Hand) => 2,
+        Then::MoveTo(Pile::DrawTop | Pile::DrawBottom) => 3,
+        Then::MoveTo(Pile::Discard | Pile::Exhaust) => 4,
+        Then::FreeThisCombat => 5,
+        Then::ToHandFreeThisTurn => 6,
+        Then::TakeOffer => 7,
+        Then::ExhaustMany => 8,
+        Then::DiscardThenDraw { .. } => 9,
+    }
+}
 
 /// Sort key that makes hand and choice slots order-free.
 fn card_key(c: &Combat, k: &Card) -> (usize, bool, i32) {
@@ -217,6 +244,9 @@ pub fn encode(c: &Combat, floats: &mut [f32], ids: &mut [i64], mask_out: &mut [b
     g[17] = living as f32 / MAX_ENEMIES as f32;
     g[18] = c.potions.iter().flatten().count() as f32 / MAX_POTIONS as f32;
     g[19] = c.stats.cards_played_this_turn as f32 / 10.0;
+    if let Some(p) = &c.pending {
+        g[20 + then_kind(p.then)] = 1.0;
+    }
 
     powers_into(c, CreatureRef::Player, &mut floats[F_PLAYER_POWERS..F_HAND]);
 
@@ -254,6 +284,7 @@ pub fn encode(c: &Combat, floats: &mut [f32], ids: &mut [i64], mask_out: &mut [b
         intent_into(e.monster.intents(), &mut f[7..22]);
         powers_into(c, CreatureRef::Enemy(i), &mut f[22..]);
         ids[I_ENEMIES + slot] = e.monster.id as i64 + 1;
+        ids[I_MOVES + slot] = e.monster.next_move_name().and_then(monster::move_index).map_or(0, |m| m as i64 + 1);
     }
 
     for r in &c.relics {
@@ -329,6 +360,11 @@ mod tests {
                 assert!(unindexed == 0 || c.pending.is_some(), "unindexed action in {:?}", legal);
                 let pick = indices[rng.next_int(indices.len())];
                 let a = decode(&c, pick).expect("masked index decodes");
+                for &e in &c.order {
+                    if let Some(name) = c.enemies[e].monster.next_move_name() {
+                        assert!(monster::move_index(name).is_some(), "move {name} missing from the vocabulary");
+                    }
+                }
                 assert_eq!(index_of(&c, &hand, &choices, a), Some(pick));
                 assert!(legal.contains(&a));
                 c.step(a);
