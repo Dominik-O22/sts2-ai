@@ -104,6 +104,47 @@ pub enum CardId {
     GiantRock,
     // Colorless (Models/CardPools/ColorlessCardPool.cs), as met in recordings.
     MindBlast,
+    // Appended, never reordered: the embedding rows are indexed by position
+    // and `sim/vocab.txt` pins the order.
+    /// Soul Fysh status. 6 unblockable HP loss if it ends the turn in hand,
+    /// and playable for 1 to be rid of it.
+    Beckon,
+    // Curses. Events and relics hand these out, so a real deck carries
+    // them even though nothing in combat creates one.
+    /// 13 unblockable if it ends the turn in hand.
+    BadLuck,
+    /// Dead card that exhausts itself at end of turn.
+    Clumsy,
+    /// Dead card. Eternal, which only matters to deck editing.
+    CurseOfTheBell,
+    /// Costs gold at end of turn, which combat does not track.
+    Debt,
+    /// 2 blockable damage if it ends the turn in hand.
+    Decay,
+    /// Weak 1 if it ends the turn in hand.
+    Doubt,
+    /// Blocks every other card until it is played.
+    Enthralled,
+    /// Starts in hand and exhausts itself.
+    Folly,
+    /// Dead card.
+    Greed,
+    /// Dead card. Its counter runs between combats.
+    Guilty,
+    /// Dead card.
+    Injury,
+    /// Blocks card plays once three have happened this turn.
+    Normality,
+    /// Dead card that will not leave your hand.
+    PoorSleep,
+    /// Unblockable damage equal to the hand it ends the turn in.
+    Regret,
+    /// Frail 1 if it ends the turn in hand.
+    Shame,
+    /// Does nothing; you pay 1 to be rid of it.
+    SporeMind,
+    /// Starts in hand and stays there.
+    Writhe,
 }
 
 /// `Models/Powers/<Name>Power.cs`.
@@ -167,7 +208,7 @@ pub enum PowerId {
     Illusion,
     /// HP loss at the end of the owner's turn (Slithering Strangler).
     Constrict,
-    /// Negates the next debuff (Cubex Construct).
+    /// Negates the next debuff (Cubex Construct, Punch Construct).
     Artifact,
     // Relic powers.
     /// Damage back to attackers (Bronze Scales).
@@ -203,6 +244,41 @@ pub enum PowerId {
     ShacklingPotion,
     /// `TemporaryDexterityPower` from Speed Potion.
     SpeedPotion,
+    // Appended, never reordered: see the note on `CardId`.
+    // Monster-side powers used in the Underdocks.
+    /// Caps damage received at 1, ticking down at the end of the enemy turn
+    /// (Soul Fysh).
+    Intangible,
+    /// Caps the HP the owner can lose per turn at the amount (Skulking Colony).
+    HardenedShell,
+    /// Block once per turn, the first time a card hit lands (Phantasmal Gardener).
+    Skittish,
+    /// Strength per attack that landed, on the owner's own attacks (Fossil Stalker).
+    Suck,
+    /// Strength when a teammate dies, and the owner is stunned that turn
+    /// (Corpse Slug).
+    Ravenous,
+    /// Asleep behind Plating: any unblocked hit wakes Lagavulin Matriarch, and
+    /// so does the counter running out.
+    Asleep,
+    /// Stunned into TERROR_MOVE the first time the owner's HP drops to the
+    /// amount (Terror Eel).
+    Shriek,
+    /// Playing a Skill smogs every Skill in combat until end of turn, making
+    /// them unplayable (Living Fog).
+    Smoggy,
+    /// Pressure the Waterfall Giant explodes for. Its death is deferred until
+    /// the blast lands.
+    SteamEruption,
+    /// Gremlin Merc's death brings a Sneaky and a Fat Gremlin, so it does not
+    /// end the combat.
+    Surprise,
+    /// Gremlin Merc steals gold on every move it makes. `data` banks the
+    /// running total, which is what the Fat Gremlin inherits.
+    Thievery,
+    /// The gold the Fat Gremlin is carrying off, returned if you kill it.
+    /// Inert in combat, but the recorder logs it.
+    Heist,
 }
 
 /// `Models/Monsters/<Name>.cs`.
@@ -237,6 +313,29 @@ pub enum MonsterId {
     CeremonialBeast,
     KinFollower,
     KinPriest,
+    // Underdocks (Acts/Underdocks.cs).
+    Toadpole,
+    CorpseSlug,
+    DampCultist,
+    CalcifiedCultist,
+    FossilStalker,
+    GremlinMerc,
+    FatGremlin,
+    SneakyGremlin,
+    GasBomb,
+    HauntedShip,
+    LivingFog,
+    PhantasmalGardener,
+    PunchConstruct,
+    Seapunk,
+    SewerClam,
+    SkulkingColony,
+    SludgeSpinner,
+    TwoTailedRat,
+    TerrorEel,
+    LagavulinMatriarch,
+    SoulFysh,
+    WaterfallGiant,
 }
 
 /// Every variant, for id lookups by name.
@@ -334,6 +433,24 @@ pub const ALL_CARDS: &[CardId] = &[
     CardId::AscendersBane,
     CardId::GiantRock,
     CardId::MindBlast,
+    CardId::Beckon,
+    CardId::BadLuck,
+    CardId::Clumsy,
+    CardId::CurseOfTheBell,
+    CardId::Debt,
+    CardId::Decay,
+    CardId::Doubt,
+    CardId::Enthralled,
+    CardId::Folly,
+    CardId::Greed,
+    CardId::Guilty,
+    CardId::Injury,
+    CardId::Normality,
+    CardId::PoorSleep,
+    CardId::Regret,
+    CardId::Shame,
+    CardId::SporeMind,
+    CardId::Writhe,
 ];
 
 pub const ALL_POWERS: &[PowerId] = &[
@@ -397,6 +514,18 @@ pub const ALL_POWERS: &[PowerId] = &[
     PowerId::FlexPotion,
     PowerId::ShacklingPotion,
     PowerId::SpeedPotion,
+    PowerId::Intangible,
+    PowerId::HardenedShell,
+    PowerId::Skittish,
+    PowerId::Suck,
+    PowerId::Ravenous,
+    PowerId::Asleep,
+    PowerId::Shriek,
+    PowerId::Smoggy,
+    PowerId::SteamEruption,
+    PowerId::Surprise,
+    PowerId::Thievery,
+    PowerId::Heist,
 ];
 
 pub const ALL_MONSTERS: &[MonsterId] = &[
@@ -429,4 +558,26 @@ pub const ALL_MONSTERS: &[MonsterId] = &[
     MonsterId::CeremonialBeast,
     MonsterId::KinFollower,
     MonsterId::KinPriest,
+    MonsterId::Toadpole,
+    MonsterId::CorpseSlug,
+    MonsterId::DampCultist,
+    MonsterId::CalcifiedCultist,
+    MonsterId::FossilStalker,
+    MonsterId::GremlinMerc,
+    MonsterId::FatGremlin,
+    MonsterId::SneakyGremlin,
+    MonsterId::GasBomb,
+    MonsterId::HauntedShip,
+    MonsterId::LivingFog,
+    MonsterId::PhantasmalGardener,
+    MonsterId::PunchConstruct,
+    MonsterId::Seapunk,
+    MonsterId::SewerClam,
+    MonsterId::SkulkingColony,
+    MonsterId::SludgeSpinner,
+    MonsterId::TwoTailedRat,
+    MonsterId::TerrorEel,
+    MonsterId::LagavulinMatriarch,
+    MonsterId::SoulFysh,
+    MonsterId::WaterfallGiant,
 ];

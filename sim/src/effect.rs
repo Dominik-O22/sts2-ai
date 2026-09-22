@@ -27,6 +27,8 @@ pub enum Pile {
     Hand,
     DrawTop,
     DrawBottom,
+    /// `CardPilePosition.Random`: shuffled in anywhere (Soul Fysh's Beckon).
+    DrawRandom,
     Discard,
     Exhaust,
 }
@@ -167,6 +169,8 @@ pub enum Effect {
     PlayCard { uid: u32, target: Option<CreatureRef>, paid: i32 },
     /// One iteration of the play loop (`GeneratePlayCount` may make several).
     CardPlayIter { uid: u32, target: Option<CreatureRef>, paid: i32 },
+    /// `EnchantmentModel.OnPlay`, after the card's own effects.
+    EnchantOnPlay { uid: u32, target: Option<CreatureRef> },
     /// `Hook.AfterCardPlayed` for one iteration.
     AfterCardPlayed { uid: u32 },
     /// Tail of the pipeline: move the card to its result pile.
@@ -192,6 +196,23 @@ pub enum Effect {
     RemoveStrength { target: CreatureRef },
     /// Illusion's REVIVE move: heal to full.
     Revive { target: CreatureRef },
+    /// `CreatureCmd.Kill`: the blast monsters set off as they land it.
+    Kill { target: CreatureRef },
+    /// `CreatureCmd.Escape`: out of the fight without dying (Fat Gremlin).
+    Escape { target: CreatureRef },
+    /// `ThieveryPower.Steal`, after each of the thief's moves.
+    Steal { thief: CreatureRef },
+    /// The enemy turn's cleanup, after its `BeforeSideTurnEnd` hooks.
+    FinishEnemyTurn,
+    /// `BeforeSideTurnEndEarly`, collected only once the `VeryEarly` pass has
+    /// finished, so the two see each other's work.
+    SideTurnEndEarly(Side),
+    /// `AttackCommand`'s `AfterAttack`, once every hit of one attack has
+    /// landed: Skittish curls up after the whole card, not between its hits.
+    AfterAttack,
+    /// `WaterfallGiant.AboutToBlowMove`: bank the Steam Eruption amount into
+    /// the blast that follows, then drop the power.
+    ArmSteamEruption { target: CreatureRef },
 
     // Turn flow. `Combat/CombatManager.cs`.
     StartTurn(Side),

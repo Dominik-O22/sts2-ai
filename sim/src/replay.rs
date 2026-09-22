@@ -16,6 +16,7 @@ use std::collections::{HashMap, VecDeque};
 use serde_json::{json, Value};
 
 use crate::card::Card;
+use crate::enchant::{EnchantmentId, ALL as ALL_ENCHANTMENTS};
 use crate::combat::{Action, Combat, Outcome, Script};
 use crate::gen::{card_ref, FightSetup};
 use crate::encounter::Encounter;
@@ -48,6 +49,7 @@ pub struct Ids {
     pub(crate) relics: HashMap<String, RelicId>,
     pub(crate) potions: HashMap<String, PotionId>,
     pub(crate) encounters: HashMap<String, Encounter>,
+    pub(crate) enchantments: HashMap<String, EnchantmentId>,
 }
 
 impl Ids {
@@ -58,7 +60,15 @@ impl Ids {
             relics: table(crate::relic::ALL, ""),
             potions: table(crate::potion::ALL, ""),
             encounters: table(crate::encounter::ALL, ""),
+            enchantments: table(ALL_ENCHANTMENTS, ""),
         }
+    }
+}
+
+impl Ids {
+    /// The encounter a recorder id names, if the sim has it.
+    pub fn encounter(&self, name: &str) -> Option<&Encounter> {
+        self.encounters.get(name)
     }
 }
 
@@ -93,12 +103,33 @@ fn sort_values(mut v: Vec<Value>) -> Vec<Value> {
     v
 }
 
+/// `Recorder.CardRef`'s enchantment triple: id, amount, whether it is spent.
+fn ench_json(e: &crate::enchant::Enchantment) -> Value {
+    json!([slug(&format!("{:?}", e.id)), e.amount, e.disabled])
+}
+
 /// The sim's view of a combat in the recorder's snapshot shape, piles in
 /// their real order. `diff` normalizes both sides.
 pub fn snapshot_of(c: &Combat) -> Value {
-    let card = |k: &Card| json!({ "id": slug(&format!("{:?}", k.id)), "up": k.upgraded });
-    let hand: Vec<Value> =
-        c.player.hand.iter().map(|k| json!({ "id": slug(&format!("{:?}", k.id)), "up": k.upgraded, "cost": if k.def().x_cost { -1 } else { c.cost(k) } })).collect();
+    // `ench` is omitted for a plain card, matching the recorder, so a run
+    // with no enchantments diffs exactly as it did before.
+    let card = |k: &Card| {
+        let mut v = json!({ "id": slug(&format!("{:?}", k.id)), "up": k.upgraded });
+        if let Some(e) = &k.enchantment {
+            v["ench"] = ench_json(e);
+        }
+        v
+    };
+    let hand: Vec<Value> = c
+        .player
+        .hand
+        .iter()
+        .map(|k| {
+            let mut v = card(k);
+            v["cost"] = json!(if k.def().x_cost { -1 } else { c.cost(k) });
+            v
+        })
+        .collect();
     let pile = |cards: &[Card]| cards.iter().map(card).collect::<Vec<_>>();
     let powers = |r: CreatureRef| {
         c.creature(r).powers.iter().map(|p| json!([format!("{}_POWER", slug(&format!("{:?}", p.id))), p.amount])).collect::<Vec<_>>()
@@ -225,6 +256,37 @@ fn adopt_spawn_hp(c: &mut Combat, snap: &Value, known: usize) -> Result<(), Stri
     Ok(())
 }
 
+/// A card dropped into the draw pile at a random depth (the Soul Fysh's
+/// Beckon) lands somewhere nothing records. When the sim has done that since
+/// the last snapshot and holds the same cards the recording shows, take the
+/// recording's order: the only thing adopted is the depth.
+fn adopt_draw_order(c: &mut Combat, snap: &Value) {
+    if c.stats.random_draw_inserts == 0 {
+        return;
+    }
+    c.stats.random_draw_inserts = 0;
+    let empty = vec![];
+    let want = snap["draw"].as_array().unwrap_or(&empty);
+    if want.len() != c.player.draw.len() {
+        return;
+    }
+    let key = |k: &Card| json!({ "id": slug(&format!("{:?}", k.id)), "up": k.upgraded });
+    let mut taken = vec![false; c.player.draw.len()];
+    let mut order = Vec::with_capacity(want.len());
+    for r in want {
+        let Some(i) = (0..c.player.draw.len()).find(|&i| {
+            !taken[i] && key(&c.player.draw[i]) == json!({ "id": r["id"], "up": r["up"] })
+        }) else {
+            return; // A different multiset: a real divergence, not a depth.
+        };
+        taken[i] = true;
+        order.push(i);
+    }
+    let drawn = std::mem::take(&mut c.player.draw);
+    let mut slots: Vec<Option<Card>> = drawn.into_iter().map(Some).collect();
+    c.player.draw = order.into_iter().map(|i| slots[i].take().expect("each card used once")).collect();
+}
+
 /// Snecko Oil rolls each hand card's cost; the recording shows the
 /// results in the next snapshot. Copy them onto matching cards.
 fn adopt_hand_costs(c: &mut Combat, snap: &Value) {
@@ -294,6 +356,10 @@ pub struct Replayer {
     tries: u32,
     next_index: usize,
     at_decision: bool,
+    /// The hand the last snapshot showed, with costs. Two copies of a card
+    /// can differ only by a cost the sim set randomly (Touch of Insanity,
+    /// Snecko Oil), and then only this says which one the game played.
+    last_hand: Vec<Value>,
     /// A divergence was reported; `replay_seeded` stops there.
     stopped: bool,
 }
@@ -428,6 +494,7 @@ impl Replayer {
             // Record 0 is the start record this was built from.
             next_index: 1,
             at_decision: false,
+            last_hand: vec![],
             stopped: false,
         })
     }
@@ -528,6 +595,10 @@ impl Replayer {
         let salt = u64::from(self.tries) << 32;
         self.c.rngs.card_selection = crate::rng::Rng::new(self.seed ^ 0x06 ^ salt);
         self.c.rngs.targets = crate::rng::Rng::new(self.seed ^ 0x03 ^ salt);
+        // Spawned enemies roll their own HP and a generated status lands at a
+        // random depth in the draw pile. Neither is recorded.
+        self.c.rngs.niche = crate::rng::Rng::new(self.seed ^ 0x04 ^ salt);
+        self.c.rngs.card_generation = crate::rng::Rng::new(self.seed ^ 0x05 ^ salt);
         self.known_enemies = self.checkpoint.known_enemies;
         self.snecko_pending = false;
         self.at_decision = false;
@@ -543,6 +614,7 @@ impl Replayer {
                 if std::mem::take(&mut self.snecko_pending) {
                     adopt_hand_costs(&mut self.c, rec);
                 }
+                adopt_draw_order(&mut self.c, rec);
                 if let Err(e) = adopt_spawn_hp(&mut self.c, rec, self.known_enemies) {
                     return Ok(Applied::Diverged(e));
                 }
@@ -550,8 +622,12 @@ impl Replayer {
                 match settle(&self.c, rec, 0) {
                     Ok(k) => self.c = k,
                     Err(e) => {
+                        // Nothing random happened since the checkpoint, so
+                        // another roll of the dice cannot change the answer.
                         let untouched = self.c.rngs.card_selection == self.checkpoint.c.rngs.card_selection
-                            && self.c.rngs.targets == self.checkpoint.c.rngs.targets;
+                            && self.c.rngs.targets == self.checkpoint.c.rngs.targets
+                            && self.c.rngs.niche == self.checkpoint.c.rngs.niche
+                            && self.c.rngs.card_generation == self.checkpoint.c.rngs.card_generation;
                         if self.tries >= RESEED_LIMIT || untouched {
                             return Ok(Applied::Diverged(e));
                         }
@@ -566,6 +642,7 @@ impl Replayer {
                 if let Err(e) = force_moves(&mut self.c, rec) {
                     return Ok(Applied::Diverged(e));
                 }
+                self.last_hand = rec["hand"].as_array().cloned().unwrap_or_default();
                 self.report.snapshots += 1;
                 // A snapshot the game took after the killing blow is not a
                 // decision point, and neither is one the sim ended on.
@@ -626,12 +703,16 @@ impl Replayer {
                 // interchangeable, but which one leaves the hand changes
                 // the discard order and so later random picks.
                 let want_idx = rec["hand_idx"].as_u64().map(|i| i as usize);
+                // The cost the recording showed at that index, which is the
+                // only thing separating two otherwise identical cards.
+                let want_cost = want_idx.and_then(|i| self.last_hand.get(i)).and_then(|k| k["cost"].as_i64());
                 let c = &self.c;
                 let legal = c.legal_actions();
                 let matches = |a: &Action| match *a {
                     Action::PlayCard { hand_idx, target: t } => {
                         let k = &c.player.hand[hand_idx];
-                        k.id == id && k.upgraded == up && t == target
+                        let cost_ok = want_cost.is_none_or(|w| w == i64::from(if k.def().x_cost { -1 } else { c.cost(k) }));
+                        k.id == id && k.upgraded == up && t == target && cost_ok
                     }
                     _ => false,
                 };
@@ -656,6 +737,12 @@ impl Replayer {
                 let Some(&pid) = self.ids.potions.get(name) else {
                     return Ok(Applied::Diverged(format!("unknown potion {name}")));
                 };
+                // Fairy in a Bottle drinks itself when a hit would kill you.
+                // The sim spends it inside the death check rather than as an
+                // action, and the next snapshot checks the belt emptied.
+                if !pid.usable_in_combat() {
+                    return Ok(Applied::Ok);
+                }
                 let Some(slot) = self.c.potions.iter().position(|p| *p == Some(pid)) else {
                     return Ok(Applied::Diverged(format!("game used {name}; sim has no such potion")));
                 };
@@ -775,6 +862,7 @@ mod tests {
                 room: RoomKind::Monster,
                 asc: Ascension(10),
                 seed: seed + 100,
+                gold: 0,
             });
             let mut lines = vec![json!({
                 "t": "start",

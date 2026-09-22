@@ -1,11 +1,22 @@
-//! Act 1 (Overgrowth) encounters: `Models/Encounters/*.cs` via
-//! `Overgrowth.GenerateAllEncounters`. Each encounter generates its monster
-//! list, rolling its own composition where the game does.
+//! Act 1 encounters: `Models/Encounters/*.cs` via `GenerateAllEncounters`.
+//! Act 1 is not one fixed act. `ActModel.GetRandomList` picks per act index
+//! from `ModelDb.ActsByIndex`, and both `Overgrowth` and `Underdocks` have
+//! `Index => 0`, so a run rolls one of the two. Both are here.
+//!
+//! Each encounter generates its monster list, rolling its own composition
+//! where the game does.
 
 use crate::combat::EnemySpec;
 use crate::ids::MonsterId;
 use crate::monster::Flags;
 use crate::rng::Rng;
+
+/// Which act 1 a run rolled. `Acts/Overgrowth.cs`, `Acts/Underdocks.cs`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Act {
+    Overgrowth,
+    Underdocks,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
@@ -39,6 +50,27 @@ pub enum Encounter {
     VantomBoss,
     CeremonialBeastBoss,
     TheKinBoss,
+    // Underdocks.
+    CorpseSlugsWeak,
+    SeapunkWeak,
+    SludgeSpinnerWeak,
+    ToadpolesWeak,
+    CorpseSlugsNormal,
+    CultistsNormal,
+    FossilStalkerNormal,
+    GremlinMercNormal,
+    HauntedShipNormal,
+    LivingFogNormal,
+    PunchConstructNormal,
+    SeapunkNormal,
+    SewerClamNormal,
+    TwoTailedRatsNormal,
+    PhantasmalGardenersElite,
+    SkulkingColonyElite,
+    TerrorEelElite,
+    LagavulinMatriarchBoss,
+    SoulFyshBoss,
+    WaterfallGiantBoss,
 }
 
 pub const ALL: &[Encounter] = &[
@@ -64,10 +96,35 @@ pub const ALL: &[Encounter] = &[
     Encounter::VantomBoss,
     Encounter::CeremonialBeastBoss,
     Encounter::TheKinBoss,
+    Encounter::CorpseSlugsWeak,
+    Encounter::SeapunkWeak,
+    Encounter::SludgeSpinnerWeak,
+    Encounter::ToadpolesWeak,
+    Encounter::CorpseSlugsNormal,
+    Encounter::CultistsNormal,
+    Encounter::FossilStalkerNormal,
+    Encounter::GremlinMercNormal,
+    Encounter::HauntedShipNormal,
+    Encounter::LivingFogNormal,
+    Encounter::PunchConstructNormal,
+    Encounter::SeapunkNormal,
+    Encounter::SewerClamNormal,
+    Encounter::TwoTailedRatsNormal,
+    Encounter::PhantasmalGardenersElite,
+    Encounter::SkulkingColonyElite,
+    Encounter::TerrorEelElite,
+    Encounter::LagavulinMatriarchBoss,
+    Encounter::SoulFyshBoss,
+    Encounter::WaterfallGiantBoss,
 ];
 
 fn one(id: MonsterId) -> EnemySpec {
     EnemySpec { id, flags: Flags::default() }
+}
+
+/// `CorpseSlug.StarterMoveIdx`: which of the three moves it opens on.
+fn slug_with_move(idx: u8) -> EnemySpec {
+    EnemySpec { id: MonsterId::CorpseSlug, flags: Flags { starter_move: idx, ..Flags::default() } }
 }
 
 impl Encounter {
@@ -75,9 +132,24 @@ impl Encounter {
         use Encounter::*;
         match self {
             FuzzyWurmCrawlerWeak | NibbitsWeak | ShrinkerBeetleWeak | SlimesWeak => Kind::Weak,
+            CorpseSlugsWeak | SeapunkWeak | SludgeSpinnerWeak | ToadpolesWeak => Kind::Weak,
             BygoneEffigyElite | ByrdonisElite | PhrogParasiteElite => Kind::Elite,
+            PhantasmalGardenersElite | SkulkingColonyElite | TerrorEelElite => Kind::Elite,
             VantomBoss | CeremonialBeastBoss | TheKinBoss => Kind::Boss,
+            LagavulinMatriarchBoss | SoulFyshBoss | WaterfallGiantBoss => Kind::Boss,
             _ => Kind::Normal,
+        }
+    }
+
+    /// Which act 1 this encounter belongs to. The two never mix in a run.
+    pub fn act(self) -> Act {
+        use Encounter::*;
+        match self {
+            CorpseSlugsWeak | SeapunkWeak | SludgeSpinnerWeak | ToadpolesWeak | CorpseSlugsNormal | CultistsNormal
+            | FossilStalkerNormal | GremlinMercNormal | HauntedShipNormal | LivingFogNormal | PunchConstructNormal
+            | SeapunkNormal | SewerClamNormal | TwoTailedRatsNormal | PhantasmalGardenersElite | SkulkingColonyElite
+            | TerrorEelElite | LagavulinMatriarchBoss | SoulFyshBoss | WaterfallGiantBoss => Act::Underdocks,
+            _ => Act::Overgrowth,
         }
     }
 
@@ -98,7 +170,9 @@ impl Encounter {
             }
             CubexConstructNormal => vec![one(CubexConstruct)],
             FlyconidNormal => vec![medium(rng), one(Flyconid)],
-            FogmogNormal => vec![one(Fogmog)],
+            // Slots are ["illusion", "fogmog"]: the Eye it summons stands
+            // in front of it.
+            FogmogNormal => vec![EnemySpec { id: Fogmog, flags: Flags { slot: 2, ..Default::default() } }],
             InkletsNormal => vec![
                 one(Inklet),
                 EnemySpec { id: Inklet, flags: Flags { middle: true, ..Default::default() } },
@@ -144,6 +218,52 @@ impl Encounter {
                 one(KinPriest),
                 one(KinFollower),
             ],
+
+            // `CorpseSlug.EnsureCorpseSlugsStartWithDifferentMoves`: one roll,
+            // then consecutive starting moves down the line.
+            CorpseSlugsWeak | CorpseSlugsNormal => {
+                let n = if self == CorpseSlugsWeak { 2 } else { 3 };
+                let first = rng.next_int(3) as u8;
+                (0..n).map(|i| slug_with_move((first + i) % 3)).collect()
+            }
+            SeapunkWeak => vec![one(Seapunk)],
+            SludgeSpinnerWeak => vec![one(SludgeSpinner)],
+            // Front toadpole opens on Spiken, the back one on Whirl.
+            ToadpolesWeak => vec![
+                EnemySpec { id: Toadpole, flags: Flags { is_front: true, ..Default::default() } },
+                one(Toadpole),
+            ],
+            CultistsNormal => vec![one(CalcifiedCultist), one(DampCultist)],
+            FossilStalkerNormal => vec![one(FossilStalker)],
+            // Only the merc starts; Surprise brings the other two when it dies.
+            GremlinMercNormal => vec![one(GremlinMerc)],
+            HauntedShipNormal => vec![one(HauntedShip)],
+            // The five bomb slots stay empty until Bloat fills them.
+            // Slots are bomb1..bomb5 then livingFog, so every bomb it
+            // bloats out stands in front of it.
+            LivingFogNormal => vec![EnemySpec { id: LivingFog, flags: Flags { slot: 6, ..Default::default() } }],
+            PunchConstructNormal => vec![one(PunchConstruct)],
+            SeapunkNormal => vec![one(CalcifiedCultist), one(Seapunk)],
+            SewerClamNormal => vec![one(SewerClam)],
+            // Three rats in the last three slots, starting moves offset by one.
+            TwoTailedRatsNormal => {
+                let first = rng.next_int(3) as u8;
+                (0..3)
+                    .map(|i| EnemySpec {
+                        id: TwoTailedRat,
+                        flags: Flags { starter_move: (first + i) % 3, slot: 3 + i as u8, ..Default::default() },
+                    })
+                    .collect()
+            }
+            // Each gardener opens on the move its slot names.
+            PhantasmalGardenersElite => (1..=4)
+                .map(|slot| EnemySpec { id: PhantasmalGardener, flags: Flags { slot, ..Default::default() } })
+                .collect(),
+            SkulkingColonyElite => vec![one(SkulkingColony)],
+            TerrorEelElite => vec![one(TerrorEel)],
+            LagavulinMatriarchBoss => vec![one(LagavulinMatriarch)],
+            SoulFyshBoss => vec![one(SoulFysh)],
+            WaterfallGiantBoss => vec![one(WaterfallGiant)],
         }
     }
 }

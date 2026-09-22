@@ -46,12 +46,14 @@ pub fn is_debuff(id: PowerId) -> bool {
             | PowerId::Constrict
             | PowerId::Demise
             | PowerId::ShacklingPotion
+            | PowerId::Shriek
+            | PowerId::Smoggy
     )
 }
 
 /// `PowerModel.AllowNegative`.
 pub fn allow_negative(id: PowerId) -> bool {
-    matches!(id, PowerId::Strength | PowerId::Dexterity | PowerId::Shrink)
+    matches!(id, PowerId::Strength | PowerId::Dexterity | PowerId::Shrink | PowerId::Shriek)
 }
 
 /// `PowerModel.GetTypeForAmount == Debuff`: a negative counter that allows
@@ -81,6 +83,8 @@ pub fn is_single(id: PowerId) -> bool {
             | PowerId::Minion
             | PowerId::Infested
             | PowerId::Illusion
+            | PowerId::Smoggy
+            | PowerId::Surprise
     )
 }
 
@@ -246,6 +250,12 @@ impl Power {
         !(self.id == PowerId::NoDraw && !from_hand_draw)
     }
 
+    /// `SmoggyPower.ShouldPlay`: a smogged card cannot be played. The rest of
+    /// the hook lives in `Combat::hook_allows_play`.
+    pub fn blocks_smogged(&self) -> bool {
+        self.id == PowerId::Smoggy
+    }
+
     /// `TryModifyEnergyCostInCombatLate`: Corruption makes skills free, Free
     /// Attack makes attacks in hand free.
     pub fn free_card(&self, ty: CardType) -> bool {
@@ -310,9 +320,14 @@ impl Power {
         }
     }
 
-    /// `AfterSideTurnStart` for powers that reset counters (Slow).
+    /// `AfterSideTurnStart` for powers that reset counters (Slow), plus
+    /// `HardenedShellPower.BeforeSideTurnStart`, which clears its damage
+    /// tally whichever side is starting.
     pub fn reset_at_side_turn_start(&mut self, owner: CreatureRef, side: Side) {
         if self.id == PowerId::Slow && owner.side() == side {
+            self.data = 0;
+        }
+        if self.id == PowerId::HardenedShell {
             self.data = 0;
         }
     }
@@ -348,6 +363,18 @@ impl Power {
         }
     }
 
+    /// `BeforeSideTurnEndVeryEarly`, which runs before the `Early` pass so
+    /// Lagavulin's shell is gone before Plating can top it back up.
+    pub fn before_side_turn_end_very_early(&self, owner: CreatureRef, side: Side) -> Vec<Effect> {
+        match self.id {
+            // AsleepPower: on the last sleeping turn, shed the Plating.
+            PowerId::Asleep if owner.side() == side && self.amount <= 1 => {
+                vec![Effect::RemovePower { target: owner, id: PowerId::Plating }]
+            }
+            _ => vec![],
+        }
+    }
+
     /// `BeforeSideTurnEndEarly`.
     pub fn before_side_turn_end_early(&self, owner: CreatureRef, side: Side) -> Vec<Effect> {
         match self.id {
@@ -371,6 +398,17 @@ impl Power {
             }
             // ColossusPower.cs: plain decrement, no skip flag.
             PowerId::Colossus if side == Side::Enemy => vec![Effect::DecrementPower { target: owner, id: self.id }],
+            // IntangiblePower.cs: ticks on the enemy side's turn, whoever owns it.
+            PowerId::Intangible if side == Side::Enemy => vec![Effect::DecrementPower { target: owner, id: self.id }],
+            // AsleepPower.cs: the nap runs out and the sleeper wakes; the move
+            // graph's sleep branch reads the power being gone.
+            PowerId::Asleep if own_side => vec![Effect::DecrementPower { target: owner, id: self.id }],
+            // SkittishPower.cs: the once-a-turn block is available again once
+            // the player's turn is over.
+            PowerId::Skittish if !own_side => {
+                self.data = 0;
+                vec![]
+            }
             // TerritorialPower.cs: when the owner's side ends, gain Strength.
             PowerId::Territorial if own_side => vec![Effect::ApplyPower {
                 target: owner,
@@ -420,7 +458,12 @@ impl Power {
                 dealer: None,
                 card: None,
             }],
-            // RitualPower.cs (the enemy-applied skip does not apply to potions).
+            // RitualPower.cs: `WasJustAppliedByEnemy` costs the cultists their
+            // first tick. Mazaleth's Gift puts it on the player, which does not.
+            PowerId::Ritual if own_side && self.data == 1 => {
+                self.data = 0;
+                vec![]
+            }
             PowerId::Ritual if own_side => vec![Effect::ApplyPower {
                 target: owner,
                 id: PowerId::Strength,
@@ -550,6 +593,18 @@ impl Power {
             }],
             // SlipperyPower.cs: one charge per unblocked hit.
             PowerId::Slippery if unblocked >= 1 => vec![Effect::DecrementPower { target: owner, id: self.id }],
+            // ShriekPower.cs: dropping to the threshold stuns it into Terror.
+            PowerId::Shriek if unblocked > 0 && hp_after <= self.amount => vec![
+                Effect::Stun { target: owner, next: Some("TERROR_MOVE") },
+                Effect::RemovePower { target: owner, id: self.id },
+            ],
+            // AsleepPower.cs: one hit through the shell and it is up, shell
+            // gone, this turn's move replaced by the wake-up into Slash.
+            PowerId::Asleep if unblocked > 0 => vec![
+                Effect::RemovePower { target: owner, id: PowerId::Plating },
+                Effect::Stun { target: owner, next: Some("SLASH_MOVE") },
+                Effect::RemovePower { target: owner, id: self.id },
+            ],
             // PlowPower.cs: `hp_after` is the owner's HP after the hit.
             PowerId::Plow if unblocked > 0 && hp_after <= self.amount => vec![
                 Effect::RemoveStrength { target: owner },

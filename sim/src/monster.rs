@@ -22,6 +22,10 @@ pub enum Intent {
     Sleep,
     Stun,
     Heal,
+    /// `EscapeIntent`: leaving combat without dying (Fat Gremlin).
+    Escape,
+    /// `DeathBlowIntent`: attack, then the attacker kills itself.
+    DeathBlow { damage: i32 },
 }
 
 /// `MoveRepeatType.cs`.
@@ -33,13 +37,31 @@ pub enum Repeat {
     Once,
 }
 
+/// `RandomBranchState.AddBranch`'s weight argument. Most are constants; the
+/// rest are `Func<float>` closures reading the combat state.
+#[derive(Clone, Copy, Debug)]
+pub enum Weight {
+    Fixed(f32),
+    /// `TwoTailedRat`: `CanSummon() ? yes : no`.
+    IfCanSummon { yes: f32, no: f32 },
+}
+
+impl Weight {
+    fn value(self, ctx: RollCtx) -> f32 {
+        match self {
+            Weight::Fixed(w) => w,
+            Weight::IfCanSummon { yes, no } => if ctx.can_summon { yes } else { no },
+        }
+    }
+}
+
 /// One weighted branch of a `RandomBranchState`.
 #[derive(Clone, Debug)]
 pub struct Branch {
     pub state: usize,
     pub cooldown: u32,
     pub repeat: Repeat,
-    pub weight: f32,
+    pub weight: Weight,
 }
 
 /// Predicates used by `ConditionalBranchState`s, evaluated against the
@@ -50,6 +72,21 @@ pub enum Cond {
     IsFront,
     NotFront,
     Slot(u8),
+    /// `Creature.HasPower<AsleepPower>` (Lagavulin Matriarch's sleep branch).
+    Asleep,
+    NotAsleep,
+}
+
+/// What a branch predicate may read outside the monster itself. The game's
+/// closures reach into `Creature` and `CombatState`; these are the pieces
+/// act 1's graphs actually ask for.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RollCtx {
+    /// `Creature.HasPower<AsleepPower>()`.
+    pub asleep: bool,
+    /// `TwoTailedRat.CanSummon()`, which folds together its own counters, the
+    /// free encounter slots, and whether a peer is already calling.
+    pub can_summon: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -91,12 +128,30 @@ pub struct Flags {
     pub start_stunned: bool,
     /// 1-based slot number for monsters whose behaviour depends on it.
     pub slot: u8,
+    /// `CorpseSlug.StarterMoveIdx` / `TwoTailedRat.StarterMoveIndex`: which
+    /// move of three the monster opens on.
+    pub starter_move: u8,
+}
+
+/// Counters a monster keeps across its own moves, each named after the field
+/// it ports. Fields the move graph reads are also mirrored into `RollCtx`.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Vars {
+    /// `TwoTailedRat.TurnsUntilSummonable`, starting at 2.
+    pub turns_until_summonable: i32,
+    /// `TwoTailedRat.CallForBackupCount`, kept in step across all the rats.
+    pub call_for_backup_count: i32,
+    /// `WaterfallGiant.CurrentPressureGunDamage`, growing by 5 a shot.
+    pub pressure_gun_damage: i32,
+    /// `WaterfallGiant.SteamEruptionDamage`, the pressure the blast carries.
+    pub steam_eruption_damage: i32,
 }
 
 #[derive(Clone, Debug)]
 pub struct Monster {
     pub id: MonsterId,
     pub flags: Flags,
+    pub vars: Vars,
     states: Vec<State>,
     initial: usize,
     current: usize,
@@ -117,6 +172,11 @@ impl Monster {
         let mut m = Self {
             id,
             flags,
+            vars: Vars {
+                turns_until_summonable: 2,
+                pressure_gun_damage: Self::pressure_gun_base(id, asc),
+                ..Vars::default()
+            },
             states,
             initial,
             current: initial,
@@ -168,6 +228,29 @@ impl Monster {
             CeremonialBeast => flat(252, 262),
             KinFollower => r(58, 59, 62, 63),
             KinPriest => flat(190, 199),
+
+            Toadpole => r(21, 25, 22, 26),
+            CorpseSlug => r(25, 27, 27, 29),
+            DampCultist => r(51, 53, 52, 54),
+            CalcifiedCultist => r(38, 41, 39, 42),
+            FossilStalker => r(51, 53, 54, 56),
+            GremlinMerc => r(47, 49, 51, 53),
+            FatGremlin => r(13, 17, 14, 18),
+            SneakyGremlin => r(10, 14, 11, 15),
+            GasBomb => flat(7, 8),
+            HauntedShip => flat(63, 67),
+            LivingFog => flat(80, 82),
+            PhantasmalGardener => r(26, 31, 27, 32),
+            PunchConstruct => flat(55, 60),
+            Seapunk => r(44, 46, 47, 49),
+            SewerClam => flat(56, 58),
+            SkulkingColony => flat(75, 80),
+            SludgeSpinner => r(37, 39, 41, 42),
+            TwoTailedRat => r(17, 21, 18, 22),
+            TerrorEel => flat(140, 150),
+            LagavulinMatriarch => flat(222, 233),
+            SoulFysh => flat(211, 221),
+            WaterfallGiant => flat(240, 250),
         }
     }
 
@@ -184,7 +267,28 @@ impl Monster {
             PhrogParasite => vec![(PowerId::Infested, 4)],
             Vantom => vec![(PowerId::Slippery, asc.pick(AscensionLevel::ToughEnemies, 9, 8))],
             KinFollower => vec![(PowerId::Minion, 1)],
+
+            CorpseSlug => vec![(PowerId::Ravenous, asc.pick(AscensionLevel::DeadlyEnemies, 5, 4))],
+            FossilStalker => vec![(PowerId::Suck, 3)],
+            GremlinMerc => vec![(PowerId::Surprise, 1), (PowerId::Thievery, 20)],
+            GasBomb => vec![(PowerId::Minion, 1)],
+            PhantasmalGardener => vec![(PowerId::Skittish, asc.pick(AscensionLevel::ToughEnemies, 7, 6))],
+            PunchConstruct => vec![(PowerId::Artifact, 1)],
+            SewerClam => vec![(PowerId::Plating, asc.pick(AscensionLevel::ToughEnemies, 9, 8))],
+            SkulkingColony => vec![(PowerId::HardenedShell, 20)],
+            TerrorEel => vec![(PowerId::Shriek, asc.pick(AscensionLevel::ToughEnemies, 75, 70))],
+            // LagavulinMatriarch.Sleep: shell first, then the nap counter.
+            LagavulinMatriarch => vec![(PowerId::Plating, 12), (PowerId::Asleep, 3)],
             _ => vec![],
+        }
+    }
+
+    /// `WaterfallGiant.BasePressureGunDamage`, the opening value of the shot
+    /// that grows by 5 each time it fires.
+    pub fn pressure_gun_base(id: MonsterId, asc: Ascension) -> i32 {
+        match id {
+            MonsterId::WaterfallGiant => asc.pick(AscensionLevel::DeadlyEnemies, 23, 20),
+            _ => 0,
         }
     }
 
@@ -208,11 +312,11 @@ impl Monster {
     }
 
     /// `MonsterMoveStateMachine.RollMove` via `FindNextMoveState`.
-    pub fn roll_move(&mut self, rng: &mut Rng) -> usize {
+    pub fn roll_move(&mut self, rng: &mut Rng, ctx: RollCtx) -> usize {
         if self.can_transition_away() && !(!self.performed_first && self.states[self.current].is_move()) {
             let mut first_logged = None;
             loop {
-                let next = self.next_state(rng);
+                let next = self.next_state(rng, ctx);
                 self.current = next;
                 self.performed_current = false;
                 if first_logged.is_none() && self.states[next].logged() {
@@ -252,6 +356,26 @@ impl Monster {
         self.force_move("STUNNED", vec![Intent::Stun], follow);
     }
 
+    /// `WaterfallGiant.TriggerAboutToBlowState`: jump straight to the wind-up,
+    /// whatever the graph had queued (`SetMoveImmediate(forceTransition: true)`).
+    pub fn force_about_to_blow(&mut self) {
+        let Some(idx) = self.states.iter().position(|s| s.name() == "ABOUT_TO_BLOW_MOVE") else { return };
+        self.current = idx;
+        self.performed_current = false;
+        self.next_move = Some(idx);
+    }
+
+    /// `WaterfallGiant.SteamEruptionDamage`: bank the pressure, and show it on
+    /// the blast's intent.
+    pub fn arm_death_blow(&mut self, damage: i32) {
+        self.vars.steam_eruption_damage = damage;
+        for st in &mut self.states {
+            if let State::Move { name: "EXPLODE_MOVE", intents, .. } = st {
+                *intents = vec![Intent::DeathBlow { damage }];
+            }
+        }
+    }
+
     /// `IllusionPower.AfterDeath`: a one-shot REVIVE move that heals to full.
     pub fn set_revive(&mut self) {
         let follow = self.log.last().copied();
@@ -279,16 +403,16 @@ impl Monster {
     }
 
     /// `MonsterState.GetNextState` for the current state.
-    fn next_state(&self, rng: &mut Rng) -> usize {
+    fn next_state(&self, rng: &mut Rng, ctx: RollCtx) -> usize {
         match &self.states[self.current] {
             State::Move { follow_up, .. } => follow_up.unwrap_or(self.initial),
             State::Conditional(branches) => branches
                 .iter()
-                .find(|(_, c)| self.eval(*c))
+                .find(|(_, c)| self.eval(*c, ctx))
                 .map(|(s, _)| *s)
                 .expect("no conditional branch matched"),
             State::Random(branches) => {
-                let weights: Vec<f32> = branches.iter().map(|b| self.branch_weight(b)).collect();
+                let weights: Vec<f32> = branches.iter().map(|b| self.branch_weight(b, ctx)).collect();
                 let total: f32 = weights.iter().sum();
                 let mut roll = rng.next_float(total);
                 for (b, w) in branches.iter().zip(&weights) {
@@ -302,17 +426,19 @@ impl Monster {
         }
     }
 
-    fn eval(&self, c: Cond) -> bool {
+    fn eval(&self, c: Cond, ctx: RollCtx) -> bool {
         match c {
             Cond::IsAlone => self.flags.is_alone,
             Cond::IsFront => self.flags.is_front,
             Cond::NotFront => !self.flags.is_front,
             Cond::Slot(n) => self.flags.slot == n,
+            Cond::Asleep => ctx.asleep,
+            Cond::NotAsleep => !ctx.asleep,
         }
     }
 
     /// `RandomBranchState.GetStateWeight`.
-    fn branch_weight(&self, b: &Branch) -> f32 {
+    fn branch_weight(&self, b: &Branch, ctx: RollCtx) -> f32 {
         let mut w = 1.0;
         match b.repeat {
             Repeat::Once => {
@@ -340,7 +466,7 @@ impl Monster {
                 return 0.0;
             }
         }
-        w * b.weight
+        w * b.weight.value(ctx)
     }
 
     /// `MonsterModel.PerformMove`: the effects of `next_move`, then bookkeeping.
@@ -352,7 +478,7 @@ impl Monster {
         match name {
             "STUNNED" => vec![],
             "REVIVE_MOVE" => vec![Effect::Revive { target: me }],
-            _ => moves(self.id, name, me, asc),
+            _ => moves(self.id, name, me, asc, &mut self.vars),
         }
     }
 }
@@ -388,10 +514,12 @@ fn statuses(id: CardId, n: u32) -> impl Iterator<Item = Effect> {
 }
 
 /// Per-monster move bodies. The `name` is the `MoveState` id string.
-fn moves(id: MonsterId, name: &str, me: CreatureRef, asc: Ascension) -> Vec<Effect> {
+/// `vars` is the monster's own counter block, which a few moves read and bump.
+fn moves(id: MonsterId, name: &str, me: CreatureRef, asc: Ascension, vars: &mut Vars) -> Vec<Effect> {
     use AscensionLevel::{DeadlyEnemies as D, ToughEnemies as T};
     use MonsterId::*;
     let d = |a: i32, b: i32| asc.pick(D, b, a);
+    let t = |a: i32, b: i32| asc.pick(T, b, a);
     match (id, name) {
         (Nibbit, "BUTT_MOVE") => vec![attack(me, d(12, 13), 1)],
         (Nibbit, "SLICE_MOVE") => vec![attack(me, d(6, 7), 1), block(me, asc.pick(T, 6, 5))],
@@ -488,6 +616,141 @@ fn moves(id: MonsterId, name: &str, me: CreatureRef, asc: Ascension) -> Vec<Effe
         (KinPriest, "BEAM_MOVE") => vec![attack(me, 3, 3)],
         (KinPriest, "RITUAL_MOVE") => vec![buff(me, PowerId::Strength, d(2, 3))],
 
+        // Spiken stacks Thorns; Spike Spit spends the same 2 back.
+        (Toadpole, "SPIKEN_MOVE") => vec![buff(me, PowerId::Thorns, 2)],
+        (Toadpole, "SPIKE_SPIT_MOVE") => vec![buff(me, PowerId::Thorns, -2), attack(me, d(3, 4), 3)],
+        (Toadpole, "WHIRL_MOVE") => vec![attack(me, d(7, 8), 1)],
+
+        (CorpseSlug, "WHIP_SLAP_MOVE") => vec![attack(me, 3, 2)],
+        (CorpseSlug, "GLOMP_MOVE") => vec![attack(me, d(8, 9), 1)],
+        (CorpseSlug, "GOOP_MOVE") => vec![debuff(me, PowerId::Frail, 2)],
+
+        (DampCultist, "INCANTATION_MOVE") => vec![buff(me, PowerId::Ritual, d(5, 6))],
+        (DampCultist, "DARK_STRIKE_MOVE") => vec![attack(me, d(1, 3), 1)],
+        (CalcifiedCultist, "INCANTATION_MOVE") => vec![buff(me, PowerId::Ritual, 2)],
+        (CalcifiedCultist, "DARK_STRIKE_MOVE") => vec![attack(me, d(9, 11), 1)],
+
+        (FossilStalker, "TACKLE_MOVE") => vec![attack(me, d(9, 11), 1), debuff(me, PowerId::Frail, 1)],
+        (FossilStalker, "LATCH_MOVE") => vec![attack(me, d(12, 14), 1)],
+        (FossilStalker, "LASH_MOVE") => vec![attack(me, d(3, 4), 2)],
+
+        // The merc's damage scales on Tough, not Deadly. Every one of its
+        // moves ends with a Thievery steal.
+        (GremlinMerc, "GIMME_MOVE") => vec![attack(me, t(7, 8), 2), Effect::Steal { thief: me }],
+        (GremlinMerc, "DOUBLE_SMASH_MOVE") => {
+            vec![attack(me, t(6, 7), 2), Effect::Steal { thief: me }, debuff(me, PowerId::Weak, 2)]
+        }
+        (GremlinMerc, "HEHE_MOVE") => {
+            vec![attack(me, t(8, 9), 1), Effect::Steal { thief: me }, buff(me, PowerId::Strength, 2)]
+        }
+        (FatGremlin, "SPAWNED_MOVE") => vec![],
+        (FatGremlin, "FLEE_MOVE") => vec![Effect::Escape { target: me }],
+        (SneakyGremlin, "SPAWNED_MOVE") => vec![],
+        (SneakyGremlin, "TACKLE_MOVE") => vec![attack(me, d(9, 10), 1)],
+
+        (GasBomb, "EXPLODE_MOVE") => vec![attack(me, d(8, 9), 1), Effect::Kill { target: me }],
+
+        (HauntedShip, "SWIPE_MOVE") => vec![attack(me, d(13, 14), 1)],
+        (HauntedShip, "STOMP_MOVE") => vec![attack(me, d(4, 5), 3)],
+        (HauntedShip, "HAUNT_MOVE") => {
+            std::iter::once(debuff(me, PowerId::Weak, 3)).chain(statuses(CardId::Dazed, 5)).collect()
+        }
+
+        (LivingFog, "ADVANCED_GAS_MOVE") => vec![attack(me, d(8, 9), 1), debuff(me, PowerId::Smoggy, 1)],
+        // BloatAmount is 1, and the spawn is dropped when no bomb slot is free.
+        (LivingFog, "BLOAT_MOVE") => vec![
+            Effect::SpawnMonster { id: GasBomb, flags: Flags::default() },
+            attack(me, d(5, 6), 1),
+        ],
+        (LivingFog, "SUPER_GAS_BLAST_MOVE") => vec![attack(me, d(8, 9), 1)],
+
+        (PhantasmalGardener, "BITE_MOVE") => vec![attack(me, 5, 1)],
+        (PhantasmalGardener, "LASH_MOVE") => vec![attack(me, 7, 1)],
+        (PhantasmalGardener, "FLAIL_MOVE") => vec![attack(me, 1, 3)],
+        (PhantasmalGardener, "ENLARGE_MOVE") => vec![buff(me, PowerId::Strength, d(2, 3))],
+
+        (PunchConstruct, "READY_MOVE") => vec![block(me, 10)],
+        (PunchConstruct, "STRONG_PUNCH_MOVE") => vec![attack(me, d(14, 16), 1)],
+        (PunchConstruct, "FAST_PUNCH_MOVE") => vec![attack(me, d(5, 6), 2), debuff(me, PowerId::Frail, 1)],
+
+        (Seapunk, "SEA_KICK_MOVE") => vec![attack(me, d(11, 13), 1)],
+        (Seapunk, "SPINNING_KICK_MOVE") => vec![attack(me, 2, 4)],
+        (Seapunk, "BUBBLE_BURP_MOVE") => vec![block(me, t(7, 8)), buff(me, PowerId::Strength, d(1, 2))],
+
+        (SewerClam, "PRESSURIZE_MOVE") => vec![buff(me, PowerId::Strength, 4)],
+        (SewerClam, "JET_MOVE") => vec![attack(me, d(10, 11), 1)],
+
+        (SkulkingColony, "ZOOM_MOVE" | "ZOOM_MOVE_2") => vec![attack(me, d(14, 16), 1)],
+        (SkulkingColony, "INERTIA_MOVE") => vec![attack(me, d(9, 11), 1), buff(me, PowerId::Strength, d(2, 4))],
+        (SkulkingColony, "PIERCING_STABS_MOVE") => vec![attack(me, d(7, 8), 2)],
+
+        (SludgeSpinner, "OIL_SPRAY_MOVE") => vec![attack(me, d(8, 9), 1), debuff(me, PowerId::Weak, 1)],
+        (SludgeSpinner, "SLAM_MOVE") => vec![attack(me, d(11, 12), 1)],
+        (SludgeSpinner, "RAGE_MOVE") => vec![attack(me, d(6, 7), 1), buff(me, PowerId::Strength, 3)],
+
+        // Every move but the call brings the summon one turn closer.
+        (TwoTailedRat, "SCRATCH_MOVE") => {
+            vars.turns_until_summonable -= 1;
+            vec![attack(me, d(8, 9), 1)]
+        }
+        (TwoTailedRat, "DISEASE_BITE_MOVE") => {
+            vars.turns_until_summonable -= 1;
+            vec![attack(me, d(6, 7), 1)]
+        }
+        (TwoTailedRat, "SCREECH_MOVE") => {
+            vars.turns_until_summonable -= 1;
+            vec![debuff(me, PowerId::Frail, 1)]
+        }
+        (TwoTailedRat, "CALL_FOR_BACKUP_MOVE") => vec![Effect::SpawnMonster { id: TwoTailedRat, flags: Flags::default() }],
+
+        (TerrorEel, "CRASH_MOVE") => vec![attack(me, d(16, 18), 1)],
+        (TerrorEel, "THRASH_MOVE") => vec![attack(me, d(3, 4), 3), buff(me, PowerId::Vigor, 6)],
+        (TerrorEel, "STUN_MOVE") => vec![],
+        (TerrorEel, "TERROR_MOVE") => vec![debuff(me, PowerId::Vulnerable, 99)],
+
+        (LagavulinMatriarch, "SLEEP_MOVE") => vec![],
+        (LagavulinMatriarch, "SLASH_MOVE") => vec![attack(me, d(19, 21), 1)],
+        (LagavulinMatriarch, "SLASH2_MOVE") => vec![attack(me, d(12, 14), 1), block(me, t(12, 14))],
+        (LagavulinMatriarch, "DISEMBOWEL_MOVE") => vec![attack(me, d(9, 10), 2)],
+        (LagavulinMatriarch, "SOUL_SIPHON_MOVE") => vec![
+            debuff(me, PowerId::Strength, -2),
+            debuff(me, PowerId::Dexterity, -2),
+            buff(me, PowerId::Strength, 2),
+        ],
+
+        // One Beckon shuffled into the draw pile, one into the discard.
+        (SoulFysh, "BECKON_MOVE") => vec![
+            Effect::GenerateCard { id: CardId::Beckon, upgraded: false, to: Pile::DrawRandom, free_this_turn: false },
+            Effect::GenerateCard { id: CardId::Beckon, upgraded: false, to: Pile::Discard, free_this_turn: false },
+        ],
+        (SoulFysh, "DE_GAS_MOVE") => vec![attack(me, d(16, 17), 1)],
+        (SoulFysh, "GAZE_MOVE") => std::iter::once(attack(me, d(7, 8), 1)).chain(statuses(CardId::Beckon, 1)).collect(),
+        (SoulFysh, "FADE_MOVE") => vec![buff(me, PowerId::Intangible, 2)],
+        (SoulFysh, "SCREAM_MOVE") => vec![attack(me, d(13, 15), 1), debuff(me, PowerId::Vulnerable, 3)],
+
+        (WaterfallGiant, "PRESSURIZE_MOVE") => vec![buff(me, PowerId::SteamEruption, d(15, 20))],
+        (WaterfallGiant, "STOMP_MOVE") => vec![
+            attack(me, d(15, 16), 1),
+            debuff(me, PowerId::Weak, 1),
+            buff(me, PowerId::SteamEruption, 3),
+        ],
+        (WaterfallGiant, "RAM_MOVE") => vec![attack(me, d(10, 11), 1), buff(me, PowerId::SteamEruption, 3)],
+        (WaterfallGiant, "SIPHON_MOVE") => vec![
+            Effect::Heal { target: me, amount: t(10, 15) as f64 },
+            buff(me, PowerId::SteamEruption, 3),
+        ],
+        (WaterfallGiant, "PRESSURE_GUN_MOVE") => {
+            let shot = vars.pressure_gun_damage;
+            vars.pressure_gun_damage += 5;
+            vec![attack(me, shot, 1), buff(me, PowerId::SteamEruption, 3)]
+        }
+        (WaterfallGiant, "PRESSURE_UP_MOVE") => vec![attack(me, d(13, 14), 1), buff(me, PowerId::SteamEruption, 3)],
+        // Banks the pressure into the blast and drops the power.
+        (WaterfallGiant, "ABOUT_TO_BLOW_MOVE") => vec![Effect::ArmSteamEruption { target: me }],
+        (WaterfallGiant, "EXPLODE_MOVE") => {
+            vec![attack(me, vars.steam_eruption_damage, 1), Effect::Kill { target: me }]
+        }
+
         _ => panic!("unknown move {name} for {id:?}"),
     }
 }
@@ -532,7 +795,7 @@ impl G {
 }
 
 fn br(state: usize, repeat: Repeat) -> Branch {
-    Branch { state, cooldown: 0, repeat, weight: 1.0 }
+    Branch { state, cooldown: 0, repeat, weight: Weight::Fixed(1.0) }
 }
 
 fn atk(damage: i32) -> Intent {
@@ -549,6 +812,7 @@ fn graph(id: MonsterId, asc: Ascension, flags: Flags) -> (Vec<State>, usize) {
     use Intent::*;
     use MonsterId::*;
     let d = |a: i32, b: i32| asc.pick(D, b, a);
+    let t = |a: i32, b: i32| asc.pick(AscensionLevel::ToughEnemies, b, a);
     let mut g = G::new();
     match id {
         // Butt -> Slice -> Hiss -> Butt, entered by front/back/alone.
@@ -639,8 +903,8 @@ fn graph(id: MonsterId, asc: Ascension, flags: Flags) -> (Vec<State>, usize) {
             let swipe_r = g.mv("SWIPE_RANDOM_MOVE", vec![atk(d(8, 9)), Buff]);
             let headbutt = g.mv("HEADBUTT_MOVE", vec![atk(d(14, 16))]);
             let branch = g.random(vec![
-                Branch { state: swipe_r, cooldown: 0, repeat: Repeat::CannotRepeat, weight: 0.4 },
-                Branch { state: headbutt, cooldown: 0, repeat: Repeat::CannotRepeat, weight: 0.6 },
+                Branch { state: swipe_r, cooldown: 0, repeat: Repeat::CannotRepeat, weight: Weight::Fixed(0.4) },
+                Branch { state: headbutt, cooldown: 0, repeat: Repeat::CannotRepeat, weight: Weight::Fixed(0.6) },
             ]);
             g.follow(illusion, swipe);
             g.follow(swipe, branch);
@@ -658,12 +922,12 @@ fn graph(id: MonsterId, asc: Ascension, flags: Flags) -> (Vec<State>, usize) {
             let frail = g.mv("FRAIL_SPORES_MOVE", vec![atk(d(8, 9)), Debuff { strong: false }]);
             let smash = g.mv("SMASH_MOVE", vec![atk(d(11, 12))]);
             let rand = g.random(vec![
-                Branch { state: vuln, cooldown: 3, repeat: Repeat::CannotRepeat, weight: 1.0 },
-                Branch { state: frail, cooldown: 2, repeat: Repeat::CannotRepeat, weight: 1.0 },
+                Branch { state: vuln, cooldown: 3, repeat: Repeat::CannotRepeat, weight: Weight::Fixed(1.0) },
+                Branch { state: frail, cooldown: 2, repeat: Repeat::CannotRepeat, weight: Weight::Fixed(1.0) },
                 br(smash, Repeat::CannotRepeat),
             ]);
             let initial = g.random(vec![
-                Branch { state: frail, cooldown: 2, repeat: Repeat::CannotRepeat, weight: 1.0 },
+                Branch { state: frail, cooldown: 2, repeat: Repeat::CannotRepeat, weight: Weight::Fixed(1.0) },
                 br(smash, Repeat::CannotRepeat),
             ]);
             g.follow(vuln, rand);
@@ -823,6 +1087,263 @@ fn graph(id: MonsterId, asc: Ascension, flags: Flags) -> (Vec<State>, usize) {
             g.follow(ritual, frailty);
             g.done(frailty)
         }
+
+        // Front toadpole opens on Spiken, the back one on Whirl.
+        Toadpole => {
+            let spit = g.mv("SPIKE_SPIT_MOVE", vec![multi(d(3, 4), 3)]);
+            let whirl = g.mv("WHIRL_MOVE", vec![atk(d(7, 8))]);
+            let spiken = g.mv("SPIKEN_MOVE", vec![Buff]);
+            let init = g.cond(vec![(whirl, Cond::NotFront), (spiken, Cond::IsFront)]);
+            g.follow(whirl, spiken);
+            g.follow(spiken, spit);
+            g.follow(spit, whirl);
+            g.done(init)
+        }
+        // A fixed cycle entered at the slug's assigned starting move.
+        CorpseSlug => {
+            let whip = g.mv("WHIP_SLAP_MOVE", vec![multi(3, 2)]);
+            let glomp = g.mv("GLOMP_MOVE", vec![atk(d(8, 9))]);
+            let goop = g.mv("GOOP_MOVE", vec![Debuff { strong: false }]);
+            g.follow(whip, glomp);
+            g.follow(glomp, goop);
+            g.follow(goop, whip);
+            g.done(match flags.starter_move % 3 {
+                0 => whip,
+                1 => glomp,
+                _ => goop,
+            })
+        }
+        // Both cultists: one Incantation, then Dark Strike forever.
+        DampCultist | CalcifiedCultist => {
+            let dmg = if id == DampCultist { d(1, 3) } else { d(9, 11) };
+            let incant = g.mv("INCANTATION_MOVE", vec![Buff]);
+            let strike = g.mv("DARK_STRIKE_MOVE", vec![atk(dmg)]);
+            g.follow(incant, strike);
+            g.follow(strike, strike);
+            g.done(incant)
+        }
+        FossilStalker => {
+            let tackle = g.mv("TACKLE_MOVE", vec![atk(d(9, 11)), Debuff { strong: false }]);
+            let latch = g.mv("LATCH_MOVE", vec![atk(d(12, 14))]);
+            let lash = g.mv("LASH_MOVE", vec![multi(d(3, 4), 2)]);
+            let rand = g.random(vec![
+                br(latch, Repeat::Times(2)),
+                br(tackle, Repeat::Times(2)),
+                br(lash, Repeat::Times(2)),
+            ]);
+            g.follow(tackle, rand);
+            g.follow(latch, rand);
+            g.follow(lash, rand);
+            g.done(latch)
+        }
+        GremlinMerc => {
+            let gimme = g.mv("GIMME_MOVE", vec![multi(t(7, 8), 2)]);
+            let smash = g.mv("DOUBLE_SMASH_MOVE", vec![multi(t(6, 7), 2), Debuff { strong: false }]);
+            let hehe = g.mv("HEHE_MOVE", vec![atk(t(8, 9)), Buff]);
+            g.follow(gimme, smash);
+            g.follow(smash, hehe);
+            g.follow(hehe, gimme);
+            g.done(gimme)
+        }
+        // Both spawned gremlins idle the turn they arrive.
+        FatGremlin => {
+            let spawned = g.mv("SPAWNED_MOVE", vec![Stun]);
+            let flee = g.mv("FLEE_MOVE", vec![Escape]);
+            g.follow(spawned, flee);
+            g.follow(flee, flee);
+            g.done(spawned)
+        }
+        SneakyGremlin => {
+            let spawned = g.mv("SPAWNED_MOVE", vec![Stun]);
+            let tackle = g.mv("TACKLE_MOVE", vec![atk(d(9, 10))]);
+            g.follow(spawned, tackle);
+            g.follow(tackle, tackle);
+            g.done(spawned)
+        }
+        GasBomb => {
+            let boom = g.mv("EXPLODE_MOVE", vec![DeathBlow { damage: d(8, 9) }]);
+            g.follow(boom, boom);
+            g.done(boom)
+        }
+        HauntedShip => {
+            let swipe = g.mv("SWIPE_MOVE", vec![atk(d(13, 14))]);
+            let stomp = g.mv("STOMP_MOVE", vec![multi(d(4, 5), 3)]);
+            let haunt = g.mv("HAUNT_MOVE", vec![Debuff { strong: false }, Status { count: 5 }]);
+            g.follow(haunt, swipe);
+            g.follow(swipe, stomp);
+            g.follow(stomp, swipe);
+            g.done(haunt)
+        }
+        LivingFog => {
+            let gas = g.mv("ADVANCED_GAS_MOVE", vec![atk(d(8, 9)), CardDebuff]);
+            let bloat = g.mv("BLOAT_MOVE", vec![atk(d(5, 6)), Summon]);
+            let blast = g.mv("SUPER_GAS_BLAST_MOVE", vec![atk(d(8, 9))]);
+            g.follow(gas, bloat);
+            g.follow(bloat, blast);
+            g.follow(blast, bloat);
+            g.done(gas)
+        }
+        // One shared cycle; each gardener enters it at its own slot's move.
+        PhantasmalGardener => {
+            let bite = g.mv("BITE_MOVE", vec![atk(5)]);
+            let lash = g.mv("LASH_MOVE", vec![atk(7)]);
+            let enlarge = g.mv("ENLARGE_MOVE", vec![Buff]);
+            let flail = g.mv("FLAIL_MOVE", vec![multi(1, 3)]);
+            let init = g.cond(vec![
+                (flail, Cond::Slot(1)),
+                (bite, Cond::Slot(2)),
+                (lash, Cond::Slot(3)),
+                (enlarge, Cond::Slot(4)),
+            ]);
+            g.follow(bite, lash);
+            g.follow(lash, flail);
+            g.follow(flail, enlarge);
+            g.follow(enlarge, bite);
+            g.done(init)
+        }
+        PunchConstruct => {
+            let ready = g.mv("READY_MOVE", vec![Defend]);
+            let strong = g.mv("STRONG_PUNCH_MOVE", vec![atk(d(14, 16))]);
+            let fast = g.mv("FAST_PUNCH_MOVE", vec![multi(d(5, 6), 2), Debuff { strong: false }]);
+            g.follow(ready, fast);
+            g.follow(fast, strong);
+            g.follow(strong, ready);
+            g.done(ready)
+        }
+        Seapunk => {
+            let kick = g.mv("SEA_KICK_MOVE", vec![atk(d(11, 13))]);
+            let spin = g.mv("SPINNING_KICK_MOVE", vec![multi(2, 4)]);
+            let bubble = g.mv("BUBBLE_BURP_MOVE", vec![Buff, Defend]);
+            g.follow(kick, spin);
+            g.follow(spin, bubble);
+            g.follow(bubble, kick);
+            g.done(kick)
+        }
+        SewerClam => {
+            let pressurize = g.mv("PRESSURIZE_MOVE", vec![Buff]);
+            let jet = g.mv("JET_MOVE", vec![atk(d(10, 11))]);
+            g.follow(pressurize, jet);
+            g.follow(jet, pressurize);
+            g.done(jet)
+        }
+        // Two Zooms in a row, then Inertia and Piercing Stabs.
+        SkulkingColony => {
+            let zoom = g.mv("ZOOM_MOVE", vec![atk(d(14, 16))]);
+            let zoom2 = g.mv("ZOOM_MOVE_2", vec![atk(d(14, 16))]);
+            let inertia = g.mv("INERTIA_MOVE", vec![atk(d(9, 11)), Buff]);
+            let stabs = g.mv("PIERCING_STABS_MOVE", vec![multi(d(7, 8), 2)]);
+            g.follow(zoom, zoom2);
+            g.follow(zoom2, inertia);
+            g.follow(inertia, stabs);
+            g.follow(stabs, zoom);
+            g.done(zoom)
+        }
+        SludgeSpinner => {
+            let oil = g.mv("OIL_SPRAY_MOVE", vec![atk(d(8, 9)), Debuff { strong: false }]);
+            let slam = g.mv("SLAM_MOVE", vec![atk(d(11, 12))]);
+            let rage = g.mv("RAGE_MOVE", vec![atk(d(6, 7)), Buff]);
+            let rand = g.random(vec![
+                br(oil, Repeat::CannotRepeat),
+                br(slam, Repeat::CannotRepeat),
+                br(rage, Repeat::CannotRepeat),
+            ]);
+            g.follow(oil, rand);
+            g.follow(slam, rand);
+            g.follow(rage, rand);
+            g.done(oil)
+        }
+        // While a call is possible it crowds out the other three 9 to 1.
+        TwoTailedRat => {
+            let scratch = g.mv("SCRATCH_MOVE", vec![atk(d(8, 9))]);
+            let bite = g.mv("DISEASE_BITE_MOVE", vec![atk(d(6, 7))]);
+            let screech = g.mv("SCREECH_MOVE", vec![Debuff { strong: false }]);
+            let call = g.mv("CALL_FOR_BACKUP_MOVE", vec![Summon]);
+            let ordinary = Weight::IfCanSummon { yes: 1.0 / 12.0, no: 1.0 };
+            let rand = g.random(vec![
+                Branch { state: scratch, cooldown: 0, repeat: Repeat::CannotRepeat, weight: ordinary },
+                Branch { state: bite, cooldown: 0, repeat: Repeat::CannotRepeat, weight: ordinary },
+                Branch { state: screech, cooldown: 3, repeat: Repeat::CannotRepeat, weight: ordinary },
+                Branch {
+                    state: call,
+                    cooldown: 0,
+                    repeat: Repeat::Once,
+                    weight: Weight::IfCanSummon { yes: 0.75, no: 0.0 },
+                },
+            ]);
+            g.follow(scratch, rand);
+            g.follow(bite, rand);
+            g.follow(screech, rand);
+            g.follow(call, rand);
+            // Rats placed by the encounter open on a set move; ones called in
+            // later roll from the branch like any other turn.
+            g.done(match flags.starter_move % 3 {
+                _ if flags.slot == 0 => rand,
+                0 => scratch,
+                1 => bite,
+                _ => screech,
+            })
+        }
+        // Crash and Thrash trade off; Shriek interrupts into Stun then Terror.
+        TerrorEel => {
+            let crash = g.mv("CRASH_MOVE", vec![atk(d(16, 18))]);
+            let thrash = g.mv("THRASH_MOVE", vec![multi(d(3, 4), 3), Buff]);
+            let stun = g.mv("STUN_MOVE", vec![Stun]);
+            let terror = g.mv("TERROR_MOVE", vec![Debuff { strong: true }]);
+            g.follow(crash, thrash);
+            g.follow(thrash, crash);
+            g.follow(stun, terror);
+            g.follow(terror, crash);
+            g.done(crash)
+        }
+        // Sleeps until the nap counter runs out or a hit gets through.
+        LagavulinMatriarch => {
+            let sleep = g.mv("SLEEP_MOVE", vec![Sleep]);
+            let slash = g.mv("SLASH_MOVE", vec![atk(d(19, 21))]);
+            let slash2 = g.mv("SLASH2_MOVE", vec![atk(d(12, 14)), Defend]);
+            let disembowel = g.mv("DISEMBOWEL_MOVE", vec![multi(d(9, 10), 2)]);
+            let siphon = g.mv("SOUL_SIPHON_MOVE", vec![Debuff { strong: true }, Buff]);
+            let branch = g.cond(vec![(sleep, Cond::Asleep), (slash, Cond::NotAsleep)]);
+            g.follow(sleep, branch);
+            g.follow(slash, disembowel);
+            g.follow(disembowel, slash2);
+            g.follow(slash2, siphon);
+            g.follow(siphon, slash);
+            g.done(sleep)
+        }
+        SoulFysh => {
+            let beckon = g.mv("BECKON_MOVE", vec![Status { count: 2 }]);
+            let degas = g.mv("DE_GAS_MOVE", vec![atk(d(16, 17))]);
+            let gaze = g.mv("GAZE_MOVE", vec![atk(d(7, 8)), Status { count: 1 }]);
+            let fade = g.mv("FADE_MOVE", vec![Buff]);
+            let scream = g.mv("SCREAM_MOVE", vec![atk(d(13, 15)), Debuff { strong: false }]);
+            g.follow(beckon, degas);
+            g.follow(degas, gaze);
+            g.follow(gaze, fade);
+            g.follow(fade, scream);
+            g.follow(scream, beckon);
+            g.done(beckon)
+        }
+        // Every move but Pressurize also builds pressure. Killing it only
+        // sets off the blast, which is what actually ends the fight.
+        WaterfallGiant => {
+            let pressurize = g.mv("PRESSURIZE_MOVE", vec![Buff]);
+            let stomp = g.mv("STOMP_MOVE", vec![atk(d(15, 16)), Debuff { strong: false }, Buff]);
+            let ram = g.mv("RAM_MOVE", vec![atk(d(10, 11)), Buff]);
+            let siphon = g.mv("SIPHON_MOVE", vec![Heal, Buff]);
+            let gun = g.mv("PRESSURE_GUN_MOVE", vec![atk(d(20, 23)), Buff]);
+            let up = g.mv("PRESSURE_UP_MOVE", vec![atk(d(13, 14)), Buff]);
+            let about = g.mv_once("ABOUT_TO_BLOW_MOVE", vec![Stun]);
+            let explode = g.mv("EXPLODE_MOVE", vec![DeathBlow { damage: 0 }]);
+            g.follow(pressurize, stomp);
+            g.follow(stomp, ram);
+            g.follow(ram, siphon);
+            g.follow(siphon, gun);
+            g.follow(gun, up);
+            g.follow(up, stomp);
+            g.follow(about, explode);
+            g.follow(explode, explode);
+            g.done(pressurize)
+        }
     }
 }
 
@@ -855,6 +1376,30 @@ pub fn all_move_names() -> &'static [&'static str] {
         }
         names
     })
+}
+
+/// The moves one monster can show, across every positional variant. Tooling
+/// uses it to describe an encounter without anyone writing notes by hand.
+pub fn move_names_of(id: MonsterId, asc: Ascension) -> Vec<&'static str> {
+    let variants = [
+        Flags::default(),
+        Flags { is_alone: true, ..Default::default() },
+        Flags { is_front: true, ..Default::default() },
+        Flags { middle: true, ..Default::default() },
+        Flags { starts_with_dance: true, ..Default::default() },
+        Flags { start_stunned: true, ..Default::default() },
+    ];
+    let mut names: Vec<&'static str> = vec![];
+    for flags in variants {
+        for s in graph(id, asc, flags).0 {
+            if let State::Move { name, .. } = s {
+                if !names.contains(&name) {
+                    names.push(name);
+                }
+            }
+        }
+    }
+    names
 }
 
 /// Index into `all_move_names`.

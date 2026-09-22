@@ -28,6 +28,13 @@ Change one here before changing the code that depends on it.
 - Scope of the first slice: act 1 at A10, every encounter incl. elites and boss, the full
   Ironclad card pool plus colorless, curses, statuses, and every relic and potion reachable
   by then. Acts 2 and 3 are added later as data.
+- Act 1 is two acts, not one. `ActModel.GetRandomList` rolls one act per index and both
+  Overgrowth and Underdocks sit at index 0, so a run gets either. Both are in scope for the
+  first slice; Hive and Glory (indices 1 and 2) are not.
+- Card enchantments live on the card. Relics and events attach them in the deck, so the sim
+  never creates one: it reads the `ench` field the recorder logs per card, or the generator
+  rolls one the card can take. Their value hooks run ahead of every power and relic, which
+  is where `Hook.ModifyDamage` puts them.
 - Ascension is a parameter with explicit code paths. Training and evaluation use A10 only.
 - Own RNG. We do not reproduce MegaCrit's generator.
 - Hand and piles are multisets. Hand order does not matter. The draw pile tracks a known

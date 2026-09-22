@@ -7,6 +7,7 @@
 //! need to observe the result of their own earlier effects continue in
 //! `step`, reached through `Effect::CardStep`.
 
+use crate::enchant::{Enchantment, EnchantmentId};
 use crate::combat::Combat;
 use crate::effect::{AttackTargets, CardFilter, Effect, GenPool, Pile, Then};
 use crate::ids::{CardId, PowerId};
@@ -152,6 +153,24 @@ defs! {
     AscendersBane: -1, Curse, Special, None, kw = [Unplayable, Ethereal], gen = false;
     GiantRock: 1, Attack, Special, AnyEnemy, gen = false;
     MindBlast: 1, Attack, Uncommon, AnyEnemy, kw = [Innate], gen = false;
+    Beckon: 1, Status, Special, None, gen = false;
+    BadLuck: -1, Curse, Special, None, kw = [Unplayable], gen = false;
+    Clumsy: -1, Curse, Special, None, kw = [Unplayable, Ethereal], gen = false;
+    CurseOfTheBell: -1, Curse, Special, None, kw = [Unplayable], gen = false;
+    Debt: -1, Curse, Special, None, kw = [Unplayable], gen = false;
+    Decay: -1, Curse, Special, None, kw = [Unplayable], gen = false;
+    Doubt: -1, Curse, Special, None, kw = [Unplayable], gen = false;
+    Enthralled: 2, Curse, Special, None, gen = false;
+    Folly: -1, Curse, Special, None, kw = [Unplayable, Ethereal, Innate], gen = false;
+    Greed: -1, Curse, Special, None, kw = [Unplayable], gen = false;
+    Guilty: -1, Curse, Special, None, kw = [Unplayable], gen = false;
+    Injury: -1, Curse, Special, None, kw = [Unplayable], gen = false;
+    Normality: -1, Curse, Special, None, kw = [Unplayable], gen = false;
+    PoorSleep: -1, Curse, Special, None, kw = [Unplayable, Retain], gen = false;
+    Regret: -1, Curse, Special, None, kw = [Unplayable], gen = false;
+    Shame: -1, Curse, Special, None, kw = [Unplayable], gen = false;
+    SporeMind: 1, Curse, Special, None, kw = [Exhaust], gen = false;
+    Writhe: -1, Curse, Special, None, kw = [Unplayable, Innate], gen = false;
 }
 
 /// The Ironclad card pool in `IroncladCardPool.cs` order, for generation.
@@ -210,6 +229,10 @@ pub struct Card {
     pub ethereal_added: bool,
     /// `BaseReplayCount`: extra plays per play (Soldier's Stew).
     pub replay: u32,
+    /// `CardModel.Affliction is Smog` (Living Fog). Cleared each turn end.
+    pub smogged: bool,
+    /// `CardModel.Enchantment`. Attached outside combat and carried in.
+    pub enchantment: Option<Enchantment>,
 }
 
 impl Card {
@@ -225,6 +248,8 @@ impl Card {
             extra_damage: 0.0,
             ethereal_added: false,
             replay: 0,
+            smogged: false,
+            enchantment: None,
         }
     }
 
@@ -262,8 +287,27 @@ impl Card {
         self.cost_this_turn.or(self.cost_this_combat).unwrap_or(base).max(0)
     }
 
-    /// Keywords, including the ones upgrades add.
+    /// `CardCmd.Enchant`: attach one, with the keyword and cost changes its
+    /// `OnEnchant` makes. Enchanting happens outside combat, so this is called
+    /// while the deck is being built, not mid-fight.
+    pub fn enchant(&mut self, id: EnchantmentId, amount: i32) {
+        let e = Enchantment::new(id, amount);
+        if e.makes_free() {
+            self.cost_this_combat = Some(0);
+        }
+        self.enchantment = Some(e);
+    }
+
+    /// Keywords, including the ones upgrades and enchantments add.
     pub fn has(&self, k: Keyword) -> bool {
+        if let Some(e) = &self.enchantment {
+            if e.keywords_added().contains(&k) {
+                return true;
+            }
+            if k == Keyword::Exhaust && e.removes_exhaust() {
+                return false;
+            }
+        }
         if self.def().keywords.contains(&k) {
             return true;
         }
@@ -271,6 +315,12 @@ impl Card {
             return true;
         }
         k == Keyword::Innate && self.upgraded && matches!(self.id, CardId::Aggression | CardId::Juggling)
+    }
+
+    /// `CardModel.GainsBlock`: whether the printed card ever grants block,
+    /// which is what Nimble and Goopy check before they can sit on it.
+    pub fn gains_block(&self) -> bool {
+        self.vars().block > 0.0
     }
 
     pub fn has_tag(&self, t: Tag) -> bool {
@@ -299,6 +349,10 @@ impl Card {
         let mut v = match self.id {
             Aggression | Barricade | Cascade | Havoc | Hellraiser | InfernalBlade | PrimalForce
             | Stoke | Unmovable | Wound | Dazed | AscendersBane | DarkEmbrace | Juggling | Corruption => d(),
+            // Curses. Regret reads the hand it ends the turn in, so its
+            // damage is not a card number.
+            Clumsy | CurseOfTheBell | Debt | Doubt | Enthralled
+            | Folly | Greed | Guilty | Injury | Normality | PoorSleep | Regret | Shame | SporeMind | Writhe => d(),
             Anger => Vars { damage: pick(6.0, 8.0), ..d() },
             Armaments => Vars { block: 5.0, ..d() },
             AshenStrike => Vars { damage: 6.0, magic: pick(3.0, 4.0), ..d() },
@@ -377,6 +431,9 @@ impl Card {
             Infection => Vars { damage: 3.0, ..d() },
             GiantRock => Vars { damage: pick(16.0, 20.0), ..d() },
             MindBlast => Vars { magic: 1.0, ..d() },
+            Beckon => Vars { hp_loss: 6.0, ..d() },
+            BadLuck => Vars { hp_loss: 13.0, ..d() },
+            Decay => Vars { damage: 2.0, ..d() },
         };
         v.damage += self.extra_damage;
         v
@@ -627,7 +684,11 @@ impl Card {
             Whirlwind => vec![aoe(self.captured_x.max(0) as u32)],
             Slimed => vec![draw(v.cards)],
             GiantRock => vec![attack(1)],
-            Wound | Dazed | Burn | Infection | AscendersBane => vec![],
+            Wound | Dazed | Burn | Infection | AscendersBane | Beckon => vec![],
+            // Enthralled and Spore Mind are the only playable curses and
+            // neither does anything; the rest are unplayable.
+            BadLuck | Clumsy | CurseOfTheBell | Debt | Decay | Doubt | Enthralled | Folly | Greed | Guilty
+            | Injury | Normality | PoorSleep | Regret | Shame | SporeMind | Writhe => vec![],
         }
     }
 

@@ -18,6 +18,7 @@ using MegaCrit.Sts2.Core.Combat;
 using MegaCrit.Sts2.Core.Context;
 using MegaCrit.Sts2.Core.Entities.Cards;
 using MegaCrit.Sts2.Core.Entities.Creatures;
+using MegaCrit.Sts2.Core.Entities.Enchantments;
 using MegaCrit.Sts2.Core.Entities.Multiplayer;
 using MegaCrit.Sts2.Core.Entities.Players;
 using MegaCrit.Sts2.Core.GameActions.Multiplayer;
@@ -115,6 +116,9 @@ public static class Recorder
             ["room"] = state.Encounter.RoomType.ToString(),
             ["ascension"] = run?.AscensionLevel ?? 0,
             ["max_energy"] = me.MaxEnergy,
+            // Gremlin Merc steals it and hands what it took to the Fat
+            // Gremlin as Heist, which shows up in the enemy powers.
+            ["gold"] = me.Gold,
             ["deck"] = me.Deck.Cards.Select(CardRef).ToList(),
             ["relics"] = me.Relics.Select(r => r.Id.Entry).ToList(),
             ["potions"] = me.PotionSlots.Select(p => p?.Id.Entry).ToList(),
@@ -150,11 +154,22 @@ public static class Recorder
 
     // ---- state ------------------------------------------------------------
 
-    private static Dictionary<string, object?> CardRef(CardModel c) => new()
+    // An enchantment rides along with the card, so every pile logs it: the
+    // sim folds Sharp and Nimble into damage and block before any power or
+    // relic sees the number, and cannot infer either from the card alone.
+    private static Dictionary<string, object?> CardRef(CardModel c)
     {
-        ["id"] = c.Id.Entry,
-        ["up"] = c.IsUpgraded,
-    };
+        var d = new Dictionary<string, object?>
+        {
+            ["id"] = c.Id.Entry,
+            ["up"] = c.IsUpgraded,
+        };
+        if (c.Enchantment is { } e)
+        {
+            d["ench"] = new object?[] { e.Id.Entry, e.Amount, e.Status == EnchantmentStatus.Disabled };
+        }
+        return d;
+    }
 
     private static Dictionary<string, object?> HandCard(CardModel c)
     {

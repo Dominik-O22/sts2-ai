@@ -60,6 +60,9 @@ pub enum PotionId {
     BloodPotion,
     SoldiersStew,
     Ashwater,
+    // Token rarity: handed out, never offered as a reward. Named for its
+    // class, `PotionShapedRock`, so the recorder's id matches.
+    PotionShapedRock,
 }
 
 pub const ALL: &[PotionId] = &[
@@ -110,6 +113,7 @@ pub const ALL: &[PotionId] = &[
     PotionId::BloodPotion,
     PotionId::SoldiersStew,
     PotionId::Ashwater,
+    PotionId::PotionShapedRock,
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -117,6 +121,8 @@ pub enum Rarity {
     Common,
     Uncommon,
     Rare,
+    /// `PotionRarity.Token`: never in a reward pool.
+    Token,
 }
 
 /// Who the player picks when throwing it. `TargetType` collapsed to what the
@@ -140,13 +146,14 @@ impl PotionId {
             BeetleJuice | BottledPotential | DistilledChaos | DropletOfPrecognition | EntropicBrew | FairyInABottle
             | FruitJuice | GigantificationPotion | LiquidMemories | LuckyTonic | MazalethsGift | OrobicAcid
             | ShacklingPotion | ShipInABottle | SneckoOil | SoldiersStew => Rarity::Rare,
+            PotionShapedRock => Rarity::Token,
         }
     }
 
     pub fn target(self) -> Target {
         use PotionId::*;
         match self {
-            BeetleJuice | FirePotion | PowderedDemise | VulnerablePotion | WeakPotion => Target::Enemy,
+            BeetleJuice | FirePotion | PotionShapedRock | PowderedDemise | VulnerablePotion | WeakPotion => Target::Enemy,
             _ => Target::None,
         }
     }
@@ -206,6 +213,13 @@ impl PotionId {
             FirePotion => vec![Effect::Damage {
                 target: enemy(),
                 amount: 20.0,
+                props: ValueProp::UNPOWERED,
+                dealer: Some(me),
+                card: None,
+            }],
+            PotionShapedRock => vec![Effect::Damage {
+                target: enemy(),
+                amount: 15.0,
                 props: ValueProp::UNPOWERED,
                 dealer: Some(me),
                 card: None,

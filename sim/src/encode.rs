@@ -10,6 +10,7 @@
 use crate::card::Card;
 use crate::combat::{Action, Combat, RoomKind};
 use crate::effect::{Pile, Then};
+use crate::enchant::ALL as ALL_ENCHANTMENTS;
 use crate::ids::{CardId, ALL_CARDS, ALL_MONSTERS, ALL_POWERS};
 use crate::monster::{self, Intent};
 use crate::potion;
@@ -18,7 +19,7 @@ use crate::types::CreatureRef;
 
 pub const MAX_HAND: usize = crate::combat::MAX_HAND;
 /// Phrog Parasite plus its four Wrigglers is the largest act 1 board.
-pub const MAX_ENEMIES: usize = 5;
+pub const MAX_ENEMIES: usize = 6;
 /// Two slots, four with Potion Belt.
 pub const MAX_POTIONS: usize = 4;
 /// Distinct (id, upgraded, cost) options a card choice can show.
@@ -31,6 +32,7 @@ pub const N_POWERS: usize = ALL_POWERS.len();
 pub const N_MONSTERS: usize = ALL_MONSTERS.len();
 pub const N_RELICS: usize = relic::ALL.len();
 pub const N_POTIONS: usize = potion::ALL.len();
+pub const N_ENCHANTMENTS: usize = ALL_ENCHANTMENTS.len();
 /// Embedding vocabularies: 0 is the pad, ids are shifted by one.
 pub const CARD_VOCAB: usize = N_CARDS + 1;
 pub const MONSTER_VOCAB: usize = N_MONSTERS + 1;
@@ -52,12 +54,18 @@ const THEN_KINDS: usize = 10;
 pub const F_PLAYER_POWERS: usize = F_GLOBAL + GLOBAL_LEN;
 pub const F_HAND: usize = F_PLAYER_POWERS + N_POWERS;
 pub const HAND_FEATS: usize = 7;
-pub const F_PILES: usize = F_HAND + MAX_HAND * HAND_FEATS;
+/// One block per hand slot, one cell per enchantment: its amount, or -1
+/// once it is spent. A card carries at most one, so a block is all zeros
+/// or has a single live cell.
+pub const F_HAND_ENCHANTS: usize = F_HAND + MAX_HAND * HAND_FEATS;
+pub const F_PILES: usize = F_HAND_ENCHANTS + MAX_HAND * N_ENCHANTMENTS;
 /// Draw, discard, exhaust: counts per (card, upgraded).
 pub const PILE_LEN: usize = N_CARDS * 2;
 pub const F_ENEMIES: usize = F_PILES + 3 * PILE_LEN;
 /// Creature fields, then 15 intent fields, then powers.
-pub const ENEMY_FEATS: usize = 7 + 15 + N_POWERS;
+pub const ENEMY_FEATS: usize = 7 + INTENT_FEATS + N_POWERS;
+/// One-hot per `Intent` kind plus its numbers.
+pub const INTENT_FEATS: usize = 18;
 pub const F_RELICS: usize = F_ENEMIES + MAX_ENEMIES * ENEMY_FEATS;
 pub const F_POTIONS: usize = F_RELICS + 2 * N_RELICS;
 pub const F_CHOICES: usize = F_POTIONS + MAX_POTIONS;
@@ -85,7 +93,7 @@ fn then_kind(then: Then) -> usize {
         Then::Exhaust => 0,
         Then::Upgrade => 1,
         Then::MoveTo(Pile::Hand) => 2,
-        Then::MoveTo(Pile::DrawTop | Pile::DrawBottom) => 3,
+        Then::MoveTo(Pile::DrawTop | Pile::DrawBottom | Pile::DrawRandom) => 3,
         Then::MoveTo(Pile::Discard | Pile::Exhaust) => 4,
         Then::FreeThisCombat => 5,
         Then::ToHandFreeThisTurn => 6,
@@ -96,8 +104,23 @@ fn then_kind(then: Then) -> usize {
 }
 
 /// Sort key that makes hand and choice slots order-free.
-fn card_key(c: &Combat, k: &Card) -> (usize, bool, i32) {
-    (k.id as usize, k.upgraded, c.cost(k))
+/// Everything the observation shows about a card, so two hand positions
+/// that look alike really are alike. Three copies of one card carrying
+/// different enchantments sort apart, and the same way every turn.
+/// `extra_damage` is never negative, so its bits order like the number.
+fn card_key(c: &Combat, k: &Card) -> (usize, bool, i32, usize, i32, i32, bool, u64, bool) {
+    let e = k.enchantment;
+    (
+        k.id as usize,
+        k.upgraded,
+        c.cost(k),
+        e.map_or(0, |e| e.id as usize + 1),
+        e.map_or(0, |e| e.amount),
+        e.map_or(0, |e| e.data),
+        e.is_some_and(|e| e.disabled),
+        k.extra_damage.to_bits(),
+        k.exhaust_on_next_play,
+    )
 }
 
 /// Hand indices in slot order.
@@ -124,11 +147,17 @@ pub fn choice_order(c: &Combat) -> Vec<(u32, &Card)> {
 }
 
 /// Enemy indices by target slot: the game's slot order, dead ones included
-/// so slots stay put when something dies.
-fn enemy_slots(c: &Combat) -> &[usize] {
-    let n = c.order.len().min(MAX_ENEMIES);
-    debug_assert!(c.order.len() <= MAX_ENEMIES, "more enemies than target slots");
-    &c.order[..n]
+/// so slots stay put when something dies. Corpses pile up past the slot count
+/// in a long fight (Living Fog's bombs), and when they do they give up their
+/// slots first, so every living enemy stays targetable.
+fn enemy_slots(c: &Combat) -> Vec<usize> {
+    if c.order.len() <= MAX_ENEMIES {
+        return c.order.clone();
+    }
+    let mut slots: Vec<usize> = c.order.iter().copied().filter(|&i| c.enemies[i].acts()).collect();
+    slots.extend(c.order.iter().copied().filter(|&i| !c.enemies[i].acts()));
+    slots.truncate(MAX_ENEMIES);
+    slots
 }
 
 fn target_slot(c: &Combat, target: Option<usize>) -> Option<usize> {
@@ -210,6 +239,12 @@ fn intent_into(intents: &[Intent], out: &mut [f32]) {
             Intent::Sleep => out[12] = 1.0,
             Intent::Stun => out[13] = 1.0,
             Intent::Heal => out[14] = 1.0,
+            Intent::Escape => out[15] = 1.0,
+            // A blast that also kills the attacker; damage reads like an attack.
+            Intent::DeathBlow { damage } => {
+                out[16] = 1.0;
+                out[17] = damage as f32 / 20.0;
+            }
         }
     }
 }
@@ -260,7 +295,13 @@ pub fn encode(c: &Combat, floats: &mut [f32], ids: &mut [i64], mask_out: &mut [b
         f[3] = k.def().x_cost as u8 as f32;
         f[4] = (cost >= 0 && cost <= p.energy) as u8 as f32;
         f[5] = k.exhaust_on_next_play as u8 as f32;
-        f[6] = k.extra_damage as f32 / 10.0;
+        // Flat extra damage the card carries: Rampage's growth and
+        // Momentum's banked amount are the same thing to a policy.
+        f[6] = (k.extra_damage as f32 + k.enchantment.map_or(0, |e| e.data) as f32) / 10.0;
+        if let Some(e) = &k.enchantment {
+            floats[F_HAND_ENCHANTS + slot * N_ENCHANTMENTS + e.id as usize] =
+                if e.disabled { -1.0 } else { e.amount as f32 / 3.0 };
+        }
         ids[I_HAND + slot] = k.id as i64 + 1;
     }
 
@@ -281,8 +322,8 @@ pub fn encode(c: &Combat, floats: &mut [f32], ids: &mut [i64], mask_out: &mut [b
         f[4] = e.creature.hp as f32 / e.creature.max_hp.max(1) as f32;
         f[5] = e.creature.block as f32 / 30.0;
         f[6] = e.reviving as u8 as f32;
-        intent_into(e.monster.intents(), &mut f[7..22]);
-        powers_into(c, CreatureRef::Enemy(i), &mut f[22..]);
+        intent_into(e.monster.intents(), &mut f[7..7 + INTENT_FEATS]);
+        powers_into(c, CreatureRef::Enemy(i), &mut f[7 + INTENT_FEATS..]);
         ids[I_ENEMIES + slot] = e.monster.id as i64 + 1;
         ids[I_MOVES + slot] = e.monster.next_move_name().and_then(monster::move_index).map_or(0, |m| m as i64 + 1);
     }
@@ -352,6 +393,7 @@ fn choice_verb(then: Then) -> &'static str {
         Then::MoveTo(Pile::Hand) | Then::ToHandFreeThisTurn => "take",
         Then::MoveTo(Pile::DrawTop) => "draw next",
         Then::MoveTo(Pile::DrawBottom) => "bury",
+        Then::MoveTo(Pile::DrawRandom) => "shuffle in",
         Then::MoveTo(Pile::Discard) => "discard",
         Then::MoveTo(Pile::Exhaust) => "exhaust",
         Then::FreeThisCombat => "make free",
@@ -490,6 +532,28 @@ mod tests {
         }
     }
 
+    /// Three Strikes that differ only by their enchantment take three
+    /// fixed positions, whatever order the game holds them in.
+    #[test]
+    fn copies_of_one_card_sort_by_their_enchantment() {
+        use crate::enchant::EnchantmentId;
+        let mut rng = Rng::new(3);
+        let s = generate(&mut rng, 8, Ascension(10));
+        let mut c = s.combat(1);
+        c.player.hand.clear();
+        for (uid, ench) in [(101, Some((EnchantmentId::Sharp, 3))), (102, None), (103, Some((EnchantmentId::Sharp, 1)))] {
+            let mut k = Card::new(uid, CardId::StrikeIronclad, false);
+            if let Some((id, amount)) = ench {
+                k.enchant(id, amount);
+            }
+            c.player.hand.push(k);
+        }
+        let uids = |c: &Combat| hand_order(c).iter().map(|&i| c.player.hand[i].uid).collect::<Vec<_>>();
+        assert_eq!(uids(&c), vec![102, 103, 101]);
+        c.player.hand.reverse();
+        assert_eq!(uids(&c), vec![102, 103, 101]);
+    }
+
     #[test]
     fn sorted_hand_slots_map_back_to_hand_indices() {
         let mut rng = Rng::new(3);
@@ -505,9 +569,9 @@ mod tests {
 }
 
 /// Every vocabulary the policy embeds, in index order, one `kind name`
-/// per line. `sim/vocab.txt` pins it: the model's embedding rows mean
-/// whatever they were trained on, so entries may be appended but never
-/// moved. Regenerate with `cargo run --release --example vocab > vocab.txt`.
+/// per line. `sim/vocab.txt` holds it and every checkpoint records it, so
+/// a checkpoint from a smaller sim can be remapped by name (the Python
+/// side does that). Regenerate with `cargo run --release --example vocab > vocab.txt`.
 pub fn vocab_text() -> String {
     let mut out = String::new();
     for id in ALL_CARDS {
@@ -528,40 +592,23 @@ pub fn vocab_text() -> String {
     for name in monster::all_move_names() {
         out += &format!("move {name}\n");
     }
+    for id in ALL_ENCHANTMENTS {
+        out += &format!("enchant {id:?}\n");
+    }
     out
 }
 
 #[cfg(test)]
 mod vocab_tests {
-    /// Pinned entries must still be at the same index; only appends are
-    /// allowed. See `vocab_text`.
+    /// `sim/vocab.txt` must describe the built sim: checkpoints record it
+    /// and the Python loader remaps older checkpoints by name against it.
     #[test]
-    fn vocabulary_order_is_pinned() {
+    fn vocabulary_file_matches_the_sim() {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/vocab.txt");
-        let pinned = std::fs::read_to_string(path).expect("sim/vocab.txt missing; run `cargo run --release --example vocab > vocab.txt` in sim/");
-        let current = super::vocab_text();
-        let by_kind = |s: &str| -> std::collections::BTreeMap<String, Vec<String>> {
-            let mut m: std::collections::BTreeMap<String, Vec<String>> = Default::default();
-            for line in s.lines() {
-                let (kind, name) = line.split_once(' ').unwrap();
-                m.entry(kind.to_string()).or_default().push(name.to_string());
-            }
-            m
-        };
-        let (pinned, current) = (by_kind(&pinned), by_kind(&current));
-        for (kind, names) in &pinned {
-            let now = &current[kind];
-            for (i, name) in names.iter().enumerate() {
-                assert_eq!(
-                    now.get(i).map(String::as_str),
-                    Some(name.as_str()),
-                    "{kind} vocabulary changed at index {i}: pinned {name}, now {:?}. Append new ids at the end, then regenerate sim/vocab.txt with `cargo run --release --example vocab > vocab.txt`.",
-                    now.get(i)
-                );
-            }
-            if now.len() > names.len() {
-                panic!("{kind} vocabulary grew by {}; regenerate sim/vocab.txt with `cargo run --release --example vocab > vocab.txt` and commit it", now.len() - names.len());
-            }
-        }
+        let pinned = std::fs::read_to_string(path).unwrap_or_default();
+        assert!(
+            pinned == super::vocab_text(),
+            "sim/vocab.txt is out of date; regenerate it with `cargo run --release --example vocab > vocab.txt` in sim/ and commit it"
+        );
     }
 }

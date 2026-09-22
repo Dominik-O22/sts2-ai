@@ -4,6 +4,7 @@
 pub mod card;
 pub mod combat;
 pub mod effect;
+pub mod enchant;
 pub mod encode;
 pub mod encounter;
 pub mod env;
@@ -172,6 +173,94 @@ mod tests {
         EnemySpec { id, flags: Flags::default() }
     }
 
+    /// A Nibbit fight whose deck holds one enchanted copy of `id`, in hand.
+    fn enchanted(id: ids::CardId, ench: enchant::EnchantmentId, amount: i32, seed: u64) -> Combat {
+        use crate::card::Card;
+        let mut deck = ironclad_starter_deck();
+        let mut k = Card::new(0, id, false);
+        k.enchant(ench, amount);
+        deck.push(k);
+        let mut c = Combat::new(&deck, IRONCLAD_HP, IRONCLAD_HP, IRONCLAD_ENERGY, &[one(MonsterId::Nibbit)], Ascension(10), seed);
+        if let Some(i) = c.player.draw.iter().position(|k| k.enchantment.is_some()) {
+            let card = c.player.draw.remove(i);
+            c.player.hand.insert(0, card);
+        }
+        c
+    }
+
+    /// The enchanted card's slot in hand.
+    fn ench_idx(c: &Combat) -> usize {
+        c.player.hand.iter().position(|k| k.enchantment.is_some()).unwrap()
+    }
+
+    /// Shame is the curse a relic handed Dom, and the one whose timing is
+    /// easy to get wrong: the Frail it lands must survive the turn end it
+    /// was applied on.
+    #[test]
+    fn shame_lands_frail_that_does_not_tick_the_turn_it_arrives() {
+        use crate::card::Card;
+        let mut c = fight(&[one(MonsterId::Nibbit)], 5);
+        c.player.hand.push(Card::new(900, ids::CardId::Shame, false));
+        let shame = c.player.hand.len() - 1;
+        assert!(!c.legal_actions().contains(&Action::PlayCard { hand_idx: shame, target: None }));
+        c.step(Action::EndTurn);
+        assert_eq!(c.player.creature.power_amount(PowerId::Frail), 1);
+        // A second turn holding it stacks, and the first point now ticks.
+        c.player.hand.push(Card::new(901, ids::CardId::Shame, false));
+        c.step(Action::EndTurn);
+        assert_eq!(c.player.creature.power_amount(PowerId::Frail), 1);
+    }
+
+    /// Normality vetoes from hand, so it costs a play without ever being one.
+    #[test]
+    fn normality_stops_the_fourth_card_each_turn() {
+        use crate::card::Card;
+        let mut c = fight(&[one(MonsterId::Nibbit)], 5);
+        c.player.energy = 99;
+        c.player.hand.clear();
+        for uid in 0..5 {
+            c.player.hand.push(Card::new(910 + uid, ids::CardId::DefendIronclad, false));
+        }
+        c.player.hand.push(Card::new(920, ids::CardId::Normality, false));
+        for _ in 0..3 {
+            c.step(Action::PlayCard { hand_idx: 0, target: None });
+        }
+        assert_eq!(c.stats.cards_played_this_turn, 3);
+        assert!(!c.legal_actions().iter().any(|a| matches!(a, Action::PlayCard { .. })));
+    }
+
+    #[test]
+    fn sharp_lands_before_vulnerable_multiplies() {
+        let mut c = enchanted(ids::CardId::StrikeIronclad, enchant::EnchantmentId::Sharp, 3, 5);
+        c.enemies[0].creature.powers.push(Power::new(PowerId::Vulnerable, 2));
+        let hp = c.enemies[0].creature.hp;
+        c.step(Action::PlayCard { hand_idx: ench_idx(&c), target: Some(0) });
+        // Hook.ModifyDamage asks the enchantment first: (6 + 3) * 1.5, not
+        // 6 * 1.5 + 3, which would be 12.
+        assert_eq!(c.enemies[0].creature.hp, hp - 13);
+    }
+
+    #[test]
+    fn momentum_banks_its_damage_so_the_first_hit_is_plain() {
+        let mut c = enchanted(ids::CardId::StrikeIronclad, enchant::EnchantmentId::Momentum, 4, 5);
+        // Duplication buys the second play the banked damage shows up on.
+        c.player.creature.powers.push(Power::new(PowerId::Duplication, 1));
+        let hp = c.enemies[0].creature.hp;
+        c.step(Action::PlayCard { hand_idx: ench_idx(&c), target: Some(0) });
+        assert_eq!(c.enemies[0].creature.hp, hp - (6 + 6 + 4));
+    }
+
+    #[test]
+    fn sown_pays_its_energy_once_and_goes_quiet() {
+        let mut c = enchanted(ids::CardId::DefendIronclad, enchant::EnchantmentId::Sown, 2, 5);
+        c.player.creature.powers.push(Power::new(PowerId::Duplication, 1));
+        let energy = c.player.energy;
+        c.step(Action::PlayCard { hand_idx: ench_idx(&c), target: None });
+        // One energy for the Defend, two back, and nothing for the replay.
+        assert_eq!(c.player.energy, energy - 1 + 2);
+        assert!(c.player.discard.iter().any(|k| k.enchantment.is_some_and(|e| e.disabled)));
+    }
+
     /// Play until the combat ends or `max` steps, random policy.
     fn play_random(c: &mut Combat, rng: &mut rng::Rng, max: u32) {
         let mut steps = 0;
@@ -209,6 +298,125 @@ mod tests {
         c.step(Action::EndTurn);
         assert_eq!(c.enemies[1].monster.next_move_name(), Some("NASTY_BITE_MOVE"));
         assert_eq!(c.enemies[2].monster.next_move_name(), Some("WRIGGLE_MOVE"));
+    }
+
+    /// Killing the giant only arms the blast; the fight ends when it lands.
+    #[test]
+    fn waterfall_giant_explodes_for_its_banked_pressure_instead_of_dying() {
+        let mut c = fight(&[one(MonsterId::WaterfallGiant)], 3);
+        // Turn 1 is Pressurize, worth 20 at A10.
+        c.step(Action::EndTurn);
+        assert_eq!(c.enemies[0].creature.power_amount(PowerId::SteamEruption), 20);
+        c.player.creature.powers.push(Power::new(PowerId::Strength, 500));
+        let i = c.player.hand.iter().position(|k| k.ty() == crate::types::CardType::Attack).unwrap();
+        c.step(Action::PlayCard { hand_idx: i, target: Some(0) });
+        // Dead on paper, but Steam Eruption holds the combat open and the
+        // giant comes back with the wind-up queued.
+        assert!(!c.is_over());
+        assert_eq!(c.enemies[0].monster.next_move_name(), Some("ABOUT_TO_BLOW_MOVE"));
+        c.step(Action::EndTurn);
+        // The wind-up banks the pressure into the blast and drops the power.
+        assert!(c.enemies[0].creature.power(PowerId::SteamEruption).is_none());
+        assert_eq!(c.enemies[0].monster.next_move_name(), Some("EXPLODE_MOVE"));
+        let hp = c.player.creature.hp;
+        c.step(Action::EndTurn);
+        assert_eq!(c.player.creature.hp, hp - 20);
+        assert_eq!(c.outcome, Some(Outcome::Won));
+    }
+
+    /// The matriarch naps behind Plating; one hit through it wakes her early.
+    #[test]
+    fn lagavulin_sleeps_behind_plating_until_a_hit_lands() {
+        let mut c = fight(&[one(MonsterId::LagavulinMatriarch)], 4);
+        assert_eq!(c.enemies[0].creature.power_amount(PowerId::Asleep), 3);
+        assert_eq!(c.enemies[0].monster.next_move_name(), Some("SLEEP_MOVE"));
+        // Plating blocks the first turn's chip damage outright.
+        c.step(Action::EndTurn);
+        assert_eq!(c.enemies[0].creature.power_amount(PowerId::Asleep), 2);
+        assert_eq!(c.enemies[0].monster.next_move_name(), Some("SLEEP_MOVE"));
+        // A hit big enough to get through the shell wakes her into Slash.
+        c.enemies[0].creature.block = 0;
+        c.player.creature.powers.push(Power::new(PowerId::Strength, 20));
+        let i = c.player.hand.iter().position(|k| k.ty() == crate::types::CardType::Attack).unwrap();
+        c.step(Action::PlayCard { hand_idx: i, target: Some(0) });
+        assert!(c.enemies[0].creature.power(PowerId::Asleep).is_none());
+        assert!(c.enemies[0].creature.power(PowerId::Plating).is_none());
+        assert_eq!(c.enemies[0].monster.next_move_name(), Some("STUNNED"));
+        c.step(Action::EndTurn);
+        assert_eq!(c.enemies[0].monster.next_move_name(), Some("SLASH_MOVE"));
+    }
+
+    /// Living Fog's smog settles on every skill once you play one.
+    #[test]
+    fn smog_blocks_the_rest_of_the_turns_skills_and_lifts_after_it() {
+        let mut c = fight(&[one(MonsterId::LivingFog)], 6);
+        c.player.creature.powers.push(Power::new(PowerId::Smoggy, 1));
+        let skill = |c: &Combat| c.player.hand.iter().position(|k| k.ty() == crate::types::CardType::Skill);
+        let i = skill(&c).expect("a skill in the opening hand");
+        c.step(Action::PlayCard { hand_idx: i, target: None });
+        assert!(c.player.hand.iter().filter(|k| k.ty() == crate::types::CardType::Skill).all(|k| k.smogged));
+        assert!(!c.legal_actions().iter().any(|a| matches!(a, Action::PlayCard { hand_idx, .. }
+            if c.player.hand[*hand_idx].ty() == crate::types::CardType::Skill)));
+        // Attacks are untouched, and the fog is gone next turn.
+        c.step(Action::EndTurn);
+        assert!(c.player.hand.iter().all(|k| !k.smogged));
+    }
+
+    /// The merc's death is a hand-off: a sneaky gremlin, and a fat one that
+    /// runs off with the loot.
+    #[test]
+    fn gremlin_merc_death_brings_two_gremlins_and_the_fat_one_flees() {
+        let mut c = fight(&[one(MonsterId::GremlinMerc)], 7);
+        c.player.creature.powers.push(Power::new(PowerId::Strength, 500));
+        let i = c.player.hand.iter().position(|k| k.ty() == crate::types::CardType::Attack).unwrap();
+        c.step(Action::PlayCard { hand_idx: i, target: Some(0) });
+        assert!(!c.is_over());
+        assert_eq!(c.enemies.len(), 3);
+        assert_eq!(c.enemies[1].monster.id, MonsterId::SneakyGremlin);
+        assert_eq!(c.enemies[2].monster.id, MonsterId::FatGremlin);
+        // Both idle the turn they arrive, then the fat one leaves.
+        c.step(Action::EndTurn);
+        assert_eq!(c.enemies[2].monster.next_move_name(), Some("FLEE_MOVE"));
+        c.step(Action::EndTurn);
+        assert!(c.enemies[2].escaped);
+        // An escape is not a kill: the sneaky gremlin still has to go.
+        assert!(!c.is_over());
+    }
+
+    /// Hardened Shell is a per-turn HP budget, not a per-hit cap.
+    #[test]
+    fn hardened_shell_caps_hp_lost_per_turn_and_refills_next_turn() {
+        let mut c = fight(&[one(MonsterId::SkulkingColony)], 8);
+        assert_eq!(c.enemies[0].creature.power_amount(PowerId::HardenedShell), 20);
+        let start = c.enemies[0].creature.hp;
+        c.player.creature.powers.push(Power::new(PowerId::Strength, 500));
+        let attacks: Vec<usize> =
+            (0..c.player.hand.len()).filter(|&i| c.player.hand[i].ty() == crate::types::CardType::Attack).collect();
+        assert!(attacks.len() >= 2, "need two attacks to spend the budget twice");
+        c.step(Action::PlayCard { hand_idx: attacks[0], target: Some(0) });
+        assert_eq!(c.enemies[0].creature.hp, start - 20);
+        // The second attack this turn finds the budget already spent.
+        let i = c.player.hand.iter().position(|k| k.ty() == crate::types::CardType::Attack).unwrap();
+        c.step(Action::PlayCard { hand_idx: i, target: Some(0) });
+        assert_eq!(c.enemies[0].creature.hp, start - 20);
+        c.step(Action::EndTurn);
+        let after = c.enemies[0].creature.hp;
+        let i = c.player.hand.iter().position(|k| k.ty() == crate::types::CardType::Attack).unwrap();
+        c.step(Action::PlayCard { hand_idx: i, target: Some(0) });
+        assert_eq!(c.enemies[0].creature.hp, after - 20);
+    }
+
+    /// A slug that watches its neighbour die gorges: Strength, and no move.
+    #[test]
+    fn corpse_slug_goes_ravenous_when_its_neighbour_dies() {
+        let mut c = fight(&[one(MonsterId::CorpseSlug), one(MonsterId::CorpseSlug)], 11);
+        assert_eq!(c.enemies[1].creature.power_amount(PowerId::Ravenous), 5);
+        c.player.creature.powers.push(Power::new(PowerId::Strength, 500));
+        let i = c.player.hand.iter().position(|k| k.ty() == crate::types::CardType::Attack).unwrap();
+        c.step(Action::PlayCard { hand_idx: i, target: Some(0) });
+        assert!(!c.enemies[0].creature.alive());
+        assert_eq!(c.enemies[1].creature.power_amount(PowerId::Strength), 5);
+        assert_eq!(c.enemies[1].monster.next_move_name(), Some("STUNNED"));
     }
 
     #[test]
@@ -297,6 +505,7 @@ mod tests {
             room: RoomKind::Monster,
             asc: Ascension(10),
             seed,
+            gold: 0,
         })
     }
 
@@ -312,6 +521,7 @@ mod tests {
             room: RoomKind::Monster,
             asc: Ascension(10),
             seed,
+            gold: 0,
         })
     }
 
@@ -341,6 +551,7 @@ mod tests {
             room: RoomKind::Monster,
             asc: Ascension(10),
             seed: 3,
+            gold: 0,
         });
         assert!(!c.legal_actions().iter().any(|a| matches!(a, Action::UsePotion { .. })));
         assert_eq!(c.player.creature.power_amount(PowerId::Dexterity), 0);
@@ -479,6 +690,7 @@ mod tests {
                     room: RoomKind::Elite,
                     asc: Ascension(10),
                     seed,
+                    gold: 0,
                 });
                 play_random(&mut c, &mut rng, 20_000);
                 assert!(c.is_over(), "runaway fight in {enc:?} seed {seed} relics {relics:?}");

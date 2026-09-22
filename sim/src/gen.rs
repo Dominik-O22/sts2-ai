@@ -6,6 +6,7 @@
 use serde_json::Value;
 
 use crate::card::{def, Card, IRONCLAD_POOL};
+use crate::enchant::{self, Enchantment};
 use crate::combat::{Combat, EnemySpec, RoomKind, Setup};
 use crate::encounter::{Encounter, Kind};
 use crate::ids::{CardId, MonsterId};
@@ -15,6 +16,21 @@ use crate::replay::Ids;
 use crate::rng::Rng;
 use crate::types::{Ascension, AscensionLevel, CardRarity};
 use crate::{ironclad_starter_deck, IRONCLAD_ENERGY, IRONCLAD_HP};
+
+/// Relics the sim leaves out because nothing they do reaches a combat: every
+/// one overrides only `AfterObtained` or the card-reward hooks. Anything the
+/// recorder names that is neither here nor ported is an error, not a silent
+/// drop, because a missing relic replays clean while being wrong.
+const INERT_RELICS: &[&str] = &[
+    "ALCHEMICAL_COFFER", "ARCANE_SCROLL", "ASTROLABE", "BEAUTIFUL_BRACELET", "CALLING_BELL", "CLAWS",
+    "CURSED_PEARL", "DISTINGUISHED_CAPE", "DUSTY_TOME", "ELECTRIC_SHRYMP", "EMPTY_CAGE", "FRAGRANT_MUSHROOM",
+    "FRESNEL_LENS", "GLASS_EYE", "GLITTER", "GOLDEN_PEARL", "HEFTY_TABLET", "JEWELRY_BOX", "KALEIDOSCOPE",
+    "LARGE_CAPSULE", "LEAFY_POULTICE", "LOOMING_FRUIT", "LOST_COFFER", "NEOWS_BONES", "NEOWS_TALISMAN",
+    "NEOWS_TORMENT", "NEW_LEAF", "NUTRITIOUS_OYSTER", "NUTRITIOUS_SOUP", "PANDORAS_BOX", "PAPER_KRANE",
+    "PHIAL_HOLSTER", "POMANDER", "PRECARIOUS_SHEARS", "PRECISE_SCISSORS", "PRESERVED_FOG", "SAND_CASTLE",
+    "SCROLL_BOXES", "SEA_GLASS", "SERE_TALON", "SIGNET_RING", "SMALL_CAPSULE", "STORYBOOK", "TANXS_WHISTLE",
+    "TRI_BOOMERANG", "VAKUU_CARD_SELECTOR", "WONGO_CUSTOMER_APPRECIATION_BADGE",
+];
 
 /// Last floor of act 1: the boss room.
 pub const BOSS_FLOOR: u32 = 16;
@@ -34,6 +50,8 @@ pub struct FightSetup {
     pub asc: Ascension,
     /// Floor the fight was generated for; 0 for recordings.
     pub floor: u32,
+    /// Run gold, which only Gremlin Merc's Thievery reads.
+    pub gold: i32,
 }
 
 impl FightSetup {
@@ -49,6 +67,7 @@ impl FightSetup {
             room: self.room,
             asc: self.asc,
             seed,
+            gold: self.gold,
         }
     }
 
@@ -84,16 +103,37 @@ impl FightSetup {
             .as_array()
             .ok_or("start without deck")?
             .iter()
-            .map(|v| card_ref(ids, v).map(|(id, up)| Card::new(0, id, up)))
+            .map(|v| {
+                let (id, up) = card_ref(ids, v)?;
+                let mut k = Card::new(0, id, up);
+                k.enchantment = card_ench(ids, v)?;
+                Ok::<_, String>(k)
+            })
             .collect::<Result<_, _>>()?;
         let relics: Vec<Relic> = start["relics"]
             .as_array()
-            .map(|a| a.iter().filter_map(|v| ids.relics.get(v.as_str()?)).map(|&id| Relic::new(id)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str())
+                    .filter(|name| !INERT_RELICS.contains(name))
+                    .map(|name| ids.relics.get(name).map(|&id| Relic::new(id)).ok_or_else(|| format!("unknown relic {name}")))
+                    .collect::<Result<_, _>>()
+            })
+            .transpose()?
             .unwrap_or_default();
         let potions: Vec<Option<PotionId>> = start["potions"]
             .as_array()
-            .map(|a| a.iter().map(|v| v.as_str().and_then(|s| ids.potions.get(s).copied())).collect())
+            .map(|a| {
+                a.iter()
+                    .map(|v| match v.as_str() {
+                        None => Ok(None),
+                        Some(name) => ids.potions.get(name).copied().map(Some).ok_or_else(|| format!("unknown potion {name}")),
+                    })
+                    .collect::<Result<_, _>>()
+            })
+            .transpose()?
             .unwrap_or_default();
+        let gold = start["gold"].as_i64().unwrap_or(0) as i32;
         let enc_name = start["encounter"].as_str().unwrap_or("");
         let encounter = *ids.encounters.get(enc_name).ok_or_else(|| format!("unknown encounter {enc_name}"))?;
         let monsters: Vec<MonsterId> = start["enemies"]
@@ -122,6 +162,7 @@ impl FightSetup {
             room,
             asc: Ascension(start["ascension"].as_i64().unwrap_or(0) as u8),
             floor: 0,
+            gold,
         })
     }
 }
@@ -130,6 +171,19 @@ pub(crate) fn card_ref(ids: &Ids, v: &Value) -> Result<(CardId, bool), String> {
     let id = v["id"].as_str().ok_or("card without id")?;
     let card = *ids.cards.get(id).ok_or_else(|| format!("unknown card {id}"))?;
     Ok((card, v["up"].as_bool().unwrap_or(false)))
+}
+
+/// The `ench` triple a recorded card carries, if it is enchanted.
+pub(crate) fn card_ench(ids: &Ids, v: &Value) -> Result<Option<Enchantment>, String> {
+    let Some(e) = v["ench"].as_array() else { return Ok(None) };
+    let name = e.first().and_then(Value::as_str).ok_or("enchantment without id")?;
+    let id = *ids.enchantments.get(name).ok_or_else(|| format!("unknown enchantment {name}"))?;
+    Ok(Some(Enchantment {
+        id,
+        amount: e.get(1).and_then(Value::as_i64).unwrap_or(0) as i32,
+        disabled: e.get(2).and_then(Value::as_bool).unwrap_or(false),
+        data: 0,
+    }))
 }
 
 /// Enemy specs for a recorded monster list: re-roll the encounter's own
@@ -158,6 +212,18 @@ fn relic_pool() -> Vec<RelicId> {
         .copied()
         .filter(|&id| !matches!(id, RelicId::BurningBlood | RelicId::PaelsFlesh | RelicId::LeadPaperweight))
         .collect()
+}
+
+/// Enchant a random unenchanted card with one the card can take. Amounts
+/// are the 1 to 3 the act 1 sources hand out.
+fn enchant_one(rng: &mut Rng, deck: &mut [Card]) {
+    let plain: Vec<usize> = (0..deck.len()).filter(|&i| deck[i].enchantment.is_none()).collect();
+    let Some(&i) = rng.pick(&plain) else { return };
+    let k = &deck[i];
+    let legal: Vec<_> =
+        enchant::ALL.iter().copied().filter(|id| Enchantment::new(*id, 1).can_enchant(k)).collect();
+    let Some(&id) = rng.pick(&legal) else { return };
+    deck[i].enchant(id, rng.next_int(3) as i32 + 1);
 }
 
 /// Which encounters a floor can hold. Floors 1-3 are the weak pool, the
@@ -234,6 +300,12 @@ pub fn generate_against(rng: &mut Rng, floor: u32, asc: Ascension, encounter: En
                 deck.remove(i);
             }
         }
+        // Relics and events hand out enchantments; act 1 rarely sees more
+        // than one or two, and they only ever land on a card that accepts
+        // them (`EnchantmentModel.CanEnchant`).
+        if rng.next_int(10) == 0 {
+            enchant_one(rng, &mut deck);
+        }
     }
 
     let mut relics = vec![Relic::new(RelicId::BurningBlood)];
@@ -273,6 +345,8 @@ pub fn generate_against(rng: &mut Rng, floor: u32, asc: Ascension, encounter: En
         room,
         asc,
         floor,
+        // Roughly what a run is carrying by this floor, before it spends any.
+        gold: 99 + (floor * 25) as i32,
     }
 }
 
