@@ -43,9 +43,8 @@ maturin from `sim-py/` into the package `sts2ai._sim`.
   back to a `combat::Action`.
 - `sim/src/env.rs`: `VecEnv` steps `n` combats in parallel with rayon,
   resets each one as it ends, and writes observations into caller buffers.
-  Terminal reward: win is `1 + 0.5 * hp_frac + 0.05 * potions_left`, loss
-  or a 500-step timeout is `-1`. This is the stopgap price table from
-  DESIGN.md; the run value network replaces it later.
+  Rewards are described under Reward below; they are the stopgap price
+  table from DESIGN.md, which the run value network replaces later.
 - `py/sts2ai/`: `Envs` owns the numpy buffers. `Policy` embeds card,
   enchantment, monster, move, and potion ids. Enemies are a set: one
   small encoder reads each enemy and the sum joins the MLP input, so no
@@ -55,14 +54,18 @@ maturin from `sim-py/` into the package `sts2ai._sim`.
   is a plain PPO with GAE. `evaluate.py` runs the policy greedily on the
   held-out set: ten generated fights per encounter from a fixed seed
   (`gen::holdout`), or on run recordings (Real decks, below).
-- Reward (`env.rs`): the terminal reward is a win at `1 + 0.5 * hp_frac +
-  0.05 * potions_left`, a loss or a 500-step timeout at -1. On top of it,
-  potential-based shaping: each step pays the change in half the enemy HP
-  fraction taken minus half the player HP fraction lost, measured from the
-  fight's own start. A fight's rewards sum to its terminal reward (the
-  batch test checks it), so the optimal policy is unchanged; the credit
+- Reward (`env.rs`): the terminal reward is a win at `1 + w * hp_frac +
+  0.1 * potions_left`, a loss or a 500-step timeout at -1. `w` is 0.5,
+  except after an act boss, where the next act's Ancient heals 80% of the
+  missing HP at A10 and only the other 20% counts (0.1). A potion at 0.1 is
+  about 16 HP. On top of it, potential-based shaping: each step pays the
+  change in half the enemy HP fraction taken minus `w` times the player HP
+  fraction lost, measured from the fight's own start. A fight's rewards
+  sum to its terminal reward (the batch test checks it), and PPO runs
+  undiscounted (`gamma` 1), so the optimal policy is unchanged; the credit
   for playing Armaments before the Strikes just lands at the play, not
-  fifty steps later.
+  fifty steps later. With a discount the policy was paid for finishing
+  sooner, and traded HP and potions for it.
 - Checkpoints record the vocabulary and the layout. Vocabulary growth
   (new cards, powers, monsters, relics, potions, moves, enchantments,
   intent kinds) is remapped by name on load. A layout change (a slot count

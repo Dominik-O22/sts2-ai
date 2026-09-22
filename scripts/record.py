@@ -181,6 +181,7 @@ RELIC_FIGHTS = [
                "something (Forgotten Soul), and have one turn of two cards or fewer (Diamond Diadem)."),
     RelicFight("biiig_hug", ["BIIIG_HUG"],
                "On pickup it asks for four cards to remove: take Defends. Every reshuffle adds a Soot."),
+    RelicFight("very_hot_cocoa", ["VERY_HOT_COCOA"], "Spend the four extra energy on turn 1."),
     RelicFight("elite", ["BOOMING_CONCH", "BLACK_BLOOD"],
                "Elites only for the conch. Win it: Black Blood heals 12 afterwards.",
                encounter="TERROR_EEL_ELITE"),

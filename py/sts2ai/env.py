@@ -76,6 +76,7 @@ class End(NamedTuple):
     won: bool
     hp_frac: float
     hp_lost: float
+    potions_used: int
     steps: int
     floor: int
     encounter: str

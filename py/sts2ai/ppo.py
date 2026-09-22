@@ -33,7 +33,9 @@ class Config:
     epochs: int = 4
     minibatches: int = 8
     lr: float = 3e-4
-    gamma: float = 0.995
+    # Undiscounted: a fight always ends, and discounting would pay the policy
+    # to spend HP and potions on finishing a turn sooner.
+    gamma: float = 1.0
     lam: float = 0.95
     clip: float = 0.2
     entropy: float = 0.01
@@ -111,6 +113,7 @@ class Stats:
             "win_rate": float(np.mean([e.won for e in self.ends])),
             "hp_kept": float(np.mean([e.hp_frac for e in self.ends if e.won] or [0.0])),
             "hp_lost": float(np.mean([e.hp_lost for e in self.ends if e.won] or [0.0])),
+            "potions_used": float(np.mean([e.potions_used for e in self.ends])),
             "ep_len": float(np.mean([e.steps for e in self.ends])),
             "reward": float(np.mean([e.reward for e in self.ends])),
         }

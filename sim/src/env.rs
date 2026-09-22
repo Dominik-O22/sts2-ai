@@ -6,12 +6,12 @@
 
 use rayon::prelude::*;
 
-use crate::combat::{Combat, Outcome};
+use crate::combat::{Combat, Outcome, RoomKind};
 use crate::encode::{self, N_ACTIONS, N_FLOATS, N_IDS};
 use crate::encounter::{Encounter, Kind};
 use crate::gen::{encounter_of_kind, generate, generate_against, FightSetup, BOSS_FLOOR};
 use crate::rng::{CombatRngs, Rng};
-use crate::types::Ascension;
+use crate::types::{Ascension, AscensionLevel};
 
 #[derive(Clone, Copy, Debug)]
 pub struct EnvConfig {
@@ -41,6 +41,8 @@ pub struct EpisodeEnd {
     pub hp_frac: f32,
     /// HP lost over the fight, as a fraction of max HP.
     pub hp_lost: f32,
+    /// Potions drunk (or thrown) over the fight.
+    pub potions_used: u32,
     pub steps: u32,
     pub floor: u32,
     pub encounter: Encounter,
@@ -49,15 +51,28 @@ pub struct EpisodeEnd {
 }
 
 /// Stopgap terminal reward (DESIGN.md, Decision engine): a win is worth 1
-/// plus half the HP fraction kept and a little per unused potion; a loss
-/// or a timed-out fight is -1.
+/// plus the HP fraction kept at `hp_weight` and 0.1 per unused potion, about
+/// the 16 HP a potion is worth to the fights ahead; a loss or a timed-out
+/// fight is -1.
 pub fn terminal_reward(c: &Combat) -> f32 {
     match c.outcome {
         Some(Outcome::Won) => {
             let hp = c.player.creature.hp as f32 / c.player.creature.max_hp.max(1) as f32;
-            1.0 + 0.5 * hp + 0.05 * c.potions.iter().flatten().count() as f32
+            1.0 + hp_weight(c) * hp + 0.1 * c.potions.iter().flatten().count() as f32
         }
         _ => -1.0,
+    }
+}
+
+/// What the HP fraction is worth: half a win, except after an act boss.
+/// The Ancient that opens the next act heals all missing HP, or 80% of it
+/// under Weary Traveler (`AncientEventModel.BeforeEventStarted`), so only
+/// the part it leaves counts.
+fn hp_weight(c: &Combat) -> f32 {
+    match c.room {
+        RoomKind::Boss if c.asc.has(AscensionLevel::WearyTraveler) => 0.5 * 0.2,
+        RoomKind::Boss => 0.0,
+        _ => 0.5,
     }
 }
 
@@ -82,7 +97,8 @@ impl Baseline {
 }
 
 /// Potential for reward shaping: half the fraction of enemy HP taken
-/// since the baseline, minus half the fraction of the player's HP lost.
+/// since the baseline, minus the fraction of the player's HP lost at the
+/// price the terminal reward puts on it.
 /// Zero at the baseline and, by convention, once the fight is over. Each
 /// step is rewarded the change in potential, so a fight's rewards sum to
 /// its terminal reward and no ordering of plays is preferred beyond what
@@ -94,7 +110,7 @@ pub fn potential(c: &Combat, base: Baseline) -> f32 {
         return 0.0;
     }
     let lost = (base.hp - c.player.creature.hp.max(0)) as f32 / c.player.creature.max_hp.max(1) as f32;
-    0.5 * (enemy_hp_taken(c) - base.taken) - 0.5 * lost
+    0.5 * (enemy_hp_taken(c) - base.taken) - hp_weight(c) * lost
 }
 
 /// The reward for a transition: the potential change, plus the terminal
@@ -145,6 +161,8 @@ impl Slot {
             won: c.outcome == Some(Outcome::Won),
             hp_frac: c.player.creature.hp.max(0) as f32 / c.player.creature.max_hp.max(1) as f32,
             hp_lost: (self.setup.hp - c.player.creature.hp.max(0)) as f32 / c.player.creature.max_hp.max(1) as f32,
+            potions_used: (self.setup.potions.iter().flatten().count())
+                .saturating_sub(c.potions.iter().flatten().count()) as u32,
             steps: self.steps,
             floor: self.setup.floor,
             encounter: self.setup.encounter,

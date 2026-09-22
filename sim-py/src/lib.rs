@@ -21,8 +21,8 @@ struct VecEnv {
     inner: Inner,
 }
 
-/// One finished fight: (env, won, hp_frac, hp_lost, steps, floor, encounter, kind, reward).
-type End = (usize, bool, f32, f32, u32, u32, String, String, f32);
+/// One finished fight: (env, won, hp_frac, hp_lost, potions_used, steps, floor, encounter, kind, reward).
+type End = (usize, bool, f32, f32, u32, u32, u32, String, String, f32);
 
 impl VecEnv {
     fn inner_asc(&self) -> Ascension {
@@ -113,7 +113,7 @@ impl VecEnv {
         let ends = py.detach(|| self.inner.step(a, f, i, m, r, d));
         Ok(ends
             .into_iter()
-            .map(|e| (e.env, e.won, e.hp_frac, e.hp_lost, e.steps, e.floor, format!("{:?}", e.encounter), format!("{:?}", e.kind), e.reward))
+            .map(|e| (e.env, e.won, e.hp_frac, e.hp_lost, e.potions_used, e.steps, e.floor, format!("{:?}", e.encounter), format!("{:?}", e.kind), e.reward))
             .collect())
     }
 }
