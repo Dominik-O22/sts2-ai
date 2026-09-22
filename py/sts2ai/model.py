@@ -1,7 +1,12 @@
-"""Policy and value network (DESIGN.md, Decision engine): id embeddings for
-the cards in hand and on offer, the enemies and their next moves, and the
-potions, concatenated
-with the dense features and run through an MLP with a masked policy head."""
+"""Policy and value network (DESIGN.md, Decision engine).
+
+Id embeddings for the cards in hand and on offer, the enemies and their
+next moves, and the potions are concatenated with the dense features and
+run through an MLP. The value head reads the MLP state. The policy head
+is keyed on the thing being acted on: each hand card, potion, or choice
+option is scored from its own embedding plus the MLP state, so "what Bash
+does" is learned once rather than once per hand slot.
+"""
 
 from __future__ import annotations
 
@@ -13,56 +18,70 @@ from torch import Tensor, nn
 from sts2ai.env import Layout
 
 
+def _head(in_dim: int, out_dim: int, hidden: int = 128) -> nn.Sequential:
+    head = nn.Sequential(nn.Linear(in_dim, hidden), nn.ReLU(), nn.Linear(hidden, out_dim))
+    nn.init.orthogonal_(head[-1].weight, gain=0.01)
+    nn.init.zeros_(head[-1].bias)
+    return head
+
+
 class Policy(nn.Module):
     def __init__(
         self, layout: Layout, hidden: int = 512, card_dim: int = 32, monster_dim: int = 16, move_dim: int = 8, potion_dim: int = 8
     ):
         super().__init__()
-        self.layout = layout
-        self.card = nn.Embedding(layout.card_vocab, card_dim, padding_idx=0)
-        self.monster = nn.Embedding(layout.monster_vocab, monster_dim, padding_idx=0)
-        self.move = nn.Embedding(layout.move_vocab, move_dim, padding_idx=0)
-        self.potion = nn.Embedding(layout.potion_vocab, potion_dim, padding_idx=0)
+        L = layout
+        # The heads are concatenated in action-index order, so the layout
+        # must be play, potion, end turn, choose, skip.
+        assert L.a_play == 0 and L.a_potion == L.max_hand * L.targets
+        assert L.a_end_turn == L.a_potion + L.max_potions * L.targets
+        assert L.a_choose == L.a_end_turn + 1 and L.a_skip == L.a_choose + L.max_choices == L.n_actions - 1
+        self.layout = L
+        self.card = nn.Embedding(L.card_vocab, card_dim, padding_idx=0)
+        self.monster = nn.Embedding(L.monster_vocab, monster_dim, padding_idx=0)
+        self.move = nn.Embedding(L.move_vocab, move_dim, padding_idx=0)
+        self.potion = nn.Embedding(L.potion_vocab, potion_dim, padding_idx=0)
         in_dim = (
-            layout.n_floats
-            + (layout.max_hand + layout.max_choices) * card_dim
-            + layout.max_enemies * (monster_dim + move_dim)
-            + layout.max_potions * potion_dim
+            L.n_floats
+            + (L.max_hand + L.max_choices) * card_dim
+            + L.max_enemies * (monster_dim + move_dim)
+            + L.max_potions * potion_dim
         )
-        self.torso = nn.Sequential(
-            nn.Linear(in_dim, hidden),
-            nn.ReLU(),
-            nn.Linear(hidden, hidden),
-            nn.ReLU(),
-        )
-        self.pi = nn.Linear(hidden, layout.n_actions)
+        self.torso = nn.Sequential(nn.Linear(in_dim, hidden), nn.ReLU(), nn.Linear(hidden, hidden), nn.ReLU())
+        self.play = _head(hidden + card_dim + L.hand_feats, L.targets)
+        self.use_potion = _head(hidden + potion_dim + 1, L.targets)
+        self.choose = _head(hidden + card_dim + L.choice_feats, 1)
+        self.end_or_skip = _head(hidden, 2)
         self.v = nn.Linear(hidden, 1)
-        nn.init.orthogonal_(self.pi.weight, gain=0.01)
-        nn.init.zeros_(self.pi.bias)
         nn.init.orthogonal_(self.v.weight, gain=1.0)
         nn.init.zeros_(self.v.bias)
 
     def forward(self, floats: Tensor, ids: Tensor) -> tuple[Tensor, Tensor]:
         """Returns unmasked logits `[B, n_actions]` and values `[B]`."""
         L = self.layout
-        hand = ids[:, L.i_hand : L.i_hand + L.max_hand]
-        enemies = ids[:, L.i_enemies : L.i_enemies + L.max_enemies]
-        potions = ids[:, L.i_potions : L.i_potions + L.max_potions]
-        choices = ids[:, L.i_choices : L.i_choices + L.max_choices]
-        moves = ids[:, L.i_moves : L.i_moves + L.max_enemies]
+        B = floats.shape[0]
+        hand = self.card(ids[:, L.i_hand : L.i_hand + L.max_hand])
+        choices = self.card(ids[:, L.i_choices : L.i_choices + L.max_choices])
+        enemies = self.monster(ids[:, L.i_enemies : L.i_enemies + L.max_enemies])
+        moves = self.move(ids[:, L.i_moves : L.i_moves + L.max_enemies])
+        potions = self.potion(ids[:, L.i_potions : L.i_potions + L.max_potions])
         x = torch.cat(
-            [
-                floats,
-                self.card(hand).flatten(1),
-                self.card(choices).flatten(1),
-                self.monster(enemies).flatten(1),
-                self.move(moves).flatten(1),
-                self.potion(potions).flatten(1),
-            ],
-            dim=1,
+            [floats, hand.flatten(1), choices.flatten(1), enemies.flatten(1), moves.flatten(1), potions.flatten(1)], dim=1
         )
         h = self.torso(x)
-        return self.pi(h), self.v(h).squeeze(-1)
+
+        def with_state(items: Tensor, feats: Tensor) -> Tensor:
+            return torch.cat([h.unsqueeze(1).expand(-1, items.shape[1], -1), items, feats], dim=2)
+
+        hand_feats = floats[:, L.f_hand : L.f_hand + L.max_hand * L.hand_feats].view(B, L.max_hand, L.hand_feats)
+        potion_feats = floats[:, L.f_potions : L.f_potions + L.max_potions].unsqueeze(2)
+        choice_feats = floats[:, L.f_choices : L.f_choices + L.max_choices * L.choice_feats].view(B, L.max_choices, L.choice_feats)
+        play = self.play(with_state(hand, hand_feats)).flatten(1)
+        potion = self.use_potion(with_state(potions, potion_feats)).flatten(1)
+        choose = self.choose(with_state(choices, choice_feats)).squeeze(2)
+        end_skip = self.end_or_skip(h)
+        logits = torch.cat([play, potion, end_skip[:, :1], choose, end_skip[:, 1:]], dim=1)
+        return logits, self.v(h).squeeze(-1)
 
 
 def masked_logits(logits: Tensor, mask: Tensor) -> Tensor:
