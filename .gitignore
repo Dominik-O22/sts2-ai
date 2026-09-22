@@ -4,3 +4,4 @@ decompiled/
 runs/
 __pycache__/
 *.egg-info/
+py/sts2ai/*.so
