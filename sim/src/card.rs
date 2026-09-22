@@ -171,6 +171,8 @@ defs! {
     Shame: -1, Curse, Special, None, kw = [Unplayable], gen = false;
     SporeMind: 1, Curse, Special, None, kw = [Exhaust], gen = false;
     Writhe: -1, Curse, Special, None, kw = [Unplayable, Innate], gen = false;
+    Soot: -1, Status, Special, None, kw = [Unplayable], gen = false;
+    Luminesce: 0, Skill, Special, Self_, kw = [Exhaust, Retain], gen = false;
 }
 
 /// The Ironclad card pool in `IroncladCardPool.cs` order, for generation.
@@ -233,6 +235,11 @@ pub struct Card {
     pub smogged: bool,
     /// `CardModel.Enchantment`. Attached outside combat and carried in.
     pub enchantment: Option<Enchantment>,
+    /// Retain granted by `CardCmd.ApplyKeyword` (Choices Paradox).
+    pub retain_added: bool,
+    /// `CardModel.IsDupe` (History Course): loses Exhaust and leaves combat
+    /// once played.
+    pub dupe: bool,
 }
 
 impl Card {
@@ -250,6 +257,8 @@ impl Card {
             replay: 0,
             smogged: false,
             enchantment: None,
+            retain_added: false,
+            dupe: false,
         }
     }
 
@@ -308,6 +317,12 @@ impl Card {
                 return false;
             }
         }
+        if k == Keyword::Exhaust && self.dupe {
+            return false;
+        }
+        if k == Keyword::Retain && self.retain_added {
+            return true;
+        }
         if self.def().keywords.contains(&k) {
             return true;
         }
@@ -352,7 +367,7 @@ impl Card {
             // Curses. Regret reads the hand it ends the turn in, so its
             // damage is not a card number.
             Clumsy | CurseOfTheBell | Debt | Doubt | Enthralled
-            | Folly | Greed | Guilty | Injury | Normality | PoorSleep | Regret | Shame | SporeMind | Writhe => d(),
+            | Folly | Greed | Guilty | Injury | Normality | PoorSleep | Regret | Shame | SporeMind | Writhe | Soot => d(),
             Anger => Vars { damage: pick(6.0, 8.0), ..d() },
             Armaments => Vars { block: 5.0, ..d() },
             AshenStrike => Vars { damage: 6.0, magic: pick(3.0, 4.0), ..d() },
@@ -434,6 +449,7 @@ impl Card {
             Beckon => Vars { hp_loss: 6.0, ..d() },
             BadLuck => Vars { hp_loss: 13.0, ..d() },
             Decay => Vars { damage: 2.0, ..d() },
+            Luminesce => Vars { energy: if up { 3 } else { 2 }, ..d() },
         };
         v.damage += self.extra_damage;
         v
@@ -480,10 +496,9 @@ impl Card {
 
         match self.id {
             Aggression => vec![self_power(PowerId::Aggression, 1)],
-            Anger => vec![
-                attack(1),
-                Effect::GenerateCard { id: Anger, upgraded: self.upgraded, to: Pile::Discard, free_this_turn: false },
-            ],
+            // Anger.cs: `CreateClone()` into the discard, so an enchanted
+            // Anger breeds enchanted Angers.
+            Anger => vec![attack(1), Effect::CloneCard { uid: self.uid, to: Pile::Discard }],
             Armaments => {
                 let mut e = vec![block()];
                 if self.upgraded {
@@ -684,7 +699,8 @@ impl Card {
             Whirlwind => vec![aoe(self.captured_x.max(0) as u32)],
             Slimed => vec![draw(v.cards)],
             GiantRock => vec![attack(1)],
-            Wound | Dazed | Burn | Infection | AscendersBane | Beckon => vec![],
+            Wound | Dazed | Burn | Infection | AscendersBane | Beckon | Soot => vec![],
+            Luminesce => vec![Effect::GainEnergy { amount: v.energy }],
             // Enthralled and Spore Mind are the only playable curses and
             // neither does anything; the rest are unplayable.
             BadLuck | Clumsy | CurseOfTheBell | Debt | Decay | Doubt | Enthralled | Folly | Greed | Guilty

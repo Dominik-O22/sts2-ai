@@ -48,6 +48,7 @@ pub fn is_debuff(id: PowerId) -> bool {
             | PowerId::ShacklingPotion
             | PowerId::Shriek
             | PowerId::Smoggy
+            | PowerId::Confused
     )
 }
 
@@ -68,24 +69,6 @@ pub fn is_debuff_for_amount(id: PowerId, amount: i32) -> bool {
         return false;
     }
     is_debuff(id)
-}
-
-/// `PowerStackType.Single`: hidden amount, never stacks above 1.
-pub fn is_single(id: PowerId) -> bool {
-    matches!(
-        id,
-        PowerId::NoDraw
-            | PowerId::Barricade
-            | PowerId::Corruption
-            | PowerId::Hellraiser
-            | PowerId::NoEnergyGain
-            | PowerId::Ringing
-            | PowerId::Minion
-            | PowerId::Infested
-            | PowerId::Illusion
-            | PowerId::Smoggy
-            | PowerId::Surprise
-    )
 }
 
 /// `TemporaryStrengthPower` / `TemporaryDexterityPower` subclasses: the
@@ -153,6 +136,8 @@ impl Power {
             PowerId::Slow if target == owner => 1.0 + 0.1 * self.data as f64,
             // ShrinkPower.cs: the owner deals 30% less.
             PowerId::Shrink if dealer == Some(owner) => 0.7,
+            // DiamondDiademPower.cs: halve powered attacks on the owner.
+            PowerId::DiamondDiadem if target == owner => 0.5,
             _ => 1.0,
         }
     }
@@ -434,6 +419,8 @@ impl Power {
             }],
             // FlameBarrierPower.cs: removed when the *other* side's turn ends.
             PowerId::FlameBarrier if !own_side => remove(),
+            // DiamondDiademPower.cs: gone once the enemy turn is over.
+            PowerId::DiamondDiadem if side == Side::Enemy => remove(),
             // TemporaryStrengthPower / TemporaryDexterityPower: remove self
             // and undo the real power.
             PowerId::SetupStrike | PowerId::Mangle | PowerId::FlexPotion | PowerId::ShacklingPotion | PowerId::SpeedPotion

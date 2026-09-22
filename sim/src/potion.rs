@@ -182,7 +182,7 @@ impl PotionId {
         let draw = |n: u32| Effect::Draw { count: n, from_hand_draw: false };
         let block = |n: f64| Effect::GainBlock { target: me, amount: n, props: ValueProp::UNPOWERED, card: None };
         let choose = |from: Pile, filter: CardFilter, then: Then, can_skip: bool| Effect::Choose { from, filter, then, can_skip };
-        let offer = |pool: GenPool| Effect::OfferRandom { pool, count: 3 };
+        let offer = |pool: GenPool| Effect::OfferRandom { pool, count: 3, free: true, retain: false };
         match self {
             AttackPotion => vec![offer(GenPool::IroncladAttacks)],
             SkillPotion => vec![offer(GenPool::IroncladSkills)],

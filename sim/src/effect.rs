@@ -10,6 +10,7 @@
 
 use crate::ids::{CardId, MonsterId, PowerId};
 use crate::monster::Flags;
+use crate::relic::RelicId;
 use crate::types::{CardType, CreatureRef, Side, ValueProp};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -143,8 +144,11 @@ pub enum Effect {
     UpgradeHand,
     /// `CardCmd.Transform` every hand card matching the filter into `into`.
     TransformHand { filter: CardFilter, into: CardId, upgraded: bool },
-    /// Put a fresh card into combat (`AddGeneratedCardToCombat`, `CreateClone`).
+    /// Put a fresh card into combat (`AddGeneratedCardToCombat`).
     GenerateCard { id: CardId, upgraded: bool, to: Pile, free_this_turn: bool },
+    /// `CardModel.CreateClone` then `AddGeneratedCardToCombat`: a copy of a
+    /// card already in combat, enchantment and modifiers included.
+    CloneCard { uid: u32, to: Pile },
     /// Random cards from a pool (`CardFactory.GetForCombat` / `GetDistinctForCombat`).
     GenerateRandom { pool: GenPool, count: u32, to: Pile, free_this_turn: bool, distinct: bool },
     /// Ask the player to pick one card from those matching the filter in the
@@ -152,10 +156,18 @@ pub enum Effect {
     /// `can_skip` adds `Action::Skip` to the choice.
     Choose { from: Pile, filter: CardFilter, then: Then, can_skip: bool },
     /// Generate `count` distinct cards into the offer pile and let the player
-    /// take one (`CardSelectCmd.FromChooseACardScreen`).
-    OfferRandom { pool: GenPool, count: u32 },
+    /// take one (`CardSelectCmd.FromChooseACardScreen`). The taken card costs
+    /// 0 this turn when `free` (the potions); `retain` gives every offered
+    /// card Retain and makes the pick compulsory (Choices Paradox).
+    OfferRandom { pool: GenPool, count: u32, free: bool, retain: bool },
     /// `Then::TakeOffer` for the picked uid.
     TakeOffer { uid: u32 },
+    /// `CardModel.CreateClone` of a card into the hand (Music Box).
+    CloneToHand { uid: u32, ethereal: bool },
+    /// A relic's continuation that has to read the state as it stands when
+    /// it runs, not when the hook fired (Toasty Mittens' top card, Whispering
+    /// Earring's next playable card). See `Combat::relic_step`.
+    RelicStep { id: RelicId, step: u8 },
     /// `CardPileCmd.Shuffle`: discard and draw piles merged and shuffled.
     Shuffle,
     /// Snecko Oil: every non-X hand card costs a random 0-3 this turn.
@@ -216,6 +228,10 @@ pub enum Effect {
 
     // Turn flow. `Combat/CombatManager.cs`.
     StartTurn(Side),
+    /// The hand draw of `SetupPlayerTurn`, after `BeforeHandDraw`.
+    TurnDraw,
+    /// `SwitchSides` into an extra player turn (Pael's Eye).
+    ExtraPlayerTurn,
     EndPlayerTurn,
     /// `DoTurnEnd`: ethereal exhausts and turn-end-in-hand card effects.
     TurnEndInHand,

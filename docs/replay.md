@@ -34,7 +34,13 @@ field, or `ERR` for an id the sim does not know yet.
 One JSON object per line:
 
 - `start`: encounter, room kind, ascension, deck, relics, potion slots,
-  enemies with their rolled HP.
+  enemies with their rolled HP. `relic_state` holds the charge or count of
+  the relics that carry one between fights (Ember Tea's combats, Iron Club's
+  plays, whether Fur Coat marked this room), read at combat setup before
+  any of them fires. `opening` is the draw pile the opening shuffle made,
+  and `early` holds the records written between setup and the first
+  decision point (Crossbow's turn 1 card, Whispering Earring's plays and
+  what they exhaust), which the file would otherwise miss.
 - `snapshot`: the full state at each point the player could act, written by
   a per-frame poll while it is the play phase and nothing is resolving.
   Includes hand with costs, draw pile in order, discard, exhaust, powers,
@@ -45,7 +51,11 @@ One JSON object per line:
 ## What the replay forces versus checks
 
 Forced from the log: the opening draw order, every later shuffle, enemy
-starting HP, and each enemy's next move. Everything else is the sim's own
+and player HP at the first decision point, and each enemy's next move.
+Adopted from the snapshots where the game rolls what nothing records: the
+depth of a card shuffled in at random (Beckon, Soot, Dazed), the costs
+Confused rolls, and a card taken from a choose-a-card screen whose `gen`
+record only follows the pick. Everything else is the sim's own
 work and is diffed at every snapshot. Card choices (Armaments, exhaust
 picks) are not logged; the replay tries each option and keeps the one whose
 result matches the next snapshot.
@@ -88,8 +98,14 @@ mechanic.
 Before it starts, it asks the sim whether it could build a fight from the
 run as it stands. A colorless card in the deck, a relic from an act that is
 not ported, a Colorless Potion in the belt: any of those makes every fight
-fail on the setup rather than on the rules, and the dev console can add
-things to a run but not take them away, so it says so and stops.
+fail on the setup rather than on the rules, so it says so and stops. A
+card or relic can come off with `remove_card` or `relic remove`; a potion
+has no remove command and has to be used up.
+
+`--relics` walks the relic fights in `RELIC_FIGHTS` instead of the
+encounters. Each group of relics goes on before its fight and comes off
+after, along with any card its pickup left in the deck, so every group
+starts from the same run.
 
 The deck it builds is mostly block with barely any damage. The long move
 cycles are five and six turns, so a deck that kills a boss in three proves
@@ -150,6 +166,16 @@ cost is that a decision point needing a reseed gets no advice until the
 next record lands. A card choice open in the sim (Armaments, an exhaust
 pick) is a decision point too, and the next snapshot settles which card the
 game actually applied.
+
+The game writes the `play` record only once the card has resolved, which
+for a card with a choice is after you picked. So the recorder also polls
+the hand's select mode and writes a `choice` record the moment the screen
+opens, naming the card in the play pile (with its hand index) and the
+options. The replayer plays that card early, which opens the same choice
+in the sim while you are still looking at it, and then skips the `play`
+record that follows. A choice whose card the sim cannot place (a target
+it would need) waits for the real record, and the advice is late for it
+as before.
 
 `--replay` feeds an existing recording as if it were being written, which
 is how the advisor is tested. Divergences print and the advisor keeps

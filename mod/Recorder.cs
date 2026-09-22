@@ -24,6 +24,9 @@ using MegaCrit.Sts2.Core.Entities.Players;
 using MegaCrit.Sts2.Core.GameActions.Multiplayer;
 using MegaCrit.Sts2.Core.Modding;
 using MegaCrit.Sts2.Core.Models;
+using MegaCrit.Sts2.Core.Models.Relics;
+using MegaCrit.Sts2.Core.Nodes.Combat;
+using MegaCrit.Sts2.Core.Nodes.Rooms;
 using MegaCrit.Sts2.Core.Rooms;
 using MegaCrit.Sts2.Core.Runs;
 using MegaCrit.Sts2.Core.ValueProps;
@@ -46,6 +49,21 @@ public static class Recorder
     /// opened). A slot emptied since then means a potion is in flight: it
     /// leaves the belt a frame before its effect runs.
     private static List<PotionModel?> _potionBaseline = new();
+    /// The hand's card-select screen is open (Armaments, an exhaust pick);
+    /// logged once per selection.
+    private static bool _choiceOpen;
+    /// Charged and counting relics as the combat was set up, before any of
+    /// them fired: the start record is only written at the first decision
+    /// point, by which time Ember Tea has already spent a charge.
+    private static Dictionary<string, int> _relicState = new();
+    /// The draw pile the opening shuffle made, top first. The file opens
+    /// only at the first decision point, and by then Whispering Earring may
+    /// have played part of the opening hand out of both hand and draw pile.
+    private static List<Dictionary<string, object?>>? _opening;
+    /// Events between combat setup and the file opening (Crossbow's turn 1
+    /// card, True Grit's exhaust under Whispering Earring). They go into the
+    /// start record; null outside that window.
+    private static List<Dictionary<string, object?>>? _early;
 
     public static void Initialize()
     {
@@ -56,6 +74,7 @@ public static class Recorder
             // The end-of-combat hook is not dispatched to mod subscribers
             // once the combat state is gone; the event fires regardless.
             CombatManager.Instance.CombatEnded += room => Guard(() => OnCombatEnd(room));
+            CombatManager.Instance.CombatSetUp += state => Guard(() => OnCombatSetUp(state));
             var tree = (SceneTree)Engine.GetMainLoop();
             tree.Connect(SceneTree.SignalName.ProcessFrame, Callable.From(Poll));
             GD.Print("[sts2ai] recorder ready");
@@ -79,7 +98,37 @@ public static class Recorder
             if (sync == null || sync.CombatState != ActionSynchronizerCombatState.PlayPhase) return;
             var state = cm.DebugOnlyGetState();
             var me = LocalContext.GetMe(state);
-            if (state == null || me == null || cm.IsExecutingCardOrPotionEffect(me)) return;
+            if (state == null || me == null) return;
+            // A card-select screen opens inside a card's effect, before the
+            // AfterCardPlayed hook fires, so the replay would only learn of
+            // the choice after the fact. Log it as it opens, with the card
+            // being played, so the sim can put the choice up in time.
+            var hand = NCombatRoom.Instance?.Ui?.Hand;
+            bool selecting = hand != null && (hand.CurrentMode == NPlayerHand.Mode.SimpleSelect || hand.CurrentMode == NPlayerHand.Mode.UpgradeSelect);
+            if (selecting)
+            {
+                if (!_choiceOpen && _file != null)
+                {
+                    _choiceOpen = true;
+                    var playing = me.PlayerCombatState?.PlayPile.Cards.FirstOrDefault();
+                    Dictionary<string, object?>? card = null;
+                    if (playing != null)
+                    {
+                        card = CardRef(playing);
+                        int idx = _lastHand.FindIndex(c => ReferenceEquals(c, playing));
+                        card["hand_idx"] = idx < 0 ? null : idx;
+                    }
+                    Event(new()
+                    {
+                        ["t"] = "choice",
+                        ["card"] = card,
+                        ["options"] = me.PlayerCombatState?.Hand.Cards.Select(CardRef).ToList(),
+                    });
+                }
+                return;
+            }
+            _choiceOpen = false;
+            if (cm.IsExecutingCardOrPotionEffect(me)) return;
             // A played card sits in the play pile until its result-pile move; not a decision point yet.
             if (me.PlayerCombatState == null || me.PlayerCombatState.PlayPile.Cards.Count > 0) return;
             if (_file != null && PotionInFlight(me)) return;
@@ -121,6 +170,9 @@ public static class Recorder
             ["gold"] = me.Gold,
             ["deck"] = me.Deck.Cards.Select(CardRef).ToList(),
             ["relics"] = me.Relics.Select(r => r.Id.Entry).ToList(),
+            ["relic_state"] = _relicState,
+            ["opening"] = _opening,
+            ["early"] = _early,
             ["potions"] = me.PotionSlots.Select(p => p?.Id.Entry).ToList(),
             ["enemies"] = state.Enemies.Select(e => new Dictionary<string, object?>
             {
@@ -129,10 +181,37 @@ public static class Recorder
                 ["max_hp"] = e.MaxHp,
             }).ToList(),
         }, Json));
+        _early = null;
     }
+
+    private static void OnCombatSetUp(CombatState state)
+    {
+        _early = new();
+        var me = LocalContext.GetMe(state);
+        _relicState = me == null
+            ? new()
+            : me.Relics.Select(r => (r, n: RelicState(r))).Where(x => x.n != null).ToDictionary(x => x.r.Id.Entry, x => x.n!.Value);
+    }
+
+    // The field each relic keeps between fights that decides what it does
+    // in this one. The sim reads it into `Relic.counter`.
+    private static int? RelicState(RelicModel r) => r switch
+    {
+        EmberTea t => t.CombatsLeft,
+        BoneTea t => t.CombatsLeft,
+        TeaOfDiscourtesy t => t.IsUsedUp ? 0 : 1,
+        PumpkinCandle p => p.KindleCount,
+        IronClub c => c.CardsPlayed,
+        FakeHappyFlower f => f.TurnsSeen,
+        PollinousCore p => p.TurnsSeen,
+        FakeVenerableTeaSet v => v.GainEnergyInNextCombat ? 1 : 0,
+        FurCoat f => r.Owner.RunState.CurrentMapPoint is { } at && f.GetMarkedCoords()?.Contains(at.coord) == true ? 1 : 0,
+        _ => null,
+    };
 
     private static void Close()
     {
+        _opening = null;
         _file?.Flush();
         _file?.Dispose();
         _file = null;
@@ -148,7 +227,11 @@ public static class Recorder
 
     private static void Event(Dictionary<string, object?> e)
     {
-        if (_file == null) return;
+        if (_file == null)
+        {
+            _early?.Add(e);
+            return;
+        }
         Write(JsonSerializer.Serialize(e, Json));
     }
 
@@ -285,9 +368,13 @@ public static class Recorder
 
     internal static void OnShuffle(List<CardModel> cards, bool isInitialShuffle)
     {
-        // The initial shuffle happens before the file opens; the first
-        // snapshot carries that order in its draw pile.
-        if (isInitialShuffle) return;
+        // The initial shuffle happens before the file opens; it goes into
+        // the start record instead.
+        if (isInitialShuffle)
+        {
+            _opening = cards.Select(CardRef).ToList();
+            return;
+        }
         Event(new() { ["t"] = "shuffle", ["cards"] = cards.Select(CardRef).ToList() });
     }
 

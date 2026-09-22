@@ -145,6 +145,11 @@ pub enum CardId {
     SporeMind,
     /// Starts in hand and stays there.
     Writhe,
+    // Relic cards. Appended, never reordered.
+    /// Dead status Biiig Hug shuffles in with every reshuffle.
+    Soot,
+    /// Retained energy token from Radiant Pearl.
+    Luminesce,
 }
 
 /// `Models/Powers/<Name>Power.cs`.
@@ -279,6 +284,12 @@ pub enum PowerId {
     /// The gold the Fat Gremlin is carrying off, returned if you kill it.
     /// Inert in combat, but the recorder logs it.
     Heist,
+    // Relic powers, appended.
+    /// Every drawn card costs a random 0 to 3 for the combat (Snecko Eye).
+    Confused,
+    /// Halves powered attack damage taken until the enemy turn ends
+    /// (Diamond Diadem).
+    DiamondDiadem,
 }
 
 /// `Models/Monsters/<Name>.cs`.
@@ -451,6 +462,8 @@ pub const ALL_CARDS: &[CardId] = &[
     CardId::Shame,
     CardId::SporeMind,
     CardId::Writhe,
+    CardId::Soot,
+    CardId::Luminesce,
 ];
 
 pub const ALL_POWERS: &[PowerId] = &[
@@ -526,6 +539,8 @@ pub const ALL_POWERS: &[PowerId] = &[
     PowerId::Surprise,
     PowerId::Thievery,
     PowerId::Heist,
+    PowerId::Confused,
+    PowerId::DiamondDiadem,
 ];
 
 pub const ALL_MONSTERS: &[MonsterId] = &[

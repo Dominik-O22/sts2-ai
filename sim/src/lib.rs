@@ -193,6 +193,19 @@ mod tests {
         c.player.hand.iter().position(|k| k.enchantment.is_some()).unwrap()
     }
 
+    /// Anger.cs clones the card model, so the copy carries the enchantment.
+    /// Seen in a run: a Sharp Anger whose copy the sim left plain.
+    #[test]
+    fn anger_clone_keeps_the_enchantment() {
+        let mut c = enchanted(ids::CardId::Anger, enchant::EnchantmentId::Sharp, 2, 5);
+        let idx = ench_idx(&c);
+        c.step(Action::PlayCard { hand_idx: idx, target: Some(0) });
+        let angers: Vec<_> = c.player.discard.iter().filter(|k| k.id == ids::CardId::Anger).collect();
+        assert_eq!(angers.len(), 2);
+        assert!(angers.iter().all(|k| k.enchantment.is_some_and(|e| e.id == enchant::EnchantmentId::Sharp && e.amount == 2)));
+        assert_ne!(angers[0].uid, angers[1].uid);
+    }
+
     /// Shame is the curse a relic handed Dom, and the one whose timing is
     /// easy to get wrong: the Frail it lands must survive the turn end it
     /// was applied on.
@@ -662,6 +675,32 @@ mod tests {
         assert_eq!(c.player.creature.hp, 40);
         assert!(c.relics[0].flag);
         assert!(!c.is_over());
+    }
+
+    /// Pael's Eye: a turn with nothing played burns the hand and comes round
+    /// again before the enemy moves, once a combat.
+    #[test]
+    fn paels_eye_takes_one_extra_turn() {
+        let alone = EnemySpec { id: MonsterId::Nibbit, flags: Flags { is_alone: true, ..Default::default() } };
+        let mut c = with_relics(&[Relic::new(RelicId::PaelsEye)], &[alone], 3);
+        let intent = c.enemies[0].monster.next_move_name();
+        c.step(Action::EndTurn);
+        assert_eq!((c.side, c.player.turn, c.round), (types::Side::Player, 2, 1));
+        assert_eq!(c.player.exhaust.len(), 5, "the unplayed hand is exhausted");
+        assert_eq!(c.player.creature.hp, IRONCLAD_HP, "the enemy has not acted");
+        assert_eq!(c.enemies[0].monster.next_move_name(), intent, "and still owes the same move");
+        c.step(Action::EndTurn);
+        assert_eq!((c.player.turn, c.round), (3, 2), "spent: the second idle turn passes to the enemy");
+    }
+
+    /// Whispering Earring plays the opening hand left to right until it runs
+    /// out of energy, before the first decision.
+    #[test]
+    fn whispering_earring_plays_turn_one() {
+        let c = with_relics(&[Relic::new(RelicId::WhisperingEarring)], &[one(MonsterId::Nibbit)], 1);
+        assert_eq!(c.stats.manual_plays_this_turn, 0);
+        assert!(c.stats.cards_played_this_turn > 0);
+        assert!(c.player.hand.iter().all(|k| c.cost(k) > c.player.energy), "nothing playable is left");
     }
 
     /// Random relic sets on random decks against every encounter.

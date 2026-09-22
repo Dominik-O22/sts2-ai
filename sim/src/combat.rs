@@ -9,7 +9,7 @@ use crate::effect::{AttackTargets, CardFilter, Effect, GenPool, Pile, Then};
 use crate::ids::{CardId, MonsterId, PowerId};
 use crate::monster::{Flags, Monster, RollCtx};
 use crate::potion::{PotionId, Target as PotionTarget};
-use crate::power::{is_debuff, is_debuff_for_amount, is_single, Power};
+use crate::power::{is_debuff, is_debuff_for_amount, Power};
 use crate::relic::Relic;
 use crate::rng::CombatRngs;
 use crate::types::{Ascension, CardType, CreatureRef, Keyword, Side, TargetType, ValueProp};
@@ -172,10 +172,18 @@ pub struct Script {
     pub generated: VecDeque<CardId>,
     /// Cards a random exhaust may pick, by (id, upgraded); matched, not ordered.
     pub random_exhausts: Vec<(CardId, bool)>,
+    /// Cards put on offer from a snapshot because the game logged the pick
+    /// only after the choice (Choices Paradox). Their `gen` record, still to
+    /// come, must not force the next random card.
+    pub adopted_offers: Vec<CardId>,
+    /// Cards random generation rolled with nothing scripted, since the last
+    /// snapshot. A `gen` record that arrives after the roll (Crossbow's turn
+    /// start card follows `turn_start`) rewrites the newest of them.
+    pub unforced: Vec<CardId>,
 }
 
 /// The parts of `CombatManager.History` that cards and powers read.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Stats {
     /// Cards dropped into the draw pile at a random depth (Beckon). Nothing
     /// records the depth, so the replay harness adopts it from the recording.
@@ -197,6 +205,18 @@ pub struct Stats {
     pub cards_played_this_turn: u32,
     /// A Skill has been played this turn, so Smoggy fogs the rest (Living Fog).
     pub skill_played_this_turn: bool,
+    /// Cards the player chose to play this turn, auto-plays left out
+    /// (`CardPlay.IsAutoPlay`): Brilliant Scarf, Pael's Eye.
+    pub manual_plays_this_turn: u32,
+    /// The last attack or skill whose play finished this turn, and the one
+    /// from the turn before (History Course). Dupes do not count.
+    pub last_card: Option<Card>,
+    pub last_turn_card: Option<Card>,
+    /// The card offer on screen makes its pick free this turn (the potions).
+    pub offer_free: bool,
+    /// The coming player turn is an extra one (Pael's Eye): the enemies keep
+    /// their moves.
+    pub extra_turn: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -364,6 +384,12 @@ impl Combat {
         let idx = self.enemies.len() - 1;
         let at = self.order.iter().position(|&j| self.enemies[j].slot > slot).unwrap_or(self.order.len());
         self.order.insert(at, idx);
+        // CreatureCmd.Add runs Hook.AfterCreatureAddedToCombat; the starting
+        // monsters never go through it.
+        if self.started {
+            let subs = self.relic_after_enemy_added(idx);
+            self.push_front_all(subs);
+        }
     }
 
     /// The free slot a spawn takes: the lowest, or the highest for the one
@@ -471,7 +497,7 @@ impl Combat {
         self.all_cards().find(|c| c.uid == uid)
     }
 
-    fn find_card_mut(&mut self, uid: u32) -> Option<&mut Card> {
+    pub(crate) fn find_card_mut(&mut self, uid: u32) -> Option<&mut Card> {
         let p = &mut self.player;
         p.hand
             .iter_mut()
@@ -489,15 +515,17 @@ impl Combat {
     }
 
     /// `CardEnergyCost.GetWithModifiers(All)`: local modifiers then global
-    /// ones (Corruption, Free Attack). X-cost cards report `-1`.
+    /// ones (Spiked Gauntlets, then the late Corruption, Free Attack,
+    /// Brilliant Scarf). X-cost cards report `-1`.
     pub fn cost(&self, card: &Card) -> i32 {
         let local = card.local_cost();
         if local < 0 || card.def().x_cost {
             return local;
         }
-        if self.player.creature.powers.iter().any(|p| p.free_card(card.ty())) {
+        if self.player.creature.powers.iter().any(|p| p.free_card(card.ty())) || self.relic_makes_free(card) {
             return 0;
         }
+        let local = local + self.relic_cost_additive(card);
         // TangledPower.cs: every attack is afflicted with Entangled (+amount).
         if card.ty() == CardType::Attack {
             return local + self.player.creature.power_amount(PowerId::Tangled);
@@ -506,7 +534,8 @@ impl Combat {
     }
 
     /// `Hook.ShouldPlay` for the player's own card: Ringing allows only the
-    /// first play each turn, and Smoggy blocks anything the fog has settled on.
+    /// first play each turn, Velvet Choker six, and Smoggy blocks anything the
+    /// fog has settled on.
     fn hook_allows_play(&self, card: &Card) -> bool {
         if self.player.creature.power(PowerId::Ringing).is_some() && self.stats.cards_played_this_turn > 0 {
             return false;
@@ -518,7 +547,7 @@ impl Combat {
             CardId::Normality => self.stats.cards_played_this_turn >= 3,
             _ => false,
         };
-        if self.player.hand.iter().any(vetoed) {
+        if self.player.hand.iter().any(vetoed) || !self.relic_allows_play() {
             return false;
         }
         !(card.smogged && self.player.creature.powers.iter().any(|p| p.blocks_smogged()))
@@ -572,7 +601,7 @@ impl Combat {
     }
 
     /// `CardModel.CanPlay` for the reasons we model.
-    fn can_play(&self, card: &Card) -> bool {
+    pub(crate) fn can_play(&self, card: &Card) -> bool {
         if card.has(Keyword::Unplayable) || !self.hook_allows_play(card) {
             return false;
         }
@@ -626,16 +655,8 @@ impl Combat {
                 let card = self.player.hand[hand_idx].clone();
                 assert!(self.can_play(&card), "illegal card play");
                 let target = self.resolve_target(&card, target);
-                // PlayCardAction: spend energy (all of it for X cards), then play.
-                let paid;
-                if card.def().x_cost {
-                    paid = self.player.energy;
-                    self.player.hand[hand_idx].captured_x = self.player.energy + self.relic_x_bonus();
-                    self.player.energy = 0;
-                } else {
-                    paid = self.cost(&card);
-                    self.player.energy -= paid;
-                }
+                let paid = self.pay_for(hand_idx);
+                self.stats.manual_plays_this_turn += 1;
                 let card = self.player.hand.remove(hand_idx);
                 let uid = card.uid;
                 self.player.play.push(card);
@@ -647,6 +668,22 @@ impl Combat {
             }
         }
         self.run();
+    }
+
+    /// `CardModel.SpendResources` for a hand card: its cost, or all the
+    /// energy for an X card, which captures X. Returns what was paid.
+    pub(crate) fn pay_for(&mut self, hand_idx: usize) -> i32 {
+        let card = &self.player.hand[hand_idx];
+        if card.def().x_cost {
+            let paid = self.player.energy;
+            self.player.hand[hand_idx].captured_x = paid + self.relic_x_bonus();
+            self.player.energy = 0;
+            paid
+        } else {
+            let paid = self.cost(card);
+            self.player.energy -= paid;
+            paid
+        }
     }
 
     fn resolve_target(&self, card: &Card, target: Option<usize>) -> Option<CreatureRef> {
@@ -861,6 +898,18 @@ impl Combat {
                 self.relic_card_entered_combat(&mut card);
                 self.put_card(card, to);
             }
+            Effect::CloneCard { uid, to } => {
+                // CardScope.CloneCard keeps everything the card carries
+                // (upgrade, enchantment, cost changes, banked damage); only
+                // the exhaust-on-next-play flag is reset.
+                if let Some(src) = self.find_card(uid) {
+                    let mut card = src.clone();
+                    card.uid = self.new_uid();
+                    card.exhaust_on_next_play = false;
+                    self.relic_card_entered_combat(&mut card);
+                    self.put_card(card, to);
+                }
+            }
             Effect::GenerateRandom { pool, count, to, free_this_turn, distinct } => {
                 let options = pool_cards(pool);
                 let mut chosen = Vec::new();
@@ -872,7 +921,10 @@ impl Combat {
                         let id = match scripted {
                             Some(id) => id,
                             None => match opts.first() {
-                                Some(&id) => id,
+                                Some(&id) => {
+                                    self.script.unforced.push(id);
+                                    id
+                                }
                                 None => break,
                             },
                         };
@@ -882,7 +934,10 @@ impl Combat {
                 } else {
                     for _ in 0..count {
                         let scripted = self.script.generated.pop_front().filter(|id| options.contains(id));
-                        if let Some(id) = scripted.or_else(|| self.rngs.card_generation.pick(&options).copied()) {
+                        if scripted.is_none() {
+                            self.script.unforced.extend(self.rngs.card_generation.pick(&options).copied());
+                        }
+                        if let Some(id) = scripted.or_else(|| self.script.unforced.last().copied()) {
                             chosen.push(id);
                         }
                     }
@@ -910,7 +965,7 @@ impl Combat {
                     }
                 }
             }
-            Effect::OfferRandom { pool, count } => {
+            Effect::OfferRandom { pool, count, free, retain } => {
                 let mut opts = pool_cards(pool);
                 self.rngs.card_generation.shuffle(&mut opts);
                 // Scripted: the recording only shows the card taken, so make
@@ -921,22 +976,50 @@ impl Combat {
                 }
                 self.player.offer.clear();
                 for id in opts.into_iter().take(count as usize) {
-                    let uid = self.new_uid();
-                    self.player.offer.push(Card::new(uid, id, false));
+                    let mut card = Card::new(self.new_uid(), id, false);
+                    card.retain_added = retain;
+                    self.player.offer.push(card);
                 }
+                self.stats.offer_free = free;
                 let options: Vec<u32> = self.player.offer.iter().map(|c| c.uid).collect();
                 if !options.is_empty() {
-                    self.pending = Some(Pending { options, then: Then::TakeOffer, can_skip: true });
+                    self.pending = Some(Pending { options, then: Then::TakeOffer, can_skip: !retain });
                 }
             }
             Effect::TakeOffer { uid } => {
                 if let Some(i) = self.player.offer.iter().position(|c| c.uid == uid) {
                     let mut card = self.player.offer.remove(i);
-                    card.cost_this_turn = Some(0);
+                    if self.stats.offer_free {
+                        card.cost_this_turn = Some(0);
+                    }
                     self.relic_card_entered_combat(&mut card);
                     self.put_card(card, Pile::Hand);
                 }
                 self.player.offer.clear();
+            }
+            Effect::CloneToHand { uid, ethereal } => {
+                if let Some(mut card) = self.find_card(uid).cloned() {
+                    card.uid = self.new_uid();
+                    card.ethereal_added |= ethereal;
+                    card.dupe = false;
+                    self.relic_card_entered_combat(&mut card);
+                    self.put_card(card, Pile::Hand);
+                }
+            }
+            Effect::RelicStep { id, step } => {
+                let subs = self.relic_step(id, step);
+                self.push_front_all(subs);
+            }
+            Effect::TurnDraw => {
+                let subs = self.turn_draw();
+                self.push_front_all(subs);
+            }
+            Effect::ExtraPlayerTurn => {
+                // SwitchSides with a player taking an extra turn: the turn
+                // number moves on, the round does not.
+                self.begin_player_turn();
+                self.stats.extra_turn = true;
+                self.queue.push_front(Effect::StartTurn(Side::Player));
             }
             Effect::Shuffle => {
                 // CardPileCmd.Shuffle: discard then draw, shuffled together.
@@ -990,6 +1073,11 @@ impl Combat {
                 for id in modifiers {
                     self.modify_power(CreatureRef::Player, id, -1);
                 }
+                // ThrowingAxe: the first card each combat is played twice.
+                if let Some(r) = self.relics.iter_mut().find(|r| r.id == crate::relic::RelicId::ThrowingAxe && !r.used) {
+                    r.used = true;
+                    plays += 1;
+                }
                 let mut subs: Vec<Effect> = (0..plays).map(|_| Effect::CardPlayIter { uid, target, paid }).collect();
                 subs.push(Effect::FinishCardPlay { uid });
                 self.push_front_all(subs);
@@ -1042,8 +1130,11 @@ impl Combat {
                 // CardModel.GetResultPileTypeForCardPlay + Corruption.
                 if let Some(card) = self.take_card(uid) {
                     let corruption = self.player.creature.power(PowerId::Corruption).is_some();
-                    if card.ty() == CardType::Power {
-                        // Powers leave combat (PileType.None).
+                    if matches!(card.ty(), CardType::Attack | CardType::Skill) && !card.dupe {
+                        self.stats.last_card = Some(card.clone());
+                    }
+                    if card.ty() == CardType::Power || card.dupe {
+                        // Powers and dupes leave combat (PileType.None).
                     } else if card.has(Keyword::Exhaust)
                         || card.exhaust_on_next_play
                         || (corruption && card.ty() == CardType::Skill)
@@ -1235,9 +1326,11 @@ impl Combat {
         subs.extend(self.relic_before_side_turn_start(side));
         match side {
             Side::Player => {
-                // Enemies roll their next move (PrepareForNextTurn).
+                // Enemies roll their next move (PrepareForNextTurn), unless
+                // this is an extra turn and they still owe the last one.
+                let extra = std::mem::take(&mut self.stats.extra_turn);
                 for i in 0..self.enemies.len() {
-                    if self.enemies[i].acts() {
+                    if self.enemies[i].acts() && !extra {
                         let ctx = self.roll_ctx(i);
                         self.enemies[i].monster.roll_move(&mut self.rngs.monster_ai, ctx);
                     }
@@ -1269,25 +1362,8 @@ impl Combat {
                     subs.extend(p.after_energy_reset(CreatureRef::Player));
                 }
                 subs.extend(self.relic_after_energy_reset());
-                let draw = self.player.creature.powers.iter().fold(BASE_HAND_DRAW, |n, p| p.modify_hand_draw(n));
-                let mut draw = self.relic_modify_hand_draw(draw);
-                if self.player.turn == 1 {
-                    let innate: Vec<usize> = self
-                        .player
-                        .draw
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, c)| c.has(Keyword::Innate))
-                        .map(|(i, _)| i)
-                        .collect();
-                    let n = innate.len() as u32;
-                    for (k, i) in innate.into_iter().enumerate() {
-                        let c = self.player.draw.remove(i);
-                        self.player.draw.insert(k, c);
-                    }
-                    draw = draw.max(n).min(MAX_HAND as u32);
-                }
-                subs.push(Effect::Draw { count: draw, from_hand_draw: true });
+                subs.extend(self.relic_before_hand_draw());
+                subs.push(Effect::TurnDraw);
                 // Imbued.AfterAutoPrePlayPhaseEntered: on turn one it plays
                 // itself out of hand, which the bottom-of-pile rule feeds.
                 if self.player.turn <= 1 {
@@ -1332,11 +1408,33 @@ impl Combat {
         let (turn, round) = (self.player.turn, self.round);
         subs.extend(self.collect_powers(|p, owner, _| p.after_side_turn_start(owner, side, turn, round)));
         subs.extend(self.relic_after_side_turn_start(side));
+        if side == Side::Player {
+            subs.extend(self.relic_auto_pre_play());
+        }
         if side == Side::Enemy {
             subs.extend(self.order.iter().map(|&i| Effect::EnemyAct(i)));
             subs.push(Effect::EndEnemyTurn);
         }
         self.push_front_all(subs);
+    }
+
+    /// The hand draw in `SetupPlayerTurn`, once the `BeforeHandDraw` hooks
+    /// have resolved: `ModifyHandDraw`, Innate cards to the top on turn 1,
+    /// then the draw.
+    fn turn_draw(&mut self) -> Vec<Effect> {
+        let draw = self.player.creature.powers.iter().fold(BASE_HAND_DRAW, |n, p| p.modify_hand_draw(n));
+        let mut draw = self.relic_modify_hand_draw(draw);
+        if self.player.turn == 1 {
+            let innate: Vec<usize> =
+                self.player.draw.iter().enumerate().filter(|(_, c)| c.has(Keyword::Innate)).map(|(i, _)| i).collect();
+            let n = innate.len() as u32;
+            for (k, i) in innate.into_iter().enumerate() {
+                let c = self.player.draw.remove(i);
+                self.player.draw.insert(k, c);
+            }
+            draw = draw.max(n).min(MAX_HAND as u32);
+        }
+        vec![Effect::Draw { count: draw, from_hand_draw: true }]
     }
 
     /// `EndPlayerTurnPhaseOneInternal`, first half: the AutoPostPlay phase
@@ -1403,7 +1501,12 @@ impl Combat {
         }
         self.end_of_turn_cleanup();
         let mut subs = self.after_side_turn_end(Side::Player);
-        subs.push(Effect::StartTurn(Side::Enemy));
+        // SwitchFromPlayerToEnemySide asks Hook.ShouldTakeExtraTurn first.
+        if self.relic_take_extra_turn() {
+            subs.push(Effect::ExtraPlayerTurn);
+        } else {
+            subs.push(Effect::StartTurn(Side::Enemy));
+        }
         self.push_front_all(subs);
     }
 
@@ -1422,6 +1525,7 @@ impl Combat {
     fn side_turn_end_early(&mut self, side: Side) {
         let mut subs = self.collect_powers(|p, owner, _| p.before_side_turn_end_early(owner, side));
         if side == Side::Player {
+            subs.extend(self.relic_before_side_turn_end_early());
             subs.extend(self.relic_before_side_turn_end());
             subs.push(Effect::TurnEndInHand);
         } else {
@@ -1434,14 +1538,22 @@ impl Combat {
         self.end_of_turn_cleanup();
         let mut subs = self.after_side_turn_end(Side::Enemy);
         self.round += 1;
-        self.player.turn += 1;
-        self.stats.exhausted_this_turn = 0;
-        self.stats.hp_lost_this_turn = false;
-        self.stats.block_plays_this_turn.clear();
-        self.stats.cards_played_this_turn = 0;
-        self.stats.skill_played_this_turn = false;
+        self.begin_player_turn();
         subs.push(Effect::StartTurn(Side::Player));
         self.push_front_all(subs);
+    }
+
+    /// `PlayerCombatState.IncrementTurnNumber` and the per-turn history.
+    fn begin_player_turn(&mut self) {
+        self.player.turn += 1;
+        let s = &mut self.stats;
+        s.exhausted_this_turn = 0;
+        s.hp_lost_this_turn = false;
+        s.block_plays_this_turn.clear();
+        s.cards_played_this_turn = 0;
+        s.skill_played_this_turn = false;
+        s.manual_plays_this_turn = 0;
+        s.last_turn_card = s.last_card.take();
     }
 
     /// `PlayerCombatState.EndOfTurnCleanup` over every card in combat.
@@ -1600,6 +1712,10 @@ impl Combat {
             // ExhaustOnNextPlay before it plays anything, so Havoc burns a
             // card it could not play rather than discarding it, and burning
             // it goes through CardCmd.Exhaust: Feel No Pain sees it.
+            if card.dupe {
+                self.take_card(uid);
+                return vec![];
+            }
             if force_exhaust || card.exhaust_on_next_play || card.has(Keyword::Exhaust) {
                 return vec![Effect::Exhaust { uid, ethereal: false }];
             }
@@ -1633,7 +1749,7 @@ impl Combat {
     // ---- piles -------------------------------------------------------------
 
     /// Returns true when a shuffle happened.
-    fn reshuffle_if_needed(&mut self) -> bool {
+    pub(crate) fn reshuffle_if_needed(&mut self) -> bool {
         if self.player.draw.is_empty() && !self.player.discard.is_empty() {
             // CardPileCmd.Shuffle: discard becomes the draw pile.
             let mut cards = std::mem::take(&mut self.player.discard);
@@ -1653,7 +1769,10 @@ impl Combat {
     fn draw(&mut self, count: u32, from_hand_draw: bool) -> Vec<Effect> {
         // Pillage reads this after each draw; a draw that yields nothing must clear it.
         self.stats.last_drawn = None;
-        if count == 0 || !self.player.creature.powers.iter().all(|p| p.should_draw(from_hand_draw)) {
+        if count == 0
+            || !self.player.creature.powers.iter().all(|p| p.should_draw(from_hand_draw))
+            || !self.relic_should_draw(from_hand_draw)
+        {
             return vec![];
         }
         if self.player.hand.len() >= MAX_HAND {
@@ -1671,6 +1790,10 @@ impl Combat {
         let strike = card.has_tag(Tag::Strike);
         // Slither.AfterCardDrawn: reroll the cost, for this combat.
         if card.enchantment.is_some_and(|e| e.randomizes_cost_on_draw()) {
+            card.cost_this_combat = Some(self.rngs.energy_costs.next_int(4) as i32);
+        }
+        // ConfusedPower.AfterCardDrawn (Snecko Eye), on the same stream.
+        if self.player.creature.power(PowerId::Confused).is_some() && card.def().cost >= 0 {
             card.cost_this_combat = Some(self.rngs.energy_costs.next_int(4) as i32);
         }
         self.player.hand.push(card);
@@ -1692,7 +1815,7 @@ impl Combat {
     }
 
     /// Remove a card from whichever combat pile holds it.
-    fn take_card(&mut self, uid: u32) -> Option<Card> {
+    pub(crate) fn take_card(&mut self, uid: u32) -> Option<Card> {
         let p = &mut self.player;
         for pile in [&mut p.hand, &mut p.draw, &mut p.discard, &mut p.exhaust, &mut p.play] {
             if let Some(i) = pile.iter().position(|c| c.uid == uid) {
@@ -1702,7 +1825,7 @@ impl Combat {
         None
     }
 
-    fn put_card(&mut self, card: Card, to: Pile) {
+    pub(crate) fn put_card(&mut self, card: Card, to: Pile) {
         match to {
             Pile::Hand => {
                 if self.player.hand.len() < MAX_HAND {
@@ -1723,7 +1846,7 @@ impl Combat {
         }
     }
 
-    fn new_uid(&mut self) -> u32 {
+    pub(crate) fn new_uid(&mut self) -> u32 {
         let u = self.next_uid;
         self.next_uid += 1;
         u
@@ -1813,7 +1936,9 @@ impl Combat {
         // Creature.DamageBlockInternal: block absorbs min(block, amount),
         // truncated on the block write but not on the remainder.
         let blocked = if props.has(ValueProp::UNBLOCKABLE) { 0.0 } else { (c.block as f64).min(modified) };
+        let had_block = c.block > 0;
         c.block -= blocked as i32;
+        let block_broken = had_block && blocked > 0.0 && c.block == 0;
         let mut unblocked = (modified - blocked).max(0.0);
         // SlipperyPower.ModifyHpLostAfterOsty: at most 1 HP per hit.
         if c.power(PowerId::Slippery).is_some() && unblocked >= 1.0 {
@@ -1824,6 +1949,16 @@ impl Combat {
         if let Some(shell) = c.power(PowerId::HardenedShell) {
             let left = (shell.amount - shell.data).max(0) as f64;
             unblocked = unblocked.min(left);
+        }
+        // TheBoot.ModifyHpLostAfterOstyLate: your powered attacks that get
+        // 1 to 4 HP through deal 5.
+        if target != CreatureRef::Player
+            && dealer == Some(CreatureRef::Player)
+            && props.is_powered()
+            && (1.0..5.0).contains(&unblocked)
+            && self.has_relic(crate::relic::RelicId::TheBoot)
+        {
+            unblocked = 5.0;
         }
         let mut buffered = false;
         if target == CreatureRef::Player {
@@ -1904,6 +2039,14 @@ impl Combat {
         }
         if target == CreatureRef::Player {
             out.extend(self.relic_after_damage_received(lost, props, own_turn));
+        }
+        // HandDrill.AfterDamageGiven: breaking an enemy's block leaves it Vulnerable.
+        if block_broken
+            && dealer == Some(CreatureRef::Player)
+            && target != CreatureRef::Player
+            && self.has_relic(crate::relic::RelicId::HandDrill)
+        {
+            out.push(Effect::ApplyPower { target, id: PowerId::Vulnerable, amount: 2, applier: Some(CreatureRef::Player) });
         }
         if was_alive && !self.creature(target).alive() {
             if let CreatureRef::Enemy(i) = target {
@@ -2028,11 +2171,10 @@ impl Combat {
             return vec![];
         }
         let existing = self.creature(target).power(id).map(|p| p.amount);
-        if let Some(cur) = existing {
-            // ShrinkPower.StackType: an infinite (-1) Shrink is a Single stack.
-            if is_single(id) || (id == PowerId::Shrink && cur < 0) {
-                return vec![];
-            }
+        // An existing instance takes the amount whatever its StackType, which
+        // only decides whether the number is drawn: two Snecko relics make
+        // Confused 2.
+        if existing.is_some() {
             out.extend(Power::new(id, 0).on_applied(target, amount));
             self.modify_power(target, id, amount);
         } else {

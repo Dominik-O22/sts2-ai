@@ -80,6 +80,8 @@ pub struct CombatRngs {
     pub card_selection: Rng,
     /// `CombatEnergyCosts`: Snecko Oil costs.
     pub energy_costs: Rng,
+    /// `CombatPotionGeneration`: Delicate Frond's potions.
+    pub potion_generation: Rng,
 }
 
 impl CombatRngs {
@@ -92,6 +94,7 @@ impl CombatRngs {
             card_generation: Rng::new(seed ^ 0x05),
             card_selection: Rng::new(seed ^ 0x06),
             energy_costs: Rng::new(seed ^ 0x07),
+            potion_generation: Rng::new(seed ^ 0x08),
         }
     }
 }

@@ -15,12 +15,13 @@ use std::collections::{HashMap, VecDeque};
 
 use serde_json::{json, Value};
 
-use crate::card::Card;
+use crate::card::{Card, IRONCLAD_POOL};
 use crate::enchant::{EnchantmentId, ALL as ALL_ENCHANTMENTS};
 use crate::combat::{Action, Combat, Outcome, Script};
 use crate::gen::{card_ref, FightSetup};
+use crate::effect::Then;
 use crate::encounter::Encounter;
-use crate::ids::{CardId, MonsterId, ALL_CARDS, ALL_MONSTERS};
+use crate::ids::{CardId, MonsterId, PowerId, ALL_CARDS, ALL_MONSTERS};
 use crate::potion::PotionId;
 use crate::relic::RelicId;
 use crate::types::{Ascension, CreatureRef, Side};
@@ -256,35 +257,54 @@ fn adopt_spawn_hp(c: &mut Combat, snap: &Value, known: usize) -> Result<(), Stri
     Ok(())
 }
 
-/// A card dropped into the draw pile at a random depth (the Soul Fysh's
-/// Beckon) lands somewhere nothing records. When the sim has done that since
-/// the last snapshot and holds the same cards the recording shows, take the
-/// recording's order: the only thing adopted is the depth.
-fn adopt_draw_order(c: &mut Combat, snap: &Value) {
+/// A card dropped into the draw pile at a random depth lands somewhere
+/// nothing records: Beckon from the Soul Fysh, Soot from Biiig Hug, the
+/// Dazed from Tea of Discourtesy and Blessed Antler before the opening draw.
+/// When the sim has done that since the last snapshot and holds the same
+/// cards across hand and draw pile as the recording, take the recording's
+/// layout of both, which also settles which of them a draw picked up.
+///
+/// `opening` also lets a card match on id alone and take the snapshot's
+/// upgrade, once every exact match has been placed: Bone Tea upgrades
+/// whichever cards the opening hand drew, and those differ between game
+/// and sim.
+fn adopt_layout(c: &mut Combat, snap: &Value, opening: bool) {
     if c.stats.random_draw_inserts == 0 {
         return;
     }
     c.stats.random_draw_inserts = 0;
     let empty = vec![];
-    let want = snap["draw"].as_array().unwrap_or(&empty);
-    if want.len() != c.player.draw.len() {
+    let want: Vec<(bool, &Value)> = snap["hand"]
+        .as_array()
+        .unwrap_or(&empty)
+        .iter()
+        .map(|r| (true, r))
+        .chain(snap["draw"].as_array().unwrap_or(&empty).iter().map(|r| (false, r)))
+        .collect();
+    let mut pool: Vec<Option<Card>> =
+        c.player.hand.iter().chain(&c.player.draw).cloned().map(Some).collect();
+    let mut placed: Vec<Option<Card>> = vec![None; want.len()];
+    let passes: &[bool] = if opening { &[true, false] } else { &[true] };
+    for &exact in passes {
+        for (slot, (_, r)) in want.iter().enumerate() {
+            if placed[slot].is_some() {
+                continue;
+            }
+            let (Some(id), up) = (r["id"].as_str(), r["up"].as_bool().unwrap_or(false)) else { return };
+            let fits = |k: &Card| slug(&format!("{:?}", k.id)) == id && (!exact || k.upgraded == up);
+            if let Some(i) = pool.iter().position(|k| k.as_ref().is_some_and(fits)) {
+                let mut k = pool[i].take().expect("position found it");
+                k.upgraded = up;
+                placed[slot] = Some(k);
+            }
+        }
+    }
+    if pool.iter().any(Option::is_some) || placed.iter().any(Option::is_none) {
         return;
     }
-    let key = |k: &Card| json!({ "id": slug(&format!("{:?}", k.id)), "up": k.upgraded });
-    let mut taken = vec![false; c.player.draw.len()];
-    let mut order = Vec::with_capacity(want.len());
-    for r in want {
-        let Some(i) = (0..c.player.draw.len()).find(|&i| {
-            !taken[i] && key(&c.player.draw[i]) == json!({ "id": r["id"], "up": r["up"] })
-        }) else {
-            return; // A different multiset: a real divergence, not a depth.
-        };
-        taken[i] = true;
-        order.push(i);
-    }
-    let drawn = std::mem::take(&mut c.player.draw);
-    let mut slots: Vec<Option<Card>> = drawn.into_iter().map(Some).collect();
-    c.player.draw = order.into_iter().map(|i| slots[i].take().expect("each card used once")).collect();
+    let (hand, draw): (Vec<_>, Vec<_>) = want.iter().zip(placed).partition(|((in_hand, _), _)| *in_hand);
+    c.player.hand = hand.into_iter().filter_map(|(_, k)| k).collect();
+    c.player.draw = draw.into_iter().filter_map(|(_, k)| k).collect();
 }
 
 /// Snecko Oil rolls each hand card's cost; the recording shows the
@@ -303,6 +323,65 @@ fn adopt_hand_costs(c: &mut Combat, snap: &Value) {
             if cost >= 0 {
                 c.player.hand[i].cost_this_turn = Some(cost as i32);
             }
+        }
+    }
+}
+
+/// Confused (Snecko Eye) rolls a cost for the combat onto every card drawn,
+/// from a stream the sim cannot share with the game. While it is up, copy
+/// each hand card's recorded cost onto the sim's matching card, backing out
+/// whatever the global modifiers add on top.
+fn adopt_confused_costs(c: &mut Combat, snap: &Value) {
+    if c.player.creature.power(PowerId::Confused).is_none() {
+        return;
+    }
+    let empty = vec![];
+    let mut taken = vec![false; c.player.hand.len()];
+    for r in snap["hand"].as_array().unwrap_or(&empty) {
+        let (Some(id), Some(cost)) = (r["id"].as_str(), r["cost"].as_i64()) else { continue };
+        let up = r["up"].as_bool().unwrap_or(false);
+        let found = c.player.hand.iter().enumerate().position(|(i, k)| {
+            !taken[i]
+                && slug(&format!("{:?}", k.id)) == id
+                && k.upgraded == up
+                && k.cost_this_combat.is_some()
+                && k.cost_this_turn.is_none()
+        });
+        if let Some(i) = found {
+            taken[i] = true;
+            let k = &c.player.hand[i];
+            let global = c.cost(k) - k.local_cost();
+            if cost >= 0 {
+                c.player.hand[i].cost_this_combat = Some((cost as i32 - global).max(0));
+            }
+        }
+    }
+}
+
+/// A choose-a-card screen open at the turn start (Choices Paradox) is logged
+/// as a snapshot with the pick already in hand, and the `gen` record naming
+/// the pick only follows it. While an offer is pending, put any hand card
+/// the sim cannot account for on offer in place of one the sim rolled.
+fn adopt_offer(c: &mut Combat, snap: &Value) {
+    if !c.pending.as_ref().is_some_and(|p| p.then == Then::TakeOffer) {
+        return;
+    }
+    let empty = vec![];
+    let mut held: Vec<String> = c.player.hand.iter().map(|k| slug(&format!("{:?}", k.id))).collect();
+    let ids = Ids::new();
+    for r in snap["hand"].as_array().unwrap_or(&empty) {
+        let Some(name) = r["id"].as_str() else { continue };
+        if let Some(i) = held.iter().position(|h| h == name) {
+            held.remove(i);
+            continue;
+        }
+        let Some(&id) = ids.cards.get(name) else { continue };
+        if c.player.offer.iter().any(|k| k.id == id) {
+            continue;
+        }
+        if let Some(k) = c.player.offer.first_mut() {
+            k.id = id;
+            c.script.adopted_offers.push(id);
         }
     }
 }
@@ -348,6 +427,10 @@ pub struct Replayer {
     report: Report,
     known_enemies: usize,
     snecko_pending: bool,
+    /// A card the sim played early because the game's card-select screen
+    /// opened for it (a `choice` record); the `play` record for it, which
+    /// the game only writes once the card resolves, is then skipped.
+    pre_played: Option<(CardId, bool)>,
     gate: Gate,
     queue: VecDeque<(usize, Value)>,
     /// Records applied since the last checkpoint, re-applied on a reseed.
@@ -454,20 +537,50 @@ impl Replayer {
             check_hp_range(spec.id, e["max_hp"].as_i64().unwrap_or(0) as i32, fs.asc)?;
         }
 
-        // The first shuffle is the initial one: the opening hand in draw
-        // order, then the rest of the draw pile.
+        // The first shuffle is the initial one. The recorder logs it as
+        // `opening`; older recordings only have the first snapshot, whose
+        // opening hand in draw order, then the rest of the draw pile, is the
+        // same thing unless a card was played before the player could act
+        // (Whispering Earring).
         let mut opening: Vec<(CardId, bool)> = vec![];
-        for key in ["hand", "draw"] {
-            for v in first_snap[key].as_array().ok_or("snapshot without piles")? {
-                opening.push(card_ref(&ids, v)?);
+        match start["opening"].as_array() {
+            Some(cards) => {
+                for v in cards {
+                    opening.push(card_ref(&ids, v)?);
+                }
+            }
+            None => {
+                for key in ["hand", "draw"] {
+                    for v in first_snap[key].as_array().ok_or("snapshot without piles")? {
+                        opening.push(card_ref(&ids, v)?);
+                    }
+                }
             }
         }
+        // Records from before the first decision point (`early`): cards
+        // made (Crossbow's turn 1 attack) and cards exhausted (True Grit
+        // under Whispering Earring). Only cards random generation could have
+        // rolled are forced; Luminesce and the Dazed are placed by name.
+        let early = |t: &str| -> Vec<(CardId, bool)> {
+            start["early"]
+                .as_array()
+                .map(|a| a.iter().filter(|v| v["t"] == t).filter_map(|v| card_ref(&ids, v).ok()).collect())
+                .unwrap_or_default()
+        };
+        let generated = early("gen")
+            .into_iter()
+            .map(|(id, _)| id)
+            .filter(|&id| IRONCLAD_POOL.contains(&id) && crate::card::def(id).generatable)
+            .collect();
+        let random_exhausts = early("exhaust");
         let script = Script {
             shuffles: VecDeque::from(vec![opening]),
             enemy_hp: enemies.iter().map(|e| e["max_hp"].as_i64().unwrap_or(1) as i32).collect(),
             random_targets: VecDeque::new(),
-            generated: VecDeque::new(),
-            random_exhausts: vec![],
+            generated,
+            random_exhausts,
+            adopted_offers: vec![],
+            unforced: vec![],
         };
         let mut c = Combat::with_script(&fs.as_setup(seed), script);
         // Enemies that start damaged (the start record is taken at the first decision point).
@@ -476,6 +589,11 @@ impl Replayer {
                 c.enemies[i].creature.hp = hp as i32;
             }
         }
+        // The player's HP is read from that same first decision point, after
+        // turn 1 has healed (Blood Vial) or hurt (Royal Poison), so the sim
+        // having just done so again is undone.
+        c.player.creature.hp = fs.hp;
+        adopt_layout(&mut c, first_snap, true);
 
         let report = Report { snapshots: 0, actions: 0, divergence: None, reseeds: 0 };
         let known_enemies = c.enemies.len();
@@ -487,6 +605,7 @@ impl Replayer {
             report,
             known_enemies,
             snecko_pending: false,
+            pre_played: None,
             gate: Gate::default(),
             queue: VecDeque::new(),
             since: vec![],
@@ -611,10 +730,13 @@ impl Replayer {
                 if self.c.is_over() && rec["enemies"].as_array().is_some_and(|a| a.is_empty()) {
                     return Ok(Applied::Ok);
                 }
+                self.c.script.unforced.clear();
                 if std::mem::take(&mut self.snecko_pending) {
                     adopt_hand_costs(&mut self.c, rec);
                 }
-                adopt_draw_order(&mut self.c, rec);
+                adopt_confused_costs(&mut self.c, rec);
+                adopt_offer(&mut self.c, rec);
+                adopt_layout(&mut self.c, rec, false);
                 if let Err(e) = adopt_spawn_hp(&mut self.c, rec, self.known_enemies) {
                     return Ok(Applied::Diverged(e));
                 }
@@ -664,6 +786,18 @@ impl Replayer {
             }
             "gen" => {
                 let id = card_ref(&self.ids, rec)?.0;
+                if let Some(i) = self.c.script.adopted_offers.iter().position(|&a| a == id) {
+                    self.c.script.adopted_offers.remove(i);
+                    return Ok(Applied::Ok);
+                }
+                // The sim already rolled this card: make its roll the game's.
+                if let Some(rolled) = self.c.script.unforced.pop() {
+                    let newest = self.c.all_cards().filter(|k| k.id == rolled).map(|k| k.uid).max();
+                    if let Some(k) = newest.and_then(|u| self.c.find_card_mut(u)) {
+                        k.id = id;
+                        return Ok(Applied::Ok);
+                    }
+                }
                 self.c.script.generated.push_back(id);
                 Ok(Applied::Ok)
             }
@@ -683,53 +817,33 @@ impl Replayer {
                 Ok(Applied::Ok)
             }
             "play" => {
-                self.at_decision = false;
-                if self.c.is_over() {
-                    return Ok(Applied::Diverged("card played after the sim ended combat".into()));
+                let key = card_ref(&self.ids, rec)?;
+                if self.pre_played.take() == Some(key) {
+                    return Ok(self.after_action());
                 }
-                let (id, up) = card_ref(&self.ids, rec)?;
-                // Targets index the game's list of living enemies. A kill
-                // shot loses its target before the hook fires; with one
-                // enemy left that is unambiguous.
-                let living: Vec<usize> = self.c.present_enemies().collect();
-                let target = match rec["target"].as_u64() {
-                    Some(t) => living.get(t as usize).copied(),
-                    None if living.len() == 1 && crate::card::def(id).target == crate::types::TargetType::AnyEnemy => {
-                        Some(living[0])
+                self.play(rec)
+            }
+            // The game opened its card-select screen mid-play. The play that
+            // opened it has not been reported yet, so apply it now from the
+            // card the record names, which puts the choice in front of the
+            // policy while the player is still looking at it.
+            "choice" => {
+                if self.c.pending.is_some() || self.c.is_over() {
+                    return Ok(self.after_action());
+                }
+                if rec["card"].is_null() || self.pre_played.is_some() {
+                    return Ok(Applied::Ok);
+                }
+                let key = card_ref(&self.ids, &rec["card"])?;
+                match self.play(&rec["card"])? {
+                    // A play the sim cannot place (a target it would need)
+                    // waits for the real record; the advice is late then.
+                    Applied::Diverged(_) => Ok(Applied::Ok),
+                    applied => {
+                        self.pre_played = Some(key);
+                        Ok(applied)
                     }
-                    None => None,
-                };
-                // Prefer the recorded hand index: identical cards are
-                // interchangeable, but which one leaves the hand changes
-                // the discard order and so later random picks.
-                let want_idx = rec["hand_idx"].as_u64().map(|i| i as usize);
-                // The cost the recording showed at that index, which is the
-                // only thing separating two otherwise identical cards.
-                let want_cost = want_idx.and_then(|i| self.last_hand.get(i)).and_then(|k| k["cost"].as_i64());
-                let c = &self.c;
-                let legal = c.legal_actions();
-                let matches = |a: &Action| match *a {
-                    Action::PlayCard { hand_idx, target: t } => {
-                        let k = &c.player.hand[hand_idx];
-                        let cost_ok = want_cost.is_none_or(|w| w == i64::from(if k.def().x_cost { -1 } else { c.cost(k) }));
-                        k.id == id && k.upgraded == up && t == target && cost_ok
-                    }
-                    _ => false,
-                };
-                let action = legal
-                    .iter()
-                    .copied()
-                    .find(|a| matches(a) && matches!(a, Action::PlayCard { hand_idx, .. } if Some(*hand_idx) == want_idx))
-                    .or_else(|| legal.iter().copied().find(matches));
-                let Some(action) = action else {
-                    return Ok(Applied::Diverged(format!(
-                        "game played {id:?} (upgraded {up}) at {target:?}; sim has no such legal play"
-                    )));
-                };
-                self.c.step(action);
-                self.report.actions += 1;
-                clear_per_play(&mut self.c);
-                Ok(self.after_action())
+                }
             }
             "potion" => {
                 self.at_decision = false;
@@ -784,6 +898,57 @@ impl Replayer {
             }
             other => Err(format!("unknown record type {other}")),
         }
+    }
+
+    /// Apply a `play` record (or the card of a `choice` record).
+    fn play(&mut self, rec: &Value) -> Result<Applied, String> {
+        self.at_decision = false;
+        if self.c.is_over() {
+            return Ok(Applied::Diverged("card played after the sim ended combat".into()));
+        }
+        let (id, up) = card_ref(&self.ids, rec)?;
+        // Targets index the game's list of living enemies. A kill
+        // shot loses its target before the hook fires; with one
+        // enemy left that is unambiguous.
+        let living: Vec<usize> = self.c.present_enemies().collect();
+        let target = match rec["target"].as_u64() {
+            Some(t) => living.get(t as usize).copied(),
+            None if living.len() == 1 && crate::card::def(id).target == crate::types::TargetType::AnyEnemy => {
+                Some(living[0])
+            }
+            None => None,
+        };
+        // Prefer the recorded hand index: identical cards are
+        // interchangeable, but which one leaves the hand changes
+        // the discard order and so later random picks.
+        let want_idx = rec["hand_idx"].as_u64().map(|i| i as usize);
+        // The cost the recording showed at that index, which is the
+        // only thing separating two otherwise identical cards.
+        let want_cost = want_idx.and_then(|i| self.last_hand.get(i)).and_then(|k| k["cost"].as_i64());
+        let c = &self.c;
+        let legal = c.legal_actions();
+        let matches = |a: &Action| match *a {
+            Action::PlayCard { hand_idx, target: t } => {
+                let k = &c.player.hand[hand_idx];
+                let cost_ok = want_cost.is_none_or(|w| w == i64::from(if k.def().x_cost { -1 } else { c.cost(k) }));
+                k.id == id && k.upgraded == up && t == target && cost_ok
+            }
+            _ => false,
+        };
+        let action = legal
+            .iter()
+            .copied()
+            .find(|a| matches(a) && matches!(a, Action::PlayCard { hand_idx, .. } if Some(*hand_idx) == want_idx))
+            .or_else(|| legal.iter().copied().find(matches));
+        let Some(action) = action else {
+            return Ok(Applied::Diverged(format!(
+                "game played {id:?} (upgraded {up}) at {target:?}; sim has no such legal play"
+            )));
+        };
+        self.c.step(action);
+        self.report.actions += 1;
+        clear_per_play(&mut self.c);
+        Ok(self.after_action())
     }
 
     /// A card choice left open by a play or a potion is itself a decision

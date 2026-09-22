@@ -17,19 +17,26 @@ use crate::rng::Rng;
 use crate::types::{Ascension, AscensionLevel, CardRarity};
 use crate::{ironclad_starter_deck, IRONCLAD_ENERGY, IRONCLAD_HP};
 
-/// Relics the sim leaves out because nothing they do reaches a combat: every
-/// one overrides only `AfterObtained` or the card-reward hooks. Anything the
+/// Relics the sim leaves out because nothing they do reaches a combat: they
+/// act on pickup, on rewards, the map, rest sites and shops, or on the deck
+/// once a fight is over. Byrdpip and Pael's Legion summon pets, but the pets
+/// only stand there, and Pael's Legion's block is ported. Anything the
 /// recorder names that is neither here nor ported is an error, not a silent
 /// drop, because a missing relic replays clean while being wrong.
 const INERT_RELICS: &[&str] = &[
-    "ALCHEMICAL_COFFER", "ARCANE_SCROLL", "ASTROLABE", "BEAUTIFUL_BRACELET", "CALLING_BELL", "CLAWS",
-    "CURSED_PEARL", "DISTINGUISHED_CAPE", "DUSTY_TOME", "ELECTRIC_SHRYMP", "EMPTY_CAGE", "FRAGRANT_MUSHROOM",
-    "FRESNEL_LENS", "GLASS_EYE", "GLITTER", "GOLDEN_PEARL", "HEFTY_TABLET", "JEWELRY_BOX", "KALEIDOSCOPE",
-    "LARGE_CAPSULE", "LEAFY_POULTICE", "LOOMING_FRUIT", "LOST_COFFER", "NEOWS_BONES", "NEOWS_TALISMAN",
-    "NEOWS_TORMENT", "NEW_LEAF", "NUTRITIOUS_OYSTER", "NUTRITIOUS_SOUP", "PANDORAS_BOX", "PAPER_KRANE",
-    "PHIAL_HOLSTER", "POMANDER", "PRECARIOUS_SHEARS", "PRECISE_SCISSORS", "PRESERVED_FOG", "SAND_CASTLE",
-    "SCROLL_BOXES", "SEA_GLASS", "SERE_TALON", "SIGNET_RING", "SMALL_CAPSULE", "STORYBOOK", "TANXS_WHISTLE",
-    "TRI_BOOMERANG", "VAKUU_CARD_SELECTOR", "WONGO_CUSTOMER_APPRECIATION_BADGE",
+    "ALCHEMICAL_COFFER", "ARCANE_SCROLL", "ARCHAIC_TOOTH", "ASTROLABE", "BEAUTIFUL_BRACELET", "BING_BONG",
+    "BLACK_STAR", "BYRDPIP", "CALLING_BELL", "CHOSEN_CHEESE", "CLAWS", "CURSED_PEARL", "DARKSTONE_PERIAPT",
+    "DISTINGUISHED_CAPE", "DREAM_CATCHER", "DRIFTWOOD", "DUSTY_TOME", "ELECTRIC_SHRYMP", "EMPTY_CAGE",
+    "FAKE_LEES_WAFFLE", "FAKE_MANGO", "FAKE_MERCHANTS_RUG", "FISHING_ROD", "FRAGRANT_MUSHROOM", "FRESNEL_LENS",
+    "GLASS_EYE", "GLITTER", "GOLDEN_COMPASS", "GOLDEN_PEARL", "HEFTY_TABLET", "JEWELRY_BOX", "KALEIDOSCOPE",
+    "LARGE_CAPSULE", "LAVA_ROCK", "LEAFY_POULTICE", "LOOMING_FRUIT", "LORDS_PARASOL", "LOST_COFFER",
+    "MASSIVE_SCROLL", "MAW_BANK", "MEAT_CLEAVER", "NEOWS_BONES", "NEOWS_TALISMAN", "NEOWS_TORMENT", "NEW_LEAF",
+    "NUTRITIOUS_OYSTER", "NUTRITIOUS_SOUP", "PAELS_CLAW", "PAELS_GROWTH", "PAELS_HORN", "PAELS_TOOTH",
+    "PAELS_WING", "PANDORAS_BOX", "PAPER_KRANE", "PHIAL_HOLSTER", "POMANDER", "PRECARIOUS_SHEARS",
+    "PRECISE_SCISSORS", "PRESERVED_FOG", "SAND_CASTLE", "SCROLL_BOXES", "SEA_GLASS", "SERE_TALON",
+    "SIGNET_RING", "SILKEN_TRESS", "SILVER_CRUCIBLE", "SMALL_CAPSULE", "STONE_HUMIDIFIER", "STORYBOOK",
+    "SWORD_OF_STONE", "TANXS_WHISTLE", "TOUCH_OF_OROBAS", "TOY_BOX", "TRI_BOOMERANG", "VAKUU_CARD_SELECTOR",
+    "WAR_HAMMER", "WINGED_BOOTS", "WONGO_CUSTOMER_APPRECIATION_BADGE", "WONGOS_MYSTERY_TICKET", "YUMMY_COOKIE",
 ];
 
 /// Last floor of act 1: the boss room.
@@ -116,8 +123,15 @@ impl FightSetup {
                 a.iter()
                     .filter_map(|v| v.as_str())
                     .filter(|name| !INERT_RELICS.contains(name))
-                    .map(|name| ids.relics.get(name).map(|&id| Relic::new(id)).ok_or_else(|| format!("unknown relic {name}")))
-                    .collect::<Result<_, _>>()
+                    .map(|name| {
+                        let &id = ids.relics.get(name).ok_or_else(|| format!("unknown relic {name}"))?;
+                        let mut r = Relic::new(id);
+                        if let Some(n) = start["relic_state"][name].as_i64() {
+                            r.counter = relic_counter(id, n as i32);
+                        }
+                        Ok(r)
+                    })
+                    .collect::<Result<_, String>>()
             })
             .transpose()?
             .unwrap_or_default();
@@ -167,6 +181,16 @@ impl FightSetup {
     }
 }
 
+/// A relic's `counter` from the value the recorder logs for it at combat
+/// setup (`Recorder.RelicState`), which is the game's own field.
+fn relic_counter(id: RelicId, game: i32) -> i32 {
+    match id {
+        // CardsPlayed only matters modulo the four it fires on.
+        RelicId::IronClub => game % 4,
+        _ => game,
+    }
+}
+
 pub(crate) fn card_ref(ids: &Ids, v: &Value) -> Result<(CardId, bool), String> {
     let id = v["id"].as_str().ok_or("card without id")?;
     let card = *ids.cards.get(id).ok_or_else(|| format!("unknown card {id}"))?;
@@ -204,13 +228,14 @@ fn reward_pool() -> Vec<CardId> {
     IRONCLAD_POOL.iter().copied().filter(|&id| !matches!(def(id).rarity, CardRarity::Basic | CardRarity::Special)).collect()
 }
 
-/// Relics a run can hold besides the starter. Ancient (boss) relics are
-/// left out: act 1 fights happen before the first boss chest.
+/// Relics a run can hold besides the starter. Ancient relics are left out:
+/// the Ancients that hand them out open acts 2 and 3, and Neow's are
+/// either inert or not on the list.
 fn relic_pool() -> Vec<RelicId> {
     relic::ALL
         .iter()
         .copied()
-        .filter(|&id| !matches!(id, RelicId::BurningBlood | RelicId::PaelsFlesh | RelicId::LeadPaperweight))
+        .filter(|&id| !matches!(id, RelicId::BurningBlood | RelicId::LeadPaperweight) && !relic::ANCIENT.contains(&id))
         .collect()
 }
 

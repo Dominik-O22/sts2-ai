@@ -1,5 +1,6 @@
 //! Relics. `Models/RelicModel.cs` plus `Models/Relics/*.cs` for every
-//! Common, Uncommon, Rare, Shop, and Ironclad relic. Relics live on the run
+//! Common, Uncommon, Rare, Shop, and Ironclad relic, and the event pool
+//! (`RelicPools/EventRelicPool.cs`) where it reaches a fight. Relics live on the run
 //! and persist counters across combats (`Nunchaku.AttacksPlayed`, Pen Nib's
 //! count, Girya's lifts, Lizard Tail's use). Combat clones them in and the
 //! caller reads them back from `Combat::relics` afterwards.
@@ -9,11 +10,14 @@
 
 use crate::card::{Card, Tag};
 use crate::combat::{Combat, RoomKind};
-use crate::effect::{AttackTargets, Effect, GenPool, Pile};
-use crate::ids::PowerId;
-use crate::types::{CardRarity, CardType, CreatureRef, Side, ValueProp};
+use crate::effect::{AttackTargets, CardFilter, Effect, GenPool, Pile};
+use crate::ids::{CardId, PowerId};
+use crate::types::{CardRarity, CardType, CreatureRef, Keyword, Side, TargetType, ValueProp};
 
-/// `Models/Relics/<Name>.cs`. Ancient (boss) and Event relics are not yet ported.
+/// `Models/Relics/<Name>.cs`. Event pool relics that never reach a fight
+/// are not here but in `gen::INERT_RELICS`, and the other characters'
+/// starter upgrades (Infused Core, Phylactery Unbound, Divine Destiny, Ring
+/// of the Drake) are left out with those characters.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum RelicId {
     // Starter
@@ -45,6 +49,17 @@ pub enum RelicId {
     PaelsFlesh,
     /// Run-time only (a card pick when obtained); nothing in combat.
     LeadPaperweight,
+    // Event. Appended after the vocabulary was pinned; new ids go at the end.
+    TheBoot,
+    // The rest of the event pool, event and ancient rarity alike.
+    BigMushroom, BiiigHug, BlackBlood, BlessedAntler, BloodSoakedRose, BoneTea, BoomingConch,
+    BrilliantScarf, ChoicesParadox, Crossbow, DaughterOfTheWind, DelicateFrond, DiamondDiadem,
+    Ectoplasm, EmberTea, FakeAnchor, FakeBloodVial, FakeHappyFlower, FakeOrichalcum, FakeSneckoEye,
+    FakeStrikeDummy, FakeVenerableTeaSet, Fiddle, ForgottenSoul, FurCoat, HandDrill, HistoryCourse,
+    IronClub, JeweledMask, LostWisp, MrStruggles, MusicBox, PaelsBlood, PaelsEye, PaelsLegion,
+    PaelsTears, PhilosophersStone, PollinousCore, PrismaticGem, PumpkinCandle, RadiantPearl,
+    RoyalPoison, RunicPyramid, Sai, SealOfGold, SneckoEye, Sozu, SpikedGauntlets, SwordOfJade,
+    TeaOfDiscourtesy, ThrowingAxe, ToastyMittens, VelvetChoker, WhisperingEarring,
 }
 
 /// Every relic, for generators and tests.
@@ -74,7 +89,33 @@ pub const ALL: &[RelicId] = &[
     RelicId::LeesWaffle, RelicId::MembershipCard, RelicId::MiniatureTent, RelicId::MysticLighter, RelicId::Orrery,
     RelicId::PunchDagger, RelicId::RingingTriangle, RelicId::RoyalStamp, RelicId::ScreamingFlagon,
     RelicId::SlingOfCourage, RelicId::TheAbacus, RelicId::Toolbox, RelicId::WingCharm,
-    RelicId::PaelsFlesh, RelicId::LeadPaperweight,
+    RelicId::PaelsFlesh, RelicId::LeadPaperweight, RelicId::TheBoot, RelicId::BigMushroom, RelicId::BiiigHug,
+    RelicId::BlackBlood, RelicId::BlessedAntler, RelicId::BloodSoakedRose, RelicId::BoneTea, RelicId::BoomingConch,
+    RelicId::BrilliantScarf, RelicId::ChoicesParadox, RelicId::Crossbow, RelicId::DaughterOfTheWind,
+    RelicId::DelicateFrond, RelicId::DiamondDiadem, RelicId::Ectoplasm, RelicId::EmberTea, RelicId::FakeAnchor,
+    RelicId::FakeBloodVial, RelicId::FakeHappyFlower, RelicId::FakeOrichalcum, RelicId::FakeSneckoEye,
+    RelicId::FakeStrikeDummy, RelicId::FakeVenerableTeaSet, RelicId::Fiddle, RelicId::ForgottenSoul, RelicId::FurCoat,
+    RelicId::HandDrill, RelicId::HistoryCourse, RelicId::IronClub, RelicId::JeweledMask, RelicId::LostWisp,
+    RelicId::MrStruggles, RelicId::MusicBox, RelicId::PaelsBlood, RelicId::PaelsEye, RelicId::PaelsLegion,
+    RelicId::PaelsTears, RelicId::PhilosophersStone, RelicId::PollinousCore, RelicId::PrismaticGem,
+    RelicId::PumpkinCandle, RelicId::RadiantPearl, RelicId::RoyalPoison, RelicId::RunicPyramid, RelicId::Sai,
+    RelicId::SealOfGold, RelicId::SneckoEye, RelicId::Sozu, RelicId::SpikedGauntlets, RelicId::SwordOfJade,
+    RelicId::TeaOfDiscourtesy, RelicId::ThrowingAxe, RelicId::ToastyMittens, RelicId::VelvetChoker,
+    RelicId::WhisperingEarring,
+];
+
+/// Ancient rarity, handed out by the Ancients that open each act, and the
+/// starter upgrade Touch of Orobas swaps in. Act 1 only sees the ones Neow
+/// offers (`Events/Neow.cs`), which is why Booming Conch is missing here.
+pub const ANCIENT: &[RelicId] = &[
+    RelicId::PaelsFlesh, RelicId::BiiigHug, RelicId::BlackBlood, RelicId::BlessedAntler, RelicId::BloodSoakedRose,
+    RelicId::BrilliantScarf, RelicId::ChoicesParadox, RelicId::Crossbow, RelicId::DelicateFrond,
+    RelicId::DiamondDiadem, RelicId::Ectoplasm, RelicId::Fiddle, RelicId::FurCoat, RelicId::IronClub,
+    RelicId::JeweledMask, RelicId::MusicBox, RelicId::PaelsBlood, RelicId::PaelsEye, RelicId::PaelsLegion,
+    RelicId::PaelsTears, RelicId::PhilosophersStone, RelicId::PrismaticGem, RelicId::PumpkinCandle,
+    RelicId::RadiantPearl, RelicId::RunicPyramid, RelicId::Sai, RelicId::SealOfGold, RelicId::SneckoEye,
+    RelicId::Sozu, RelicId::SpikedGauntlets, RelicId::ThrowingAxe, RelicId::ToastyMittens, RelicId::VelvetChoker,
+    RelicId::WhisperingEarring,
 ];
 
 /// A relic instance on the run.
@@ -82,7 +123,11 @@ pub const ALL: &[RelicId] = &[
 pub struct Relic {
     pub id: RelicId,
     /// Persistent counter: Nunchaku attacks, Pen Nib attacks, Tuning Fork
-    /// skills, Joss Paper exhausts, Happy Flower / Pendulum turns, Girya lifts.
+    /// skills, Joss Paper exhausts, Happy Flower / Pendulum turns, Girya lifts,
+    /// Iron Club plays, Pollinous Core turns. Charged relics count what is
+    /// left (Ember Tea combats, Pumpkin Candle kindling), a primed one holds
+    /// 1 (Fake Venerable Tea Set), and Fur Coat holds 1 in a marked fight.
+    /// `gen::from_start` reads the game's value from the recording.
     pub counter: i32,
     /// Per-combat counter, reset at combat start.
     pub combat_counter: i32,
@@ -97,7 +142,13 @@ pub struct Relic {
 
 impl Relic {
     pub fn new(id: RelicId) -> Self {
-        Self { id, counter: 0, combat_counter: 0, scratch: 0, used: false, flag: false }
+        // The charges a fresh one comes with.
+        let counter = match id {
+            RelicId::EmberTea | RelicId::PumpkinCandle => 5,
+            RelicId::BoneTea | RelicId::TeaOfDiscourtesy => 1,
+            _ => 0,
+        };
+        Self { id, counter, combat_counter: 0, scratch: 0, used: false, flag: false }
     }
 }
 
@@ -128,6 +179,10 @@ fn draw(n: u32) -> Effect {
     Effect::Draw { count: n, from_hand_draw: false }
 }
 
+fn generate(id: CardId, to: Pile) -> Effect {
+    Effect::GenerateCard { id, upgraded: false, to, free_this_turn: false }
+}
+
 impl Combat {
     pub fn has_relic(&self, id: RelicId) -> bool {
         self.relics.iter().any(|r| r.id == id)
@@ -143,10 +198,34 @@ impl Combat {
         use RelicId::*;
         let mut out = vec![];
         let room = self.room;
+        let enemies: Vec<usize> = self.living_enemies().collect();
+        // AfterRoomEntered, which `CombatRoom.StartCombat` runs before
+        // anything reaches BeforeCombatStart.
+        for r in &mut self.relics {
+            match r.id {
+                EmberTea if r.counter > 0 => {
+                    r.counter -= 1;
+                    out.push(self_power(PowerId::Strength, 2));
+                }
+                SwordOfJade => out.push(self_power(PowerId::Strength, 3)),
+                PhilosophersStone => out.extend(enemies.iter().map(|&e| Effect::ApplyPower {
+                    target: CreatureRef::Enemy(e),
+                    id: PowerId::Strength,
+                    amount: 1,
+                    applier: None,
+                })),
+                _ => {}
+            }
+        }
+        // FurCoat.BeforeCombatStart: a marked fight starts every enemy at 1 HP.
+        if self.relics.iter().any(|r| r.id == FurCoat && r.counter > 0) {
+            for &e in &enemies {
+                self.enemies[e].creature.hp = 1;
+            }
+        }
+        self.delicate_frond();
         let no_potions = self.potions.iter().all(|p| p.is_none());
         let hp_low = self.player.creature.hp * 2 <= self.player.creature.max_hp;
-        let deck_upgradable: Vec<u32> = vec![];
-        let _ = deck_upgradable;
         for i in 0..self.relics.len() {
             let r = &mut self.relics[i];
             r.combat_counter = 0;
@@ -169,6 +248,12 @@ impl Combat {
                 RedSkull if hp_low => {
                     r.used = true;
                     out.push(self_power(PowerId::Strength, 3));
+                }
+                FakeAnchor => out.push(gain_block(4)),
+                FakeSneckoEye | SneckoEye => out.push(self_power(PowerId::Confused, 1)),
+                TeaOfDiscourtesy if r.counter > 0 => {
+                    r.counter -= 1;
+                    out.extend((0..2).map(|_| generate(CardId::Dazed, Pile::DrawRandom)));
                 }
                 _ => {}
             }
@@ -222,6 +307,9 @@ impl Combat {
                     r.scratch = r.combat_counter;
                     r.combat_counter = 0;
                 }
+                MusicBox => r.used = false,
+                VelvetChoker => r.combat_counter = 0,
+                PollinousCore => r.counter += 1,
                 _ => {}
             }
         }
@@ -244,6 +332,10 @@ impl Combat {
                     r.flag = false;
                     out.push(Effect::GainEnergy { amount: 2 });
                 }
+                FakeVenerableTeaSet if r.counter > 0 => {
+                    r.counter = 0;
+                    out.push(Effect::GainEnergy { amount: 1 });
+                }
                 // ArtOfWar: `scratch` = attacks played last turn.
                 ArtOfWar if turn > 1 => {
                     if r.scratch == 0 {
@@ -258,23 +350,35 @@ impl Combat {
         out
     }
 
-    /// `Hook.ModifyHandDraw`.
-    pub(crate) fn relic_modify_hand_draw(&self, count: u32) -> u32 {
+    /// `Hook.ModifyHandDraw`, `AfterModifyingHandDraw`, then the `Late` pass.
+    pub(crate) fn relic_modify_hand_draw(&mut self, count: u32) -> u32 {
         use RelicId::*;
         let turn = self.player.turn;
+        let elite = self.room == RoomKind::Elite;
         let mut n = count;
-        for r in &self.relics {
+        for r in &mut self.relics {
             match r.id {
                 BagOfPreparation if turn <= 1 => n += 2,
                 Pocketwatch if turn > 1 && r.scratch <= 3 => n += 3,
+                BigMushroom if turn == 1 => n = n.saturating_sub(2),
+                BoomingConch if turn <= 1 && elite => n += 2,
+                PaelsBlood => n += 1,
+                SneckoEye => n += 2,
+                PollinousCore if r.counter == 4 => {
+                    r.counter = 0;
+                    n += 2;
+                }
                 _ => {}
             }
+        }
+        if self.has_relic(Fiddle) {
+            n += 2;
         }
         n
     }
 
     /// `Hook.ModifyMaxEnergy` for relics: Bread after turn 1, Pael's Flesh
-    /// from turn 3.
+    /// from turn 3, a flat +1 from the ancient energy relics.
     pub(crate) fn relic_modify_max_energy(&self, amount: i32) -> i32 {
         let mut a = amount;
         if self.has_relic(RelicId::Bread) && self.player.turn > 1 {
@@ -282,6 +386,15 @@ impl Combat {
         }
         if self.has_relic(RelicId::PaelsFlesh) && self.player.turn >= 3 {
             a += 1;
+        }
+        for r in &self.relics {
+            use RelicId::*;
+            match r.id {
+                BlessedAntler | BloodSoakedRose | Ectoplasm | PhilosophersStone | PrismaticGem | Sozu
+                | SpikedGauntlets | VelvetChoker | WhisperingEarring => a += 1,
+                PumpkinCandle if r.counter > 0 => a += 1,
+                _ => {}
+            }
         }
         a
     }
@@ -293,10 +406,37 @@ impl Combat {
             return vec![];
         }
         let turn = self.player.turn;
+        let elite = self.room == RoomKind::Elite;
         let enemies: Vec<usize> = self.living_enemies().collect();
         let mut out = vec![];
         for r in &mut self.relics {
             match r.id {
+                FakeHappyFlower => {
+                    r.counter = (r.counter + 1) % 5;
+                    if r.counter == 0 {
+                        out.push(Effect::GainEnergy { amount: 1 });
+                    }
+                }
+                BoneTea if turn <= 1 && r.counter > 0 => {
+                    r.counter -= 1;
+                    out.push(Effect::UpgradeHand);
+                }
+                BoomingConch if turn <= 1 && elite => out.push(Effect::GainEnergy { amount: 1 }),
+                Crossbow => out.push(Effect::GenerateRandom {
+                    pool: GenPool::IroncladAttacks,
+                    count: 1,
+                    to: Pile::Hand,
+                    free_this_turn: true,
+                    distinct: true,
+                }),
+                PaelsLegion => r.combat_counter -= 1,
+                // PaelsTears: `used` is HadLeftoverEnergy from last turn's end.
+                PaelsTears if r.used => out.push(Effect::GainEnergy { amount: 2 }),
+                Sai => out.push(gain_block(7)),
+                SealOfGold if self.gold >= 5 => {
+                    self.gold -= 5;
+                    out.push(Effect::GainEnergy { amount: 1 });
+                }
                 HappyFlower => {
                     r.counter = (r.counter + 1) % 3;
                     if r.counter == 0 {
@@ -349,8 +489,55 @@ impl Combat {
                     free_this_turn: true,
                     distinct: true,
                 }),
+                MrStruggles => out.push(all_enemies_damage(turn as i32)),
+                RoyalPoison if turn <= 1 => out.push(Effect::Damage {
+                    target: CreatureRef::Player,
+                    amount: 4.0,
+                    props: ValueProp::UNBLOCKABLE.or(ValueProp::UNPOWERED),
+                    dealer: None,
+                    card: None,
+                }),
+                ChoicesParadox if turn == 1 => {
+                    out.push(Effect::OfferRandom { pool: GenPool::Ironclad, count: 5, free: false, retain: true })
+                }
                 _ => {}
             }
+        }
+        // AfterPlayerTurnStartLate.
+        if turn <= 1 && self.has_relic(FakeBloodVial) {
+            out.push(Effect::Heal { target: CreatureRef::Player, amount: 1.0 });
+        }
+        out
+    }
+
+    /// `Hook.BeforeHandDraw`, after the energy reset.
+    pub(crate) fn relic_before_hand_draw(&self) -> Vec<Effect> {
+        use RelicId::*;
+        let turn = self.player.turn;
+        let mut out = vec![];
+        for r in &self.relics {
+            match r.id {
+                BlessedAntler if turn == 1 => out.extend((0..3).map(|_| generate(CardId::Dazed, Pile::DrawRandom))),
+                JeweledMask if turn <= 1 => out.push(Effect::RelicStep { id: JeweledMask, step: 0 }),
+                RadiantPearl if turn == 1 => out.push(generate(CardId::Luminesce, Pile::Hand)),
+                ToastyMittens => out.push(Effect::RelicStep { id: ToastyMittens, step: 0 }),
+                _ => {}
+            }
+        }
+        out
+    }
+
+    /// `Hook.AfterAutoPrePlayPhaseEntered`, then its `Late` pass: once the
+    /// turn is fully set up, before the player acts.
+    pub(crate) fn relic_auto_pre_play(&self) -> Vec<Effect> {
+        use RelicId::*;
+        let turn = self.player.turn;
+        let mut out = vec![];
+        if turn > 1 && self.has_relic(HistoryCourse) {
+            out.push(Effect::RelicStep { id: HistoryCourse, step: 0 });
+        }
+        if turn <= 1 && self.has_relic(WhisperingEarring) {
+            out.push(Effect::RelicStep { id: WhisperingEarring, step: 0 });
         }
         out
     }
@@ -369,6 +556,8 @@ impl Combat {
                         r.scratch = card.uid as i32;
                     }
                 }
+                // MusicBox: the turn's first attack is the one it copies.
+                MusicBox if r.scratch == 0 && !r.used && card.ty() == CardType::Attack => r.scratch = card.uid as i32,
                 _ => {}
             }
         }
@@ -467,6 +656,25 @@ impl Combat {
                 Vambrace if r.scratch == card.uid as i32 => r.used = true,
                 PenNib if r.scratch == card.uid as i32 => r.scratch = 0,
                 UnsettlingLamp if r.scratch == card.uid as i32 => r.used = true,
+                DaughterOfTheWind if ty == CardType::Attack => out.push(gain_block(1)),
+                LostWisp if ty == CardType::Power => out.push(all_enemies_damage(8)),
+                IronClub => {
+                    r.counter = (r.counter + 1) % 4;
+                    if r.counter == 0 {
+                        out.push(draw(1));
+                    }
+                }
+                DiamondDiadem | VelvetChoker => r.combat_counter += 1,
+                MusicBox if r.scratch == card.uid as i32 => {
+                    r.scratch = 0;
+                    r.used = true;
+                    out.push(Effect::CloneToHand { uid: card.uid, ethereal: true });
+                }
+                // PaelsLegion: the play that got doubled puts it to sleep for two turns.
+                PaelsLegion if r.scratch == card.uid as i32 => {
+                    r.scratch = 0;
+                    r.combat_counter = 2;
+                }
                 _ => {}
             }
         }
@@ -496,6 +704,7 @@ impl Combat {
                         }
                     }
                 }
+                ForgottenSoul => out.push(random_enemy_damage(1)),
                 BurningSticks if !r.used && card.ty() == CardType::Skill => {
                     r.used = true;
                     out.push(Effect::GenerateCard { id: card.id, upgraded: card.upgraded, to: Pile::Hand, free_this_turn: false });
@@ -581,6 +790,7 @@ impl Combat {
         for r in &self.relics {
             match r.id {
                 StrikeDummy if card.has_tag(Tag::Strike) => add += 3.0,
+                FakeStrikeDummy if card.has_tag(Tag::Strike) => add += 1.0,
                 MiniatureCannon if card.upgraded => add += 3.0,
                 _ => {}
             }
@@ -604,18 +814,31 @@ impl Combat {
     }
 
     /// `ModifyBlockMultiplicative` for relics: Vambrace doubles the first
-    /// card's block this combat. Also records the triggering card.
+    /// card's block this combat, Pael's Legion every card's block while it is
+    /// awake. Both record the card that triggered them.
     pub(crate) fn relic_block_multiplicative(&mut self, card: Option<u32>, props: ValueProp) -> f64 {
         let Some(uid) = card else { return 1.0 };
         if !props.has(ValueProp::MOVE) {
             return 1.0;
         }
-        let Some(r) = self.relic_mut(RelicId::Vambrace) else { return 1.0 };
-        if r.used || (r.scratch != 0 && r.scratch != uid as i32) {
-            return 1.0;
+        let uid = uid as i32;
+        let mut m = 1.0;
+        for r in &mut self.relics {
+            match r.id {
+                RelicId::Vambrace if !r.used && (r.scratch == 0 || r.scratch == uid) => {
+                    r.scratch = uid;
+                    m *= 2.0;
+                }
+                RelicId::PaelsLegion if r.combat_counter <= 0 => {
+                    if r.scratch == 0 {
+                        r.scratch = uid;
+                    }
+                    m *= 2.0;
+                }
+                _ => {}
+            }
         }
-        r.scratch = uid as i32;
-        2.0
+        m
     }
 
     /// `BeforeSideTurnEndVeryEarly` + `BeforeSideTurnEnd` for relics.
@@ -624,6 +847,7 @@ impl Combat {
         let turn = self.player.turn;
         let hand = self.player.hand.len() as i32;
         let block = self.player.creature.block;
+        let energy = self.player.energy;
         let mut out = vec![];
         for r in &mut self.relics {
             match r.id {
@@ -632,10 +856,49 @@ impl Combat {
                 ScreamingFlagon if hand == 0 => out.push(all_enemies_damage(20)),
                 RippleBasin if !r.used => out.push(gain_block(4)),
                 Orichalcum if block <= 0 => out.push(gain_block(6)),
+                FakeOrichalcum if block <= 0 => out.push(gain_block(3)),
+                DiamondDiadem => {
+                    if r.combat_counter <= 2 {
+                        out.push(self_power(PowerId::DiamondDiadem, 1));
+                    }
+                    r.combat_counter = 0;
+                }
+                PaelsTears => r.used = energy > 0,
                 _ => {}
             }
         }
         out
+    }
+
+    /// `BeforeSideTurnEndEarly` for relics: Pael's Eye burns a hand that went
+    /// unplayed, on the turn it is about to hand back.
+    pub(crate) fn relic_before_side_turn_end_early(&self) -> Vec<Effect> {
+        if self.pael_eye_ready() {
+            vec![Effect::ExhaustHand { filter: CardFilter::Any }]
+        } else {
+            vec![]
+        }
+    }
+
+    /// `PaelsEye.ShouldTakeExtraTurn`: once a combat, a turn with no card
+    /// played by hand is taken again. Whispering Earring's opening turn
+    /// counts as played.
+    fn pael_eye_ready(&self) -> bool {
+        let played = self.stats.manual_plays_this_turn > 0
+            || (self.player.turn == 1 && self.has_relic(RelicId::WhisperingEarring));
+        self.relics.iter().any(|r| r.id == RelicId::PaelsEye && !r.used) && !played
+    }
+
+    /// `Hook.ShouldTakeExtraTurn` + `AfterTakingExtraTurn`: true when the
+    /// player goes again, which spends Pael's Eye.
+    pub(crate) fn relic_take_extra_turn(&mut self) -> bool {
+        if !self.pael_eye_ready() {
+            return false;
+        }
+        if let Some(r) = self.relic_mut(RelicId::PaelsEye) {
+            r.used = true;
+        }
+        true
     }
 
     /// `AfterSideTurnEnd` for relics (player side).
@@ -730,13 +993,18 @@ impl Combat {
         a
     }
 
-    /// `AfterShuffle` for relics: The Abacus.
+    /// `AfterShuffle` for relics: The Abacus, Biiig Hug.
     pub(crate) fn relic_after_shuffle(&self) -> Vec<Effect> {
-        if self.has_relic(RelicId::TheAbacus) {
-            vec![gain_block(6)]
-        } else {
-            vec![]
+        let mut out = vec![];
+        for r in &self.relics {
+            match r.id {
+                RelicId::TheAbacus => out.push(gain_block(6)),
+                // BiiigHug.AfterShuffle: a Soot shuffled into the new draw pile.
+                RelicId::BiiigHug => out.push(generate(CardId::Soot, Pile::DrawRandom)),
+                _ => {}
+            }
         }
+        out
     }
 
     /// `AfterHandEmptied` for relics: Unceasing Top.
@@ -761,9 +1029,10 @@ impl Combat {
         }
     }
 
-    /// `ShouldFlush`: Ringing Triangle keeps the hand on turn 1.
+    /// `ShouldFlush`: Ringing Triangle keeps the hand on turn 1, Runic Pyramid
+    /// every turn.
     pub(crate) fn relic_should_flush(&self) -> bool {
-        !(self.has_relic(RelicId::RingingTriangle) && self.player.turn <= 1)
+        !(self.has_relic(RelicId::RingingTriangle) && self.player.turn <= 1) && !self.has_relic(RelicId::RunicPyramid)
     }
 
     /// `ModifyXValue`: Chemical X.
@@ -776,17 +1045,20 @@ impl Combat {
     }
 
     /// `AfterCombatVictory` for relics: heals applied to the combat HP so the
-    /// caller reads the post-fight value.
+    /// caller reads the post-fight value, and the charges a fight spends.
     pub(crate) fn relic_after_victory(&mut self) {
         use RelicId::*;
         let c = &mut self.player.creature;
         if c.hp <= 0 {
             return;
         }
-        for r in &self.relics {
+        for r in &mut self.relics {
             match r.id {
                 BurningBlood => c.hp = (c.hp + 6).min(c.max_hp),
+                BlackBlood => c.hp = (c.hp + 12).min(c.max_hp),
                 MeatOnTheBone if c.hp * 2 <= c.max_hp => c.hp = (c.hp + 12).min(c.max_hp),
+                // PumpkinCandle.AfterCombatEnd burns one kindling.
+                PumpkinCandle => r.counter = (r.counter - 1).max(0),
                 _ => {}
             }
         }
@@ -796,6 +1068,142 @@ impl Combat {
     pub(crate) fn relic_card_entered_combat(&self, card: &mut Card) {
         if self.has_relic(RelicId::GhostSeed) {
             ghost_seed_mark(card);
+        }
+    }
+
+    /// `TryModifyEnergyCostInCombat` for relics: Spiked Gauntlets taxes powers.
+    pub(crate) fn relic_cost_additive(&self, card: &Card) -> i32 {
+        i32::from(card.ty() == CardType::Power && self.has_relic(RelicId::SpikedGauntlets))
+    }
+
+    /// `TryModifyEnergyCostInCombatLate` for relics: Brilliant Scarf makes the
+    /// fifth card played by hand each turn free, in hand or being played.
+    pub(crate) fn relic_makes_free(&self, card: &Card) -> bool {
+        let p = &self.player;
+        self.has_relic(RelicId::BrilliantScarf)
+            && self.stats.manual_plays_this_turn == 4
+            && p.hand.iter().chain(&p.play).any(|c| c.uid == card.uid)
+    }
+
+    /// `ShouldPlay` for relics: Velvet Choker stops the seventh card a turn.
+    pub(crate) fn relic_allows_play(&self) -> bool {
+        !self.relics.iter().any(|r| r.id == RelicId::VelvetChoker && r.combat_counter >= 6)
+    }
+
+    /// `ShouldDraw` for relics: Fiddle refuses every draw on your own turn
+    /// but the hand draw.
+    pub(crate) fn relic_should_draw(&self, from_hand_draw: bool) -> bool {
+        from_hand_draw || self.side != Side::Player || !self.has_relic(RelicId::Fiddle)
+    }
+
+    /// `AfterCreatureAddedToCombat` for an enemy that joins mid-fight: Fur
+    /// Coat bites it down to 1 HP, Philosopher's Stone hands it Strength.
+    pub(crate) fn relic_after_enemy_added(&mut self, i: usize) -> Vec<Effect> {
+        let mut out = vec![];
+        if self.relics.iter().any(|r| r.id == RelicId::FurCoat && r.counter > 0) {
+            self.enemies[i].creature.hp = 1;
+        }
+        if self.has_relic(RelicId::PhilosophersStone) {
+            out.push(Effect::ApplyPower { target: CreatureRef::Enemy(i), id: PowerId::Strength, amount: 1, applier: None });
+        }
+        out
+    }
+
+    /// `DelicateFrond.BeforeCombatStart`: fill every empty slot with a random
+    /// potion (`PotionFactory.CreateRandomPotionOutOfCombat`: a rarity roll,
+    /// then a pick). Sozu refuses the first one, which stops the loop.
+    fn delicate_frond(&mut self) {
+        if !self.has_relic(RelicId::DelicateFrond) || self.has_relic(RelicId::Sozu) {
+            return;
+        }
+        for slot in 0..self.potions.len() {
+            if self.potions[slot].is_some() {
+                continue;
+            }
+            let roll = self.rngs.potion_generation.next_float(1.0);
+            let rarity = if roll <= 0.1 {
+                crate::potion::Rarity::Rare
+            } else if roll <= 0.35 {
+                crate::potion::Rarity::Uncommon
+            } else {
+                crate::potion::Rarity::Common
+            };
+            let options: Vec<crate::potion::PotionId> =
+                crate::potion::ALL.iter().copied().filter(|p| p.rarity() == rarity).collect();
+            self.potions[slot] = self.rngs.potion_generation.pick(&options).copied();
+        }
+    }
+
+    /// `Effect::RelicStep`: the parts of a relic hook that have to see the
+    /// state as it is when they run.
+    pub(crate) fn relic_step(&mut self, id: RelicId, step: u8) -> Vec<Effect> {
+        use RelicId::*;
+        match (id, step) {
+            // ToastyMittens.BeforeHandDraw: shuffle if the draw pile is dry,
+            // then burn its top card (on turn 1 the first that is not
+            // Innate) and take the Strength.
+            (ToastyMittens, 0) => {
+                let mut out = vec![];
+                if self.reshuffle_if_needed() {
+                    out.extend(self.relic_after_shuffle());
+                }
+                out.push(Effect::RelicStep { id, step: 1 });
+                out
+            }
+            (ToastyMittens, _) => {
+                let draw = &self.player.draw;
+                let not_innate = if self.player.turn == 1 { draw.iter().find(|c| !c.has(Keyword::Innate)) } else { None };
+                let mut out: Vec<Effect> =
+                    not_innate.or(draw.first()).map(|c| Effect::Exhaust { uid: c.uid, ethereal: false }).into_iter().collect();
+                out.push(self_power(PowerId::Strength, 1));
+                out
+            }
+            // JeweledMask.BeforeHandDraw: a random power from the draw pile
+            // to the hand, free this turn.
+            (JeweledMask, _) => {
+                let powers: Vec<u32> =
+                    self.player.draw.iter().filter(|c| c.ty() == CardType::Power).map(|c| c.uid).collect();
+                if let Some(&uid) = self.rngs.card_selection.pick(&powers) {
+                    if let Some(mut c) = self.take_card(uid) {
+                        c.cost_this_turn = Some(0);
+                        self.put_card(c, Pile::Hand);
+                    }
+                }
+                vec![]
+            }
+            // HistoryCourse: auto-play a dupe of last turn's last attack or
+            // skill (`CardModel.CreateDupe`).
+            (HistoryCourse, _) => {
+                let Some(mut c) = self.stats.last_turn_card.clone() else { return vec![] };
+                c.uid = self.new_uid();
+                c.dupe = true;
+                c.cost_this_turn = None;
+                c.exhaust_on_next_play = false;
+                let uid = c.uid;
+                self.player.play.push(c);
+                vec![Effect::AutoPlay { uid, force_exhaust: false }]
+            }
+            // WhisperingEarring: on turn 1, play the leftmost playable card at
+            // the leftmost enemy, paying for it, up to 13 cards.
+            (WhisperingEarring, n) => {
+                if n >= 13 || self.is_over() {
+                    return vec![];
+                }
+                let Some(i) = self.player.hand.iter().position(|c| self.can_play(c)) else { return vec![] };
+                let target = match self.player.hand[i].def().target {
+                    TargetType::AnyEnemy => match self.living_enemies().next() {
+                        Some(e) => Some(CreatureRef::Enemy(e)),
+                        None => return vec![],
+                    },
+                    _ => None,
+                };
+                let paid = self.pay_for(i);
+                let card = self.player.hand.remove(i);
+                let uid = card.uid;
+                self.player.play.push(card);
+                vec![Effect::PlayCard { uid, target, paid }, Effect::RelicStep { id, step: n + 1 }]
+            }
+            _ => vec![],
         }
     }
 }
