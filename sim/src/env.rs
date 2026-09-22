@@ -375,29 +375,32 @@ impl Forks {
         c.is_over() || c.player.turn > self.turns[i]
     }
 
-    pub fn observe(&self, floats: &mut [f32], ids: &mut [i64], mask: &mut [bool]) {
-        self.combats
-            .par_iter()
+    /// The forks still in their turn.
+    pub fn live(&self) -> Vec<usize> {
+        (0..self.combats.len()).filter(|&i| !self.turn_over(i)).collect()
+    }
+
+    /// Encode forks `rows`, packed: row k of the buffers is fork `rows[k]`.
+    /// Searches only feed the network the forks that still need a move.
+    pub fn observe_rows(&self, rows: &[usize], floats: &mut [f32], ids: &mut [i64], mask: &mut [bool]) {
+        rows.par_iter()
             .zip(floats.par_chunks_mut(N_FLOATS))
             .zip(ids.par_chunks_mut(N_IDS))
             .zip(mask.par_chunks_mut(N_ACTIONS))
-            .for_each(|(((c, f), i), m)| encode::encode(c, f, i, m));
+            .for_each(|(((&r, f), i), m)| encode::encode(&self.combats[r], f, i, m));
     }
 
     /// Step every fork whose turn is still running; the rest ignore their
-    /// action. Writes the shaped reward of each transition (0 for a fork
-    /// that did not move) and the next observation.
-    pub fn step(&mut self, actions: &[i64], floats: &mut [f32], ids: &mut [i64], mask: &mut [bool], rewards: &mut [f32]) {
+    /// action. Writes the shaped reward of each transition, 0 for a fork
+    /// that did not move.
+    pub fn step(&mut self, actions: &[i64], rewards: &mut [f32]) {
         self.combats
             .par_iter_mut()
             .zip(self.turns.par_iter())
             .zip(self.bases.par_iter())
             .zip(actions.par_iter())
-            .zip(floats.par_chunks_mut(N_FLOATS))
-            .zip(ids.par_chunks_mut(N_IDS))
-            .zip(mask.par_chunks_mut(N_ACTIONS))
             .zip(rewards.par_iter_mut())
-            .for_each(|(((((((c, &turn), &base), &a), f), i), m), r)| {
+            .for_each(|((((c, &turn), &base), &a), r)| {
                 *r = 0.0;
                 if !(c.is_over() || c.player.turn > turn) {
                     if let Some(action) = encode::decode(c, a as usize) {
@@ -406,7 +409,6 @@ impl Forks {
                         *r = step_reward(before, c, base, c.is_over());
                     }
                 }
-                encode::encode(c, f, i, m);
             });
     }
 }
@@ -472,16 +474,17 @@ mod tests {
         let mut floats = vec![0.0; n * N_FLOATS];
         let mut ids = vec![0; n * N_IDS];
         let mut mask = vec![false; n * N_ACTIONS];
-        let mut rewards = vec![0.0; n];
-        forks.observe(&mut floats, &mut ids, &mut mask);
+        let mut rewards = vec![0.0f32; n];
+        let all: Vec<usize> = (0..n).collect();
         for _ in 0..40 {
+            forks.observe_rows(&all, &mut floats, &mut ids, &mut mask);
             let actions: Vec<i64> = (0..n)
                 .map(|i| {
                     let m = &mask[i * N_ACTIONS..][..N_ACTIONS];
                     (0..N_ACTIONS).filter(|&k| m[k]).max_by_key(|&k| rng.next_int(1000).wrapping_add(k * 0)).unwrap_or(0) as i64
                 })
                 .collect();
-            forks.step(&actions, &mut floats, &mut ids, &mut mask, &mut rewards);
+            forks.step(&actions, &mut rewards);
             assert!(rewards.iter().all(|r| r.is_finite()));
             if (0..n).all(|i| forks.turn_over(i)) {
                 return;

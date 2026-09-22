@@ -163,8 +163,8 @@ class Session:
         first = spread(np.flatnonzero(self.mask[0]), n)
         lines: list[list[str]] = [[] for _ in range(n)]
 
-        def record(actions: np.ndarray, over: np.ndarray) -> None:
-            for i in np.flatnonzero(~over):
+        def record(actions: np.ndarray, live: np.ndarray) -> None:
+            for i in live:
                 if (what := forks.describe(i, int(actions[i]))) is not None:
                     lines[i].append(what)
 

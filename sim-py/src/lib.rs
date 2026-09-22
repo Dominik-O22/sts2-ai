@@ -301,43 +301,35 @@ impl Forks {
         self.inner.len()
     }
 
-    fn observe(
+    /// Encode forks `rows` into the first `len(rows)` rows of the buffers.
+    fn observe_rows(
         &self,
         py: Python<'_>,
+        rows: Vec<usize>,
         mut floats: PyReadwriteArray2<f32>,
         mut ids: PyReadwriteArray2<i64>,
         mut mask: PyReadwriteArray2<bool>,
     ) -> PyResult<()> {
-        let f = floats.as_slice_mut()?;
-        let i = ids.as_slice_mut()?;
-        let m = mask.as_slice_mut()?;
-        py.detach(|| self.inner.observe(f, i, m));
+        let k = rows.len();
+        let f = &mut floats.as_slice_mut()?[..k * N_FLOATS];
+        let i = &mut ids.as_slice_mut()?[..k * N_IDS];
+        let m = &mut mask.as_slice_mut()?[..k * N_ACTIONS];
+        py.detach(|| self.inner.observe_rows(&rows, f, i, m));
         Ok(())
     }
 
     /// Apply `actions [n]` to the forks still in their turn; write the
-    /// shaped reward of each transition and the next observation.
-    fn step(
-        &mut self,
-        py: Python<'_>,
-        actions: PyReadonlyArray1<i64>,
-        mut floats: PyReadwriteArray2<f32>,
-        mut ids: PyReadwriteArray2<i64>,
-        mut mask: PyReadwriteArray2<bool>,
-        mut rewards: PyReadwriteArray1<f32>,
-    ) -> PyResult<()> {
+    /// shaped reward of each transition.
+    fn step(&mut self, py: Python<'_>, actions: PyReadonlyArray1<i64>, mut rewards: PyReadwriteArray1<f32>) -> PyResult<()> {
         let a = actions.as_slice()?;
-        let f = floats.as_slice_mut()?;
-        let i = ids.as_slice_mut()?;
-        let m = mask.as_slice_mut()?;
         let r = rewards.as_slice_mut()?;
-        py.detach(|| self.inner.step(a, f, i, m, r));
+        py.detach(|| self.inner.step(a, r));
         Ok(())
     }
 
-    /// Per fork: its turn is over (the next one began, or the fight ended).
-    fn turn_over(&self) -> Vec<bool> {
-        (0..self.inner.len()).map(|i| self.inner.turn_over(i)).collect()
+    /// The forks still in their turn.
+    fn live(&self) -> Vec<usize> {
+        self.inner.live()
     }
 
     fn is_over(&self) -> Vec<bool> {

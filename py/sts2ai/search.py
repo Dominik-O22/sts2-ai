@@ -42,31 +42,42 @@ def rollout(
     on_step: Callable[[np.ndarray, np.ndarray], None] | None = None,
 ) -> np.ndarray:
     """Play every copy in `forks` to the end of its turn, `first[i]` as copy
-    i's first action. `on_step(actions, over)` sees each step before it is
-    applied. Returns each copy's score."""
+    i's first action. `on_step(actions, live)` sees each step's actions and
+    the copies they apply to before it is applied. Returns each copy's
+    score."""
     L, n = Layout.load(), len(forks)
-    floats = np.zeros((n, L.n_floats), np.float32)
-    ids = np.zeros((n, L.n_ids), np.int64)
-    mask = np.zeros((n, L.n_actions), np.bool_)
+    floats = np.empty((n, L.n_floats), np.float32)
+    ids = np.empty((n, L.n_ids), np.int64)
+    mask = np.empty((n, L.n_actions), np.bool_)
     rewards = np.zeros(n, np.float32)
-    forks.observe(floats, ids, mask)
     score = np.zeros(n, np.float32)
+    actions = np.ascontiguousarray(first, dtype=np.int64)
+    live = np.arange(n)
     for step in range(MAX_PLAN_STEPS):
-        over = np.array(forks.turn_over())
-        if over.all():
-            break
-        if step == 0:
-            actions = first
-        else:
-            logits, _ = forward(policy, device, floats, ids)
-            masked = masked_logits(logits, torch.from_numpy(mask).to(device))
-            actions = torch.distributions.Categorical(logits=masked).sample().cpu().numpy()
+        if step > 0:
+            # Only the copies still in their turn, packed: most end it in a
+            # few steps.
+            live = np.array(forks.live(), dtype=np.int64)
+            if len(live) == 0:
+                break
+            k = len(live)
+            forks.observe_rows(live.tolist(), floats, ids, mask)
+            logits, _ = forward(policy, device, floats[:k], ids[:k])
+            masked = masked_logits(logits.float(), torch.from_numpy(mask[:k]).to(device))
+            actions = np.zeros(n, np.int64)
+            actions[live] = torch.distributions.Categorical(logits=masked).sample().cpu().numpy()
         if on_step is not None:
-            on_step(actions, over)
-        forks.step(np.ascontiguousarray(actions, dtype=np.int64), floats, ids, mask, rewards)
+            on_step(actions, live)
+        forks.step(actions, rewards)
         score += rewards
-    _, value = forward(policy, device, floats, ids)
-    return score + np.where(forks.is_over(), 0.0, value.float().cpu().numpy())
+    # Where the next turn starts, by the value head; a finished fight
+    # already paid its terminal reward.
+    rows = np.flatnonzero(~np.array(forks.is_over()))
+    if len(rows):
+        forks.observe_rows(rows.tolist(), floats, ids, mask)
+        _, value = forward(policy, device, floats[: len(rows)], ids[: len(rows)])
+        score[rows] += value.float().cpu().numpy()
+    return score
 
 
 def spread(legal: np.ndarray, n: int) -> np.ndarray:
