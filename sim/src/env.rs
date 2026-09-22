@@ -10,7 +10,7 @@ use crate::combat::{Combat, Outcome};
 use crate::encode::{self, N_ACTIONS, N_FLOATS, N_IDS};
 use crate::encounter::{Encounter, Kind};
 use crate::gen::{encounter_of_kind, generate, generate_against, FightSetup, BOSS_FLOOR};
-use crate::rng::Rng;
+use crate::rng::{CombatRngs, Rng};
 use crate::types::Ascension;
 
 #[derive(Clone, Copy, Debug)]
@@ -51,7 +51,7 @@ pub struct EpisodeEnd {
 /// Stopgap terminal reward (DESIGN.md, Decision engine): a win is worth 1
 /// plus half the HP fraction kept and a little per unused potion; a loss
 /// or a timed-out fight is -1.
-fn terminal_reward(c: &Combat) -> f32 {
+pub fn terminal_reward(c: &Combat) -> f32 {
     match c.outcome {
         Some(Outcome::Won) => {
             let hp = c.player.creature.hp as f32 / c.player.creature.max_hp.max(1) as f32;
@@ -61,9 +61,56 @@ fn terminal_reward(c: &Combat) -> f32 {
     }
 }
 
+/// Where a fight (or a search) started, so the potential is zero there.
+/// Some fights open with damaged enemies or a relic heal, so this is read
+/// off the combat, not the setup.
+#[derive(Clone, Copy, Debug)]
+pub struct Baseline {
+    taken: f32,
+    hp: i32,
+}
+
+fn enemy_hp_taken(c: &Combat) -> f32 {
+    let (hp, max) = c.enemies.iter().fold((0, 0), |(h, m), e| (h + e.creature.hp.max(0), m + e.creature.max_hp));
+    1.0 - hp as f32 / max.max(1) as f32
+}
+
+impl Baseline {
+    pub fn of(c: &Combat) -> Self {
+        Self { taken: enemy_hp_taken(c), hp: c.player.creature.hp }
+    }
+}
+
+/// Potential for reward shaping: half the fraction of enemy HP taken
+/// since the baseline, minus half the fraction of the player's HP lost.
+/// Zero at the baseline and, by convention, once the fight is over. Each
+/// step is rewarded the change in potential, so a fight's rewards sum to
+/// its terminal reward and no ordering of plays is preferred beyond what
+/// the outcome says (potential-based shaping keeps the optimal policy);
+/// the credit for extra damage just arrives at the play instead of at
+/// the end.
+pub fn potential(c: &Combat, base: Baseline) -> f32 {
+    if c.is_over() {
+        return 0.0;
+    }
+    let lost = (base.hp - c.player.creature.hp.max(0)) as f32 / c.player.creature.max_hp.max(1) as f32;
+    0.5 * (enemy_hp_taken(c) - base.taken) - 0.5 * lost
+}
+
+/// The reward for a transition: the potential change, plus the terminal
+/// reward when `over` (a timed-out fight is over without an outcome).
+pub fn step_reward(before: f32, c: &Combat, base: Baseline, over: bool) -> f32 {
+    if over {
+        terminal_reward(c) - before
+    } else {
+        potential(c, base) - before
+    }
+}
+
 struct Slot {
     combat: Combat,
     setup: FightSetup,
+    base: Baseline,
     steps: u32,
     rng: Rng,
     resets: usize,
@@ -88,6 +135,7 @@ impl Slot {
         self.resets += 1;
         self.steps = 0;
         self.combat = self.setup.combat(self.rng.next_u64());
+        self.base = Baseline::of(&self.combat);
     }
 
     fn end(&self, index: usize) -> EpisodeEnd {
@@ -119,7 +167,8 @@ impl VecEnv {
             .map(|i| {
                 let mut rng = Rng::new(seed.wrapping_mul(0x9E37_79B9).wrapping_add(i as u64));
                 let setup = generate(&mut rng, 1, cfg.asc);
-                Slot { combat: setup.combat(0), setup, steps: 0, rng, resets: 0 }
+                let combat = setup.combat(0);
+                Slot { base: Baseline::of(&combat), combat, setup, steps: 0, rng, resets: 0 }
             })
             .collect();
         for (i, s) in slots.iter_mut().enumerate() {
@@ -202,11 +251,12 @@ impl VecEnv {
             .map(|(((((((i, s), &a), f), ids), m), r), d)| {
                 let action = encode::decode(&s.combat, a as usize)
                     .unwrap_or_else(|| panic!("env {i}: action {a} is not legal; legal: {:?}", s.combat.legal_actions()));
+                let before = potential(&s.combat, s.base);
                 s.combat.step(action);
                 s.steps += 1;
                 let over = s.combat.is_over() || s.steps >= cfg.max_steps;
                 let end = over.then(|| s.end(i));
-                *r = end.map_or(0.0, |e| e.reward);
+                *r = step_reward(before, &s.combat, s.base, over);
                 *d = over;
                 if over {
                     s.reset(i, n, &cfg, fixed);
@@ -227,6 +277,88 @@ impl VecEnv {
     }
 }
 
+/// Copies of one combat stepped together, for a search over the rest of
+/// the current turn (the advisor's plan). Each fork forgets the recording's
+/// script and rolls its own dice, and the draw pile is reshuffled: the
+/// player does not know its order, so the plan must not either. Forks in
+/// the same `group` share a shuffle, so plans in a group are compared on
+/// the same hidden draws.
+pub struct Forks {
+    combats: Vec<Combat>,
+    turn: u32,
+    base: Baseline,
+}
+
+impl Forks {
+    pub fn new(root: &Combat, n: usize, groups: usize, seed: u64) -> Self {
+        let per_group = n.div_ceil(groups.max(1));
+        let combats = (0..n)
+            .map(|i| {
+                let group = i / per_group;
+                let mut c = root.clone();
+                c.script = Default::default();
+                c.rngs = CombatRngs::new(seed ^ (i as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+                Rng::new(seed ^ (group as u64 + 1) << 20).shuffle(&mut c.player.draw);
+                c
+            })
+            .collect();
+        Self { combats, turn: root.player.turn, base: Baseline::of(root) }
+    }
+
+    pub fn len(&self) -> usize {
+        self.combats.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.combats.is_empty()
+    }
+
+    pub fn combat(&self, i: usize) -> &Combat {
+        &self.combats[i]
+    }
+
+    /// The player's turn is done: the sim moved on to the next one, or
+    /// the fight ended.
+    pub fn turn_over(&self, i: usize) -> bool {
+        let c = &self.combats[i];
+        c.is_over() || c.player.turn > self.turn
+    }
+
+    pub fn observe(&self, floats: &mut [f32], ids: &mut [i64], mask: &mut [bool]) {
+        self.combats
+            .par_iter()
+            .zip(floats.par_chunks_mut(N_FLOATS))
+            .zip(ids.par_chunks_mut(N_IDS))
+            .zip(mask.par_chunks_mut(N_ACTIONS))
+            .for_each(|(((c, f), i), m)| encode::encode(c, f, i, m));
+    }
+
+    /// Step every fork whose turn is still running; the rest ignore their
+    /// action. Writes the shaped reward of each transition (0 for a fork
+    /// that did not move) and the next observation.
+    pub fn step(&mut self, actions: &[i64], floats: &mut [f32], ids: &mut [i64], mask: &mut [bool], rewards: &mut [f32]) {
+        let (turn, base) = (self.turn, self.base);
+        self.combats
+            .par_iter_mut()
+            .zip(actions.par_iter())
+            .zip(floats.par_chunks_mut(N_FLOATS))
+            .zip(ids.par_chunks_mut(N_IDS))
+            .zip(mask.par_chunks_mut(N_ACTIONS))
+            .zip(rewards.par_iter_mut())
+            .for_each(|(((((c, &a), f), i), m), r)| {
+                *r = 0.0;
+                if !(c.is_over() || c.player.turn > turn) {
+                    if let Some(action) = encode::decode(c, a as usize) {
+                        let before = potential(c, base);
+                        c.step(action);
+                        *r = step_reward(before, c, base, c.is_over());
+                    }
+                }
+                encode::encode(c, f, i, m);
+            });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -243,6 +375,7 @@ mod tests {
         let mut mask = vec![false; n * N_ACTIONS];
         let mut rewards = vec![0.0; n];
         let mut dones = vec![false; n];
+        let mut summed = vec![0.0f32; n];
         env.observe(&mut floats, &mut ids, &mut mask);
         let mut rng = Rng::new(9);
         let mut ended = 0;
@@ -257,14 +390,52 @@ mod tests {
                 .collect();
             let ends = env.step(&actions, &mut floats, &mut ids, &mut mask, &mut rewards, &mut dones);
             assert_eq!(ends.len(), dones.iter().filter(|&&d| d).count());
+            for (i, r) in rewards.iter().enumerate() {
+                summed[i] += r;
+            }
             for e in &ends {
                 assert!(dones[e.env]);
-                assert_eq!(rewards[e.env], e.reward);
+                // Shaping telescopes: a fight's rewards sum to its terminal reward.
+                assert!((summed[e.env] - e.reward).abs() < 1e-4, "env {}: summed {} vs terminal {}", e.env, summed[e.env], e.reward);
+                summed[e.env] = 0.0;
                 assert!(e.won == (e.reward > 0.0));
             }
             ended += ends.len();
         }
         assert!(ended > n, "fights should have ended and restarted");
+    }
+
+    /// Forks of one combat run their turns to the end on their own dice,
+    /// and each group shares a draw order.
+    #[test]
+    fn forks_run_out_the_turn() {
+        let mut rng = Rng::new(4);
+        let root = generate(&mut rng, 8, Ascension(10)).combat(3);
+        let n = 16;
+        let forks = Forks::new(&root, n, 4, 11);
+        let draw = |c: &Combat| c.player.draw.iter().map(|k| k.id).collect::<Vec<_>>();
+        assert_eq!(draw(forks.combat(0)), draw(forks.combat(1)), "same group, same shuffle");
+        assert!((0..n).any(|i| draw(forks.combat(i)) != draw(&root)), "forks reshuffle the draw pile");
+        let mut forks = forks;
+        let mut floats = vec![0.0; n * N_FLOATS];
+        let mut ids = vec![0; n * N_IDS];
+        let mut mask = vec![false; n * N_ACTIONS];
+        let mut rewards = vec![0.0; n];
+        forks.observe(&mut floats, &mut ids, &mut mask);
+        for _ in 0..40 {
+            let actions: Vec<i64> = (0..n)
+                .map(|i| {
+                    let m = &mask[i * N_ACTIONS..][..N_ACTIONS];
+                    (0..N_ACTIONS).filter(|&k| m[k]).max_by_key(|&k| rng.next_int(1000).wrapping_add(k * 0)).unwrap_or(0) as i64
+                })
+                .collect();
+            forks.step(&actions, &mut floats, &mut ids, &mut mask, &mut rewards);
+            assert!(rewards.iter().all(|r| r.is_finite()));
+            if (0..n).all(|i| forks.turn_over(i)) {
+                return;
+            }
+        }
+        panic!("some fork never ended its turn");
     }
 
     #[test]

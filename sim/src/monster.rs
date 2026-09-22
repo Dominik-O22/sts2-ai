@@ -28,6 +28,32 @@ pub enum Intent {
     DeathBlow { damage: i32 },
 }
 
+/// Intent kinds by index, the policy's intent vocabulary. `sim/vocab.txt`
+/// pins the order, so a new kind goes at the end of both this list and
+/// `Intent::kind`.
+pub const INTENT_KINDS: &[&str] =
+    &["Attack", "Defend", "Buff", "Debuff", "CardDebuff", "Status", "Summon", "Sleep", "Stun", "Heal", "Escape", "DeathBlow"];
+
+impl Intent {
+    /// Index into `INTENT_KINDS`.
+    pub fn kind(&self) -> usize {
+        match self {
+            Intent::Attack { .. } => 0,
+            Intent::Defend => 1,
+            Intent::Buff => 2,
+            Intent::Debuff { .. } => 3,
+            Intent::CardDebuff => 4,
+            Intent::Status { .. } => 5,
+            Intent::Summon => 6,
+            Intent::Sleep => 7,
+            Intent::Stun => 8,
+            Intent::Heal => 9,
+            Intent::Escape => 10,
+            Intent::DeathBlow { .. } => 11,
+        }
+    }
+}
+
 /// `MoveRepeatType.cs`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Repeat {

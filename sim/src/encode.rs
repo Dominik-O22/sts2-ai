@@ -6,6 +6,11 @@
 //! Hand and choice slots are shown sorted by (id, upgraded, cost), so the
 //! policy sees a multiset, not the game's hand order. `decode` applies the
 //! same sort to map a slot back to the real hand index.
+//!
+//! Enemy slots follow the game's order, but nothing the player does depends
+//! on where an enemy stands, so the policy treats them as a set. Target 0
+//! of every play and potion action is "no target"; the enemy slots follow,
+//! so growing `MAX_ENEMIES` appends targets rather than moving them.
 
 use crate::card::Card;
 use crate::combat::{Action, Combat, RoomKind};
@@ -24,7 +29,7 @@ pub const MAX_ENEMIES: usize = 6;
 pub const MAX_POTIONS: usize = 4;
 /// Distinct (id, upgraded, cost) options a card choice can show.
 pub const MAX_CHOICES: usize = 20;
-/// Enemy slots plus "no target".
+/// "No target" first, then one per enemy slot.
 pub const TARGETS: usize = MAX_ENEMIES + 1;
 
 pub const N_CARDS: usize = ALL_CARDS.len();
@@ -33,10 +38,12 @@ pub const N_MONSTERS: usize = ALL_MONSTERS.len();
 pub const N_RELICS: usize = relic::ALL.len();
 pub const N_POTIONS: usize = potion::ALL.len();
 pub const N_ENCHANTMENTS: usize = ALL_ENCHANTMENTS.len();
+pub const N_INTENTS: usize = monster::INTENT_KINDS.len();
 /// Embedding vocabularies: 0 is the pad, ids are shifted by one.
 pub const CARD_VOCAB: usize = N_CARDS + 1;
 pub const MONSTER_VOCAB: usize = N_MONSTERS + 1;
 pub const POTION_VOCAB: usize = N_POTIONS + 1;
+pub const ENCHANT_VOCAB: usize = N_ENCHANTMENTS + 1;
 
 // Action index layout.
 pub const A_PLAY: usize = 0;
@@ -49,23 +56,25 @@ pub const N_ACTIONS: usize = A_SKIP + 1;
 // Float feature layout.
 pub const F_GLOBAL: usize = 0;
 /// Scalars, then a one-hot of the pending choice's kind (`THEN_KINDS`).
-const GLOBAL_LEN: usize = 20 + THEN_KINDS;
+pub const GLOBAL_LEN: usize = 20 + THEN_KINDS;
 const THEN_KINDS: usize = 10;
 pub const F_PLAYER_POWERS: usize = F_GLOBAL + GLOBAL_LEN;
 pub const F_HAND: usize = F_PLAYER_POWERS + N_POWERS;
-pub const HAND_FEATS: usize = 7;
-/// One block per hand slot, one cell per enchantment: its amount, or -1
-/// once it is spent. A card carries at most one, so a block is all zeros
-/// or has a single live cell.
-pub const F_HAND_ENCHANTS: usize = F_HAND + MAX_HAND * HAND_FEATS;
-pub const F_PILES: usize = F_HAND_ENCHANTS + MAX_HAND * N_ENCHANTMENTS;
+/// Per hand slot: present, upgraded, cost, X cost, playable, exhausts
+/// next, extra damage, enchantment amount, enchantment spent. The
+/// enchantment itself is an id (`I_ENCHANTS`).
+pub const HAND_FEATS: usize = 9;
+pub const F_PILES: usize = F_HAND + MAX_HAND * HAND_FEATS;
 /// Draw, discard, exhaust: counts per (card, upgraded).
 pub const PILE_LEN: usize = N_CARDS * 2;
 pub const F_ENEMIES: usize = F_PILES + 3 * PILE_LEN;
-/// Creature fields, then 15 intent fields, then powers.
-pub const ENEMY_FEATS: usize = 7 + INTENT_FEATS + N_POWERS;
-/// One-hot per `Intent` kind plus its numbers.
-pub const INTENT_FEATS: usize = 18;
+/// Per enemy slot: creature fields, a one-hot over intent kinds, the
+/// intent numbers, then powers. The kinds are a vocabulary (`INTENT_KINDS`)
+/// so a new one is an append, like a new power.
+pub const ENEMY_BASE: usize = 7;
+/// Damage, hits, total damage, strong debuff, status count.
+pub const INTENT_NUMS: usize = 5;
+pub const ENEMY_FEATS: usize = ENEMY_BASE + N_INTENTS + INTENT_NUMS + N_POWERS;
 pub const F_RELICS: usize = F_ENEMIES + MAX_ENEMIES * ENEMY_FEATS;
 pub const F_POTIONS: usize = F_RELICS + 2 * N_RELICS;
 pub const F_CHOICES: usize = F_POTIONS + MAX_POTIONS;
@@ -79,7 +88,9 @@ pub const I_POTIONS: usize = I_ENEMIES + MAX_ENEMIES;
 pub const I_CHOICES: usize = I_POTIONS + MAX_POTIONS;
 /// Each enemy's next move, by `monster::all_move_names` index.
 pub const I_MOVES: usize = I_CHOICES + MAX_CHOICES;
-pub const N_IDS: usize = I_MOVES + MAX_ENEMIES;
+/// Each hand slot's enchantment, by `ALL_ENCHANTMENTS` index; 0 for none.
+pub const I_ENCHANTS: usize = I_MOVES + MAX_ENEMIES;
+pub const N_IDS: usize = I_ENCHANTS + MAX_HAND;
 
 /// Move embedding vocabulary; 0 is the pad. Not a const: the names come
 /// from the monster graphs.
@@ -162,8 +173,8 @@ fn enemy_slots(c: &Combat) -> Vec<usize> {
 
 fn target_slot(c: &Combat, target: Option<usize>) -> Option<usize> {
     match target {
-        None => Some(MAX_ENEMIES),
-        Some(e) => enemy_slots(c).iter().position(|&i| i == e),
+        None => Some(0),
+        Some(e) => enemy_slots(c).iter().position(|&i| i == e).map(|s| s + 1),
     }
 }
 
@@ -215,36 +226,26 @@ fn powers_into(c: &Combat, r: CreatureRef, out: &mut [f32]) {
     }
 }
 
+/// `out` is `N_INTENTS + INTENT_NUMS` long: the kind one-hot, then the numbers.
 fn intent_into(intents: &[Intent], out: &mut [f32]) {
+    let (kinds, nums) = out.split_at_mut(N_INTENTS);
     for i in intents {
+        kinds[i.kind()] = 1.0;
         match *i {
             Intent::Attack { damage, hits } => {
-                out[0] = 1.0;
-                out[1] = damage as f32 / 20.0;
-                out[2] = hits as f32 / 3.0;
-                out[3] = (damage * hits as i32) as f32 / 40.0;
+                nums[0] = damage as f32 / 20.0;
+                nums[1] = hits as f32 / 3.0;
+                nums[2] = (damage * hits as i32) as f32 / 40.0;
             }
-            Intent::Defend => out[4] = 1.0,
-            Intent::Buff => out[5] = 1.0,
-            Intent::Debuff { strong } => {
-                out[6] = 1.0;
-                out[7] = strong as u8 as f32;
-            }
-            Intent::CardDebuff => out[8] = 1.0,
-            Intent::Status { count } => {
-                out[9] = 1.0;
-                out[10] = count as f32 / 3.0;
-            }
-            Intent::Summon => out[11] = 1.0,
-            Intent::Sleep => out[12] = 1.0,
-            Intent::Stun => out[13] = 1.0,
-            Intent::Heal => out[14] = 1.0,
-            Intent::Escape => out[15] = 1.0,
+            Intent::Debuff { strong } => nums[3] = strong as u8 as f32,
+            Intent::Status { count } => nums[4] = count as f32 / 3.0,
             // A blast that also kills the attacker; damage reads like an attack.
             Intent::DeathBlow { damage } => {
-                out[16] = 1.0;
-                out[17] = damage as f32 / 20.0;
+                nums[0] = damage as f32 / 20.0;
+                nums[1] = 1.0 / 3.0;
+                nums[2] = damage as f32 / 40.0;
             }
+            _ => {}
         }
     }
 }
@@ -299,8 +300,9 @@ pub fn encode(c: &Combat, floats: &mut [f32], ids: &mut [i64], mask_out: &mut [b
         // Momentum's banked amount are the same thing to a policy.
         f[6] = (k.extra_damage as f32 + k.enchantment.map_or(0, |e| e.data) as f32) / 10.0;
         if let Some(e) = &k.enchantment {
-            floats[F_HAND_ENCHANTS + slot * N_ENCHANTMENTS + e.id as usize] =
-                if e.disabled { -1.0 } else { e.amount as f32 / 3.0 };
+            f[7] = e.amount as f32 / 3.0;
+            f[8] = e.disabled as u8 as f32;
+            ids[I_ENCHANTS + slot] = e.id as i64 + 1;
         }
         ids[I_HAND + slot] = k.id as i64 + 1;
     }
@@ -322,8 +324,8 @@ pub fn encode(c: &Combat, floats: &mut [f32], ids: &mut [i64], mask_out: &mut [b
         f[4] = e.creature.hp as f32 / e.creature.max_hp.max(1) as f32;
         f[5] = e.creature.block as f32 / 30.0;
         f[6] = e.reviving as u8 as f32;
-        intent_into(e.monster.intents(), &mut f[7..7 + INTENT_FEATS]);
-        powers_into(c, CreatureRef::Enemy(i), &mut f[7 + INTENT_FEATS..]);
+        intent_into(e.monster.intents(), &mut f[ENEMY_BASE..ENEMY_BASE + N_INTENTS + INTENT_NUMS]);
+        powers_into(c, CreatureRef::Enemy(i), &mut f[ENEMY_BASE + N_INTENTS + INTENT_NUMS..]);
         ids[I_ENEMIES + slot] = e.monster.id as i64 + 1;
         ids[I_MOVES + slot] = e.monster.next_move_name().and_then(monster::move_index).map_or(0, |m| m as i64 + 1);
     }
@@ -594,6 +596,9 @@ pub fn vocab_text() -> String {
     }
     for id in ALL_ENCHANTMENTS {
         out += &format!("enchant {id:?}\n");
+    }
+    for name in monster::INTENT_KINDS {
+        out += &format!("intent {name}\n");
     }
     out
 }

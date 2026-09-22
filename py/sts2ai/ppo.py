@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import time
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import numpy as np
@@ -17,9 +17,9 @@ import torch
 from torch import Tensor
 from torch.utils.tensorboard import SummaryWriter
 
-from sts2ai.env import DEFAULT_RECORDINGS, End, Envs
+from sts2ai.env import DEFAULT_RECORDINGS, End, Envs, has_recordings
 from sts2ai.evaluate import evaluate
-from sts2ai.model import Policy, checkpoint_vocab, load_state, masked_logits
+from sts2ai.model import Policy, checkpoint_layout, checkpoint_vocab, load_state, masked_logits
 from sts2ai.vocab import current_text
 
 BOSS_FLOOR = 16
@@ -122,8 +122,17 @@ class Stats:
 
 
 def save_checkpoint(path: Path, policy: Policy, opt: torch.optim.Optimizer, it: int, global_step: int) -> None:
+    """Weights, optimizer, and what the sim looked like: the vocabulary
+    (remappable) and the layout (checked, not remappable)."""
     torch.save(
-        {"policy": policy.state_dict(), "optimizer": opt.state_dict(), "iter": it, "global_step": global_step, "vocab": current_text()},
+        {
+            "policy": policy.state_dict(),
+            "optimizer": opt.state_dict(),
+            "iter": it,
+            "global_step": global_step,
+            "vocab": current_text(),
+            "layout": asdict(policy.layout),
+        },
         path,
     )
 
@@ -143,7 +152,7 @@ def train(cfg: Config) -> Policy:
     start_iter, global_step = 1, 0
     if cfg.resume:
         ck = torch.load(cfg.resume, map_location=device)
-        if load_state(policy, ck["policy"], checkpoint_vocab(ck, cfg.old_vocab)):
+        if load_state(policy, ck["policy"], checkpoint_vocab(ck, cfg.old_vocab), checkpoint_layout(ck)):
             print("vocabulary grew since the checkpoint: weights remapped by name, optimizer state reset")
         else:
             opt.load_state_dict(ck["optimizer"])
@@ -252,7 +261,7 @@ def train(cfg: Config) -> Policy:
             for k, v in by_kind.items():
                 writer.add_scalar(f"eval/holdout_win_{k}", v, global_step)
             print(f"eval on holdout: {win:.1%}  " + "  ".join(f"{k} {v:.1%}" for k, v in by_kind.items()))
-            if cfg.recordings.is_dir():
+            if has_recordings(cfg.recordings):
                 win, _, _ = evaluate(policy, device, 8, "recordings", cfg.recordings)
                 writer.add_scalar("eval/recorded_win_rate", win, global_step)
     writer.close()

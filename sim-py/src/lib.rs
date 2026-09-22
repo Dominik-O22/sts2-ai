@@ -9,7 +9,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use serde_json::Value;
 use sim::encode::*;
-use sim::env::{EnvConfig, VecEnv as Inner};
+use sim::env::{EnvConfig, Forks as InnerForks, VecEnv as Inner};
 use sim::gen::{holdout, load_recordings, BOSS_FLOOR};
 use sim::ids::{ALL_CARDS, ALL_MONSTERS};
 use sim::replay::{Ids, Replayer, Step};
@@ -230,6 +230,75 @@ impl Advisor {
         let r = self.inner.as_ref().ok_or_else(|| pyo3::exceptions::PyValueError::new_err("no combat yet"))?;
         Ok((r.report().snapshots, r.report().actions, r.report().reseeds))
     }
+
+    /// `n` copies of the current state for a search over the rest of the
+    /// turn, in `groups` groups that each share a draw-pile shuffle.
+    #[pyo3(signature = (n, groups=4, seed=0))]
+    fn fork(&self, n: usize, groups: usize, seed: u64) -> PyResult<Forks> {
+        Ok(Forks { inner: InnerForks::new(self.combat()?, n, groups, seed) })
+    }
+}
+
+/// Copies of one combat stepped together (`sim::env::Forks`): the
+/// advisor's turn search plays each one to the end of the turn.
+#[pyclass]
+struct Forks {
+    inner: InnerForks,
+}
+
+#[pymethods]
+impl Forks {
+    fn __len__(&self) -> usize {
+        self.inner.len()
+    }
+
+    fn observe(
+        &self,
+        py: Python<'_>,
+        mut floats: PyReadwriteArray2<f32>,
+        mut ids: PyReadwriteArray2<i64>,
+        mut mask: PyReadwriteArray2<bool>,
+    ) -> PyResult<()> {
+        let f = floats.as_slice_mut()?;
+        let i = ids.as_slice_mut()?;
+        let m = mask.as_slice_mut()?;
+        py.detach(|| self.inner.observe(f, i, m));
+        Ok(())
+    }
+
+    /// Apply `actions [n]` to the forks still in their turn; write the
+    /// shaped reward of each transition and the next observation.
+    fn step(
+        &mut self,
+        py: Python<'_>,
+        actions: PyReadonlyArray1<i64>,
+        mut floats: PyReadwriteArray2<f32>,
+        mut ids: PyReadwriteArray2<i64>,
+        mut mask: PyReadwriteArray2<bool>,
+        mut rewards: PyReadwriteArray1<f32>,
+    ) -> PyResult<()> {
+        let a = actions.as_slice()?;
+        let f = floats.as_slice_mut()?;
+        let i = ids.as_slice_mut()?;
+        let m = mask.as_slice_mut()?;
+        let r = rewards.as_slice_mut()?;
+        py.detach(|| self.inner.step(a, f, i, m, r));
+        Ok(())
+    }
+
+    /// Per fork: its turn is over (the next one began, or the fight ended).
+    fn turn_over(&self) -> Vec<bool> {
+        (0..self.inner.len()).map(|i| self.inner.turn_over(i)).collect()
+    }
+
+    fn is_over(&self) -> Vec<bool> {
+        (0..self.inner.len()).map(|i| self.inner.combat(i).is_over()).collect()
+    }
+
+    /// An action index in fork `i` in plain words, or None if not legal there.
+    fn describe(&self, i: usize, index: usize) -> Option<String> {
+        describe(self.inner.combat(i), index)
+    }
 }
 
 impl Advisor {
@@ -264,12 +333,26 @@ fn layout(py: Python<'_>) -> PyResult<Bound<'_, PyDict>> {
         ("i_potions", I_POTIONS),
         ("i_choices", I_CHOICES),
         ("i_moves", I_MOVES),
+        ("i_enchants", I_ENCHANTS),
         ("move_vocab", move_vocab()),
+        ("enchant_vocab", ENCHANT_VOCAB),
+        ("global_len", GLOBAL_LEN),
+        ("f_player_powers", F_PLAYER_POWERS),
         ("f_hand", F_HAND),
         ("hand_feats", HAND_FEATS),
+        ("f_piles", F_PILES),
+        ("f_enemies", F_ENEMIES),
+        ("enemy_base", ENEMY_BASE),
+        ("intent_nums", INTENT_NUMS),
+        ("enemy_feats", ENEMY_FEATS),
+        ("f_relics", F_RELICS),
         ("f_potions", F_POTIONS),
         ("f_choices", F_CHOICES),
         ("choice_feats", CHOICE_FEATS),
+        ("n_cards", N_CARDS),
+        ("n_powers", N_POWERS),
+        ("n_relics", N_RELICS),
+        ("n_intents", N_INTENTS),
     ] {
         d.set_item(k, v)?;
     }
@@ -340,6 +423,7 @@ fn encounter_brief(name: &str, asc: u8) -> PyResult<Vec<(String, Vec<(String, i3
 fn _sim(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<VecEnv>()?;
     m.add_class::<Advisor>()?;
+    m.add_class::<Forks>()?;
     m.add_function(wrap_pyfunction!(layout, m)?)?;
     m.add_function(wrap_pyfunction!(card_names, m)?)?;
     m.add_function(wrap_pyfunction!(monster_names, m)?)?;

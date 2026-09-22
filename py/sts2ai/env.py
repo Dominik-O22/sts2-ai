@@ -13,6 +13,11 @@ from sts2ai import _sim
 DEFAULT_RECORDINGS = Path.home() / ".local/share/SlayTheSpire2/sts2ai/recordings"
 
 
+def has_recordings(directory: Path = DEFAULT_RECORDINGS) -> bool:
+    """Whether any run fight has been recorded (dev-console fights sit in dev/)."""
+    return directory.is_dir() and any(directory.glob("*.jsonl"))
+
+
 @dataclass(frozen=True)
 class Layout:
     """Offsets into the observation and action vectors (`sim::encode`)."""
@@ -38,12 +43,26 @@ class Layout:
     i_potions: int
     i_choices: int
     i_moves: int
+    i_enchants: int
     move_vocab: int
+    enchant_vocab: int
+    global_len: int
+    f_player_powers: int
     f_hand: int
     hand_feats: int
+    f_piles: int
+    f_enemies: int
+    enemy_base: int
+    intent_nums: int
+    enemy_feats: int
+    f_relics: int
     f_potions: int
     f_choices: int
     choice_feats: int
+    n_cards: int
+    n_powers: int
+    n_relics: int
+    n_intents: int
 
     @classmethod
     def load(cls) -> Layout:

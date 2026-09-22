@@ -59,7 +59,9 @@ Change one here before changing the code that depends on it.
 
 - PPO over a masked action space: (card, target), potion, end turn.
 - Cards, relics, and enemies are ID embeddings over a closed vocabulary plus a few numeric
-  features (cost, upgraded, current modifiers).
+  features (cost, upgraded, current modifiers). Enemies are a set, encoded one at a time
+  and pooled; targets are scored per (card, enemy) pair, since nothing in the game cares
+  where an enemy stands.
 - Terminal reward: win/loss plus HP and potions priced by a hand-authored table keyed on act
   and upcoming fights. This table is a stopgap; see Long term.
 - Later: shallow lookahead (one or two ply) over the learned value at inference time.

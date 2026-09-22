@@ -3,14 +3,17 @@ vocabulary growth.
 
 `sim/vocab.txt` lists every id in index order (`sim::encode::vocab_text`).
 A checkpoint stores the text it was trained with. When the sim gains cards,
-powers, monsters, relics, potions, or moves, both the embedding rows and
-the columns of the first torso layer (the dense observation) move; this
-module maps them old name to new index so training resumes.
+powers, monsters, relics, potions, moves, enchantments, or intent kinds,
+the embedding rows and the input columns of the torso and the enemy
+encoder move; this module maps them old name to new index so training
+resumes. Layout constants (slot counts, per-slot feature counts) are not
+remapped: those need a retrain (`model.SHAPE_FIELDS`).
 """
 
 from __future__ import annotations
 
 import os
+from dataclasses import replace
 from functools import cache
 from pathlib import Path
 
@@ -20,6 +23,8 @@ from torch import Tensor
 from sts2ai.env import Layout
 
 Vocab = dict[str, list[str]]
+# (segment name, length, vocabulary kind or None for a fixed block).
+Segments = list[tuple[str, int, str | None]]
 
 # Override with STS2AI_VOCAB to describe a sim other than the checked-in one.
 VOCAB_FILE = Path(os.environ.get("STS2AI_VOCAB", Path(__file__).resolve().parents[2] / "sim" / "vocab.txt"))
@@ -34,135 +39,145 @@ def parse(text: str) -> Vocab:
     return out
 
 
+@cache
 def current_text() -> str:
     """The pinned vocabulary of the sim this package was built from."""
     return VOCAB_FILE.read_text()
-
-
-@cache
-def _fixed() -> tuple[int, int]:
-    """Lengths of the global block and of one enemy's own features: the two
-    parts of the dense observation no vocabulary sizes. Read off the sim
-    this package was built from, since a smaller vocabulary does not make
-    them smaller."""
-    L, v = Layout.load(), parse(current_text())
-    n_powers, n_relics = len(v["power"]), len(v["relic"])
-    f_enemies = L.f_hand + L.max_hand * (L.hand_feats + len(v["enchant"])) + 3 * 2 * len(v["card"])
-    enemy_feats = (L.f_potions - 2 * n_relics - f_enemies) // L.max_enemies
-    return L.f_hand - n_powers, enemy_feats - n_powers
-
-
-def float_segments(L: Layout, v: Vocab) -> list[tuple[str, int, str | None]]:
-    """The dense observation as (segment name, length, vocabulary kind or
-    None) in layout order, mirroring `sim::encode`. `L` must be the layout
-    `v` produces, as `layout_for` builds it."""
-    n_cards, n_powers, n_relics = len(v["card"]), len(v["power"]), len(v["relic"])
-    # A vocabulary from before enchantments existed simply has none.
-    n_ench = len(v.get("enchant", []))
-    global_len, enemy_base = _fixed()
-    segs: list[tuple[str, int, str | None]] = [
-        ("global", global_len, None),
-        ("player_powers", n_powers, "power"),
-        ("hand", L.max_hand * L.hand_feats, None),
-    ]
-    for i in range(L.max_hand):
-        segs.append((f"hand{i}_ench", n_ench, "enchant"))
-    for pile in ("draw", "discard", "exhaust"):
-        segs.append((f"pile_{pile}", 2 * n_cards, "card2"))
-    for i in range(L.max_enemies):
-        segs.append((f"enemy{i}_base", enemy_base, None))
-        segs.append((f"enemy{i}_powers", n_powers, "power"))
-    segs.append(("relics_hot", n_relics, "relic"))
-    segs.append(("relics_counter", n_relics, "relic"))
-    segs.append(("potions", L.max_potions, None))
-    segs.append(("choices", L.max_choices * L.choice_feats, None))
-    assert sum(n for _, n, _ in segs) == L.n_floats, (
-        f"vocabulary of {sum(n for _, n, _ in segs)} floats against a layout of {L.n_floats}; if this is the built sim, "
-        "regenerate sim/vocab.txt with `cargo run --release --example vocab > vocab.txt` in sim/"
-    )
-    return segs
-
-
-def _column_map(old_v: Vocab, new_v: Vocab, old_segs, new_segs) -> list[tuple[int, int]]:
-    """(old column, new column) pairs for the dense observation."""
-    pairs: list[tuple[int, int]] = []
-    old_off = new_off = 0
-    new_by_name = {name: (off, n, kind) for (name, n, kind), off in zip(new_segs, _offsets(new_segs))}
-    for (name, n, kind), old_start in zip(old_segs, _offsets(old_segs)):
-        new_start, new_n, _ = new_by_name[name]
-        if kind is None:
-            assert n == new_n, f"fixed segment {name} changed size"
-            pairs.extend((old_start + i, new_start + i) for i in range(n))
-        elif kind == "card2":
-            index = {c: i for i, c in enumerate(new_v["card"])}
-            for i, c in enumerate(old_v["card"]):
-                j = index[c]
-                pairs.append((old_start + 2 * i, new_start + 2 * j))
-                pairs.append((old_start + 2 * i + 1, new_start + 2 * j + 1))
-        else:
-            index = {c: i for i, c in enumerate(new_v.get(kind, []))}
-            pairs.extend((old_start + i, new_start + index[c]) for i, c in enumerate(old_v.get(kind, [])))
-    return pairs
 
 
 def layout_for(v: Vocab, base: Layout) -> Layout:
     """The Layout `sim::encode` would produce for vocabulary `v`, taking the
     vocabulary-independent sizes from `base`. Used to describe checkpoints
     from a differently sized sim."""
-    from dataclasses import replace
-
-    cur = parse(current_text())
-    d_cards, d_powers, d_relics = (len(v[k]) - len(cur[k]) for k in ("card", "power", "relic"))
-    d_ench = len(v.get("enchant", [])) - len(cur.get("enchant", []))
-    f_hand = base.f_hand + d_powers
-    f_potions = (
-        base.f_potions + d_powers + base.max_hand * d_ench + 3 * 2 * d_cards + base.max_enemies * d_powers + 2 * d_relics
-    )
+    n_cards, n_powers, n_relics, n_intents = (len(v.get(k, [])) for k in ("card", "power", "relic", "intent"))
+    f_hand = base.global_len + n_powers
+    f_piles = f_hand + base.max_hand * base.hand_feats
+    f_enemies = f_piles + 3 * 2 * n_cards
+    enemy_feats = base.enemy_base + n_intents + base.intent_nums + n_powers
+    f_relics = f_enemies + base.max_enemies * enemy_feats
+    f_potions = f_relics + 2 * n_relics
+    f_choices = f_potions + base.max_potions
     return replace(
         base,
-        n_floats=base.n_floats + (f_potions - base.f_potions),
+        n_floats=f_choices + base.max_choices * base.choice_feats,
         f_hand=f_hand,
+        f_piles=f_piles,
+        f_enemies=f_enemies,
+        enemy_feats=enemy_feats,
+        f_relics=f_relics,
         f_potions=f_potions,
-        f_choices=f_potions + base.max_potions,
-        card_vocab=len(v["card"]) + 1,
+        f_choices=f_choices,
+        n_cards=n_cards,
+        n_powers=n_powers,
+        n_relics=n_relics,
+        n_intents=n_intents,
+        card_vocab=n_cards + 1,
         monster_vocab=len(v["monster"]) + 1,
         potion_vocab=len(v["potion"]) + 1,
         move_vocab=len(v["move"]) + 1,
+        enchant_vocab=len(v.get("enchant", [])) + 1,
     )
 
 
-def _offsets(segs) -> list[int]:
-    out, off = [], 0
-    for _, n, _ in segs:
-        out.append(off)
-        off += n
+def float_segments(L: Layout) -> Segments:
+    """The dense observation in layout order, mirroring `sim::encode`.
+    Per-enemy blocks are listed too, so offsets can be read off, but the
+    torso does not see them (`torso_segments`)."""
+    segs: Segments = [
+        ("global", L.global_len, None),
+        ("player_powers", L.n_powers, "power"),
+        ("hand", L.max_hand * L.hand_feats, None),
+    ]
+    for pile in ("draw", "discard", "exhaust"):
+        segs.append((f"pile_{pile}", 2 * L.n_cards, "card2"))
+    for i in range(L.max_enemies):
+        segs.extend((f"enemy{i}_{name}", n, kind) for name, n, kind in enemy_segments(L))
+    segs += [
+        ("relics_hot", L.n_relics, "relic"),
+        ("relics_counter", L.n_relics, "relic"),
+        ("potions", L.max_potions, None),
+        ("choices", L.max_choices * L.choice_feats, None),
+    ]
+    assert sum(n for _, n, _ in segs) == L.n_floats, (
+        f"segments sum to {sum(n for _, n, _ in segs)} floats against a layout of {L.n_floats}; if this is the built sim, "
+        "regenerate sim/vocab.txt with `cargo run --release --example vocab > vocab.txt` in sim/"
+    )
+    return segs
+
+
+def enemy_segments(L: Layout) -> Segments:
+    """One enemy's dense block."""
+    return [("base", L.enemy_base, None), ("intent", L.n_intents, "intent"), ("intent_nums", L.intent_nums, None), ("powers", L.n_powers, "power")]
+
+
+def torso_segments(L: Layout, dims: dict[str, int]) -> Segments:
+    """Columns of the torso's first layer: the observation without the enemy
+    blocks, then the embedding concat (`Policy.forward`)."""
+    segs = [s for s in float_segments(L) if not s[0].startswith("enemy")]
+    return segs + [("emb", dims["torso_emb"], None)]
+
+
+def enemy_input_segments(L: Layout, dims: dict[str, int]) -> Segments:
+    """Columns of the enemy encoder's first layer."""
+    return [("emb", dims["enemy_emb"], None)] + enemy_segments(L)
+
+
+def offsets(segs: Segments) -> dict[str, int]:
+    out, off = {}, 0
+    for name, n, _ in segs:
+        out[name], off = off, off + n
     return out
 
 
+def column_map(old_v: Vocab, new_v: Vocab, old_segs: Segments, new_segs: Segments) -> tuple[list[int], list[int]]:
+    """(old columns, new columns) that hold the same named feature."""
+    src: list[int] = []
+    dst: list[int] = []
+    new_off, old_off = offsets(new_segs), offsets(old_segs)
+    new_len = {name: n for name, n, _ in new_segs}
+    for name, n, kind in old_segs:
+        a, b = old_off[name], new_off[name]
+        if kind is None:
+            assert n == new_len[name], f"fixed segment {name} changed size"
+            src += range(a, a + n)
+            dst += range(b, b + n)
+        elif kind == "card2":
+            index = {c: i for i, c in enumerate(new_v["card"])}
+            for i, c in enumerate(old_v["card"]):
+                src += [a + 2 * i, a + 2 * i + 1]
+                dst += [b + 2 * index[c], b + 2 * index[c] + 1]
+        else:
+            index = {c: i for i, c in enumerate(new_v.get(kind, []))}
+            src += [a + i for i in range(len(old_v.get(kind, [])))]
+            dst += [b + index[c] for c in old_v.get(kind, [])]
+    return src, dst
+
+
 def remap_state(state: dict[str, Tensor], old_v: Vocab, new_v: Vocab, policy_state: dict[str, Tensor], L: Layout) -> dict[str, Tensor]:
-    """A copy of `state` laid out for `new_v`. Embedding rows and the
-    torso's input columns move by name; new entries keep the init in
-    `policy_state`. Anything else must already match in shape."""
+    """A copy of `state` laid out for `new_v`. Embedding rows and the input
+    columns of the torso and enemy encoder move by name; new entries keep
+    the init in `policy_state`. Anything else must already match in shape."""
     out = dict(state)
-    tables = {"card.weight": "card", "monster.weight": "monster", "move.weight": "move", "potion.weight": "potion"}
+    tables = {"card.weight": "card", "monster.weight": "monster", "move.weight": "move", "potion.weight": "potion", "enchant.weight": "enchant"}
     for key, kind in tables.items():
         new = policy_state[key].clone()
-        index = {c: i for i, c in enumerate(new_v[kind])}
-        for i, c in enumerate(old_v[kind]):
+        index = {c: i for i, c in enumerate(new_v.get(kind, []))}
+        for i, c in enumerate(old_v.get(kind, [])):
             new[index[c] + 1] = state[key][i + 1]  # row 0 is the pad
         new[0] = state[key][0]
         out[key] = new
-    # The checkpoint's own layout: its smaller vocabularies made it narrower.
-    old_segs, new_segs = float_segments(layout_for(old_v, Layout.load()), old_v), float_segments(L, new_v)
-    old_floats, new_floats = sum(n for _, n, _ in old_segs), L.n_floats
-    old_w, new_w = state["torso.0.weight"], policy_state["torso.0.weight"].clone()
-    pairs = _column_map(old_v, new_v, old_segs, new_segs)
-    # The embedding concat after the floats keeps its shape; it only shifts.
-    pairs.extend((old_floats + i, new_floats + i) for i in range(old_w.shape[1] - old_floats))
-    src = torch.tensor([a for a, _ in pairs], device=old_w.device)
-    dst = torch.tensor([b for _, b in pairs], device=old_w.device)
-    new_w[:, dst] = old_w[:, src]
-    out["torso.0.weight"] = new_w
+    old_L = layout_for(old_v, L)
+    # Embedding widths do not depend on the vocabulary, so read them off the
+    # new weights.
+    dims = {
+        "torso_emb": policy_state["torso.0.weight"].shape[1] - (L.n_floats - L.max_enemies * L.enemy_feats),
+        "enemy_emb": policy_state["enemy.0.weight"].shape[1] - L.enemy_feats,
+    }
+    for key, segs in (("torso.0.weight", torso_segments), ("enemy.0.weight", enemy_input_segments)):
+        old_w, new_w = state[key], policy_state[key].clone()
+        src, dst = column_map(old_v, new_v, segs(old_L, dims), segs(L, dims))
+        new_w[:, dst] = old_w[:, src]
+        out[key] = new_w
     for key, t in out.items():
         assert t.shape == policy_state[key].shape, f"{key}: {tuple(t.shape)} vs {tuple(policy_state[key].shape)}"
     return out
@@ -173,14 +188,16 @@ if __name__ == "__main__":
     # grow every kind by appending, build policies for both layouts, remap
     # the old weights into the new one, and confirm the outputs agree on an
     # observation padded with zeros at the new columns.
+    from sts2ai.model import Policy
+
     L0 = Layout.load()
     v = parse(current_text())
     L = layout_for(v, L0)
+    assert L == L0, "layout_for does not reproduce the built sim's layout"
     grown = {k: list(names) for k, names in v.items()}
-    for kind, extra in [("card", 3), ("power", 2), ("relic", 4), ("monster", 1), ("potion", 2), ("move", 5), ("enchant", 2)]:
+    for kind, extra in [("card", 3), ("power", 2), ("relic", 4), ("monster", 1), ("potion", 2), ("move", 5), ("enchant", 2), ("intent", 3)]:
         grown[kind] += [f"NEW_{kind}_{i}" for i in range(extra)]
     GL = layout_for(grown, L0)
-    from sts2ai.model import Policy
 
     torch.manual_seed(0)
     old, new = Policy(L), Policy(GL)
@@ -188,11 +205,12 @@ if __name__ == "__main__":
     floats = torch.rand(8, L.n_floats)
     ids = torch.zeros(8, L.n_ids, dtype=torch.long)
     ids[:, L.i_hand : L.i_hand + 3] = torch.tensor([1, 5, 9])
-    ids[:, L.i_enemies] = 2
-    ids[:, L.i_moves] = 3
-    pairs = _column_map(v, grown, float_segments(L, v), float_segments(GL, grown))
+    ids[:, L.i_enchants] = 2
+    ids[:, L.i_enemies : L.i_enemies + 2] = torch.tensor([2, 4])
+    ids[:, L.i_moves : L.i_moves + 2] = torch.tensor([3, 7])
+    src, dst = column_map(v, grown, float_segments(L), float_segments(GL))
     gf = torch.zeros(8, GL.n_floats)
-    gf[:, [b for _, b in pairs]] = floats[:, [a for a, _ in pairs]]
+    gf[:, dst] = floats[:, src]
     with torch.no_grad():
         lo, vo = old(floats, ids)
         ln, vn = new(gf, ids)

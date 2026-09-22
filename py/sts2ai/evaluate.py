@@ -4,8 +4,9 @@
 
 `holdout` is a fixed generated set: ten fights per act 1 encounter on
 floors that encounter appears on, the same decks every time. `recordings`
-are the recorder files, which so far are dev-console test fights, not run
-decks; useful as a sanity check, not as a measure.
+are fights the recorder mod saw in real runs: the decks a person built,
+which is the number that says whether the advisor can be trusted. The
+generator's decks are not those decks (docs/training.md, Real decks).
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from sts2ai.env import DEFAULT_RECORDINGS, End, Envs, Layout
+from sts2ai.env import DEFAULT_RECORDINGS, End, Envs, Layout, has_recordings
 from sts2ai.model import Policy, load_policy, masked_logits
 
 HOLDOUT_PER_ENCOUNTER = 10
@@ -35,6 +36,8 @@ def evaluate(
     """Plays every setup in the set `repeats` times (different shuffles),
     one env per setup so each gets exactly that many fights. Returns the
     overall win rate, per-encounter (wins, fights), and per-kind win rates."""
+    if source == "recordings" and not has_recordings(recordings):
+        raise SystemExit(f"no run recordings in {recordings}; play with the recorder mod on (dev-console fights sit in dev/)")
     probe = Envs(1, seed=seed)
     n = probe.use_holdout(seed, HOLDOUT_PER_ENCOUNTER) if source == "holdout" else probe.load_recordings(recordings)
     envs = Envs(n, seed=seed)
