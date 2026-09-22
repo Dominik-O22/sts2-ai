@@ -49,6 +49,7 @@ class End(NamedTuple):
     env: int
     won: bool
     hp_frac: float
+    hp_lost: float
     steps: int
     floor: int
     encounter: str

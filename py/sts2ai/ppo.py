@@ -95,6 +95,7 @@ class Stats:
         out = {
             "win_rate": float(np.mean([e.won for e in self.ends])),
             "hp_kept": float(np.mean([e.hp_frac for e in self.ends if e.won] or [0.0])),
+            "hp_lost": float(np.mean([e.hp_lost for e in self.ends if e.won] or [0.0])),
             "ep_len": float(np.mean([e.steps for e in self.ends])),
             "reward": float(np.mean([e.reward for e in self.ends])),
         }

@@ -18,8 +18,8 @@ struct VecEnv {
     inner: Inner,
 }
 
-/// One finished fight: (env, won, hp_frac, steps, floor, encounter, reward).
-type End = (usize, bool, f32, u32, u32, String, f32);
+/// One finished fight: (env, won, hp_frac, hp_lost, steps, floor, encounter, reward).
+type End = (usize, bool, f32, f32, u32, u32, String, f32);
 
 #[pymethods]
 impl VecEnv {
@@ -89,7 +89,7 @@ impl VecEnv {
         let ends = py.detach(|| self.inner.step(a, f, i, m, r, d));
         Ok(ends
             .into_iter()
-            .map(|e| (e.env, e.won, e.hp_frac, e.steps, e.floor, format!("{:?}", e.encounter), e.reward))
+            .map(|e| (e.env, e.won, e.hp_frac, e.hp_lost, e.steps, e.floor, format!("{:?}", e.encounter), e.reward))
             .collect())
     }
 }

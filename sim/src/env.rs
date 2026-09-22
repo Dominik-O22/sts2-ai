@@ -35,6 +35,8 @@ pub struct EpisodeEnd {
     pub env: usize,
     pub won: bool,
     pub hp_frac: f32,
+    /// HP lost over the fight, as a fraction of max HP.
+    pub hp_lost: f32,
     pub steps: u32,
     pub floor: u32,
     pub encounter: Encounter,
@@ -81,6 +83,7 @@ impl Slot {
             env: index,
             won: c.outcome == Some(Outcome::Won),
             hp_frac: c.player.creature.hp.max(0) as f32 / c.player.creature.max_hp.max(1) as f32,
+            hp_lost: (self.setup.hp - c.player.creature.hp.max(0)) as f32 / c.player.creature.max_hp.max(1) as f32,
             steps: self.steps,
             floor: self.setup.floor,
             encounter: self.setup.encounter,
