@@ -136,18 +136,33 @@ impl Slot {
     /// Start the next fight. One already over before the first decision
     /// (Whispering Earring can win turn 1 on its own) is skipped: there is
     /// nothing in it to act on.
-    fn reset(&mut self, index: usize, n: usize, cfg: &EnvConfig, fixed: &[FightSetup]) {
+    fn reset(&mut self, index: usize, n: usize, cfg: &EnvConfig, fixed: &[FightSetup], hard: &[(Encounter, f32)]) {
         loop {
-            self.roll(index, n, cfg, fixed);
+            self.roll(index, n, cfg, fixed, hard);
             if !self.combat.is_over() {
                 return;
             }
         }
     }
 
-    fn roll(&mut self, index: usize, n: usize, cfg: &EnvConfig, fixed: &[FightSetup]) {
+    fn roll(&mut self, index: usize, n: usize, cfg: &EnvConfig, fixed: &[FightSetup], hard: &[(Encounter, f32)]) {
+        let acts = act_floor(cfg.min_floor).0..=act_floor(cfg.max_floor).0;
+        let weighted: Vec<(Encounter, f32)> =
+            hard.iter().copied().filter(|(e, _)| acts.contains(&(e.act().index() as u32))).collect();
         self.setup = if !fixed.is_empty() {
             fixed[(index + self.resets * n) % fixed.len()].clone()
+        } else if self.rng.next_float(1.0) < cfg.hard_frac && !weighted.is_empty() {
+            // Elites and bosses by weight: the ones the policy loses most.
+            let total: f32 = weighted.iter().map(|(_, w)| w).sum();
+            let mut x = self.rng.next_float(total);
+            let enc = weighted.iter().find(|(_, w)| {
+                x -= w;
+                x < 0.0
+            });
+            let enc = enc.unwrap_or(weighted.last().unwrap()).0;
+            let act = enc.act().index() as u32;
+            let local = if enc.kind() == Kind::Boss { BOSS_FLOOR } else { 5 + self.rng.next_int((BOSS_FLOOR - 5) as usize) as u32 };
+            generate_against(&mut self.rng, act * BOSS_FLOOR + local, cfg.asc, enc)
         } else if self.rng.next_float(1.0) < cfg.hard_frac {
             // An act the floor range reaches, then its boss or an elite.
             let act = act_floor(cfg.min_floor).0 + self.rng.next_int((act_floor(cfg.max_floor).0 - act_floor(cfg.min_floor).0 + 1) as usize) as u32;
@@ -191,6 +206,9 @@ pub struct VecEnv {
     cfg: EnvConfig,
     /// When set, resets cycle through these instead of generating.
     fixed: Vec<FightSetup>,
+    /// When set, the `hard_frac` share of fights draws its elite or boss
+    /// by these weights instead of evenly.
+    hard: Vec<(Encounter, f32)>,
 }
 
 impl VecEnv {
@@ -204,9 +222,9 @@ impl VecEnv {
             })
             .collect();
         for (i, s) in slots.iter_mut().enumerate() {
-            s.reset(i, n, &cfg, &[]);
+            s.reset(i, n, &cfg, &[], &[]);
         }
-        Self { slots, cfg, fixed: vec![] }
+        Self { slots, cfg, fixed: vec![], hard: vec![] }
     }
 
     pub fn len(&self) -> usize {
@@ -233,14 +251,20 @@ impl VecEnv {
     }
 
     /// Evaluate on fixed setups (the recordings) instead of generated ones.
+    /// Weights for the elites and bosses forced by `hard_frac`; empty
+    /// goes back to drawing them evenly. Takes effect at each reset.
+    pub fn set_hard_weights(&mut self, weights: Vec<(Encounter, f32)>) {
+        self.hard = weights.into_iter().filter(|(e, w)| matches!(e.kind(), Kind::Elite | Kind::Boss) && *w > 0.0).collect();
+    }
+
     /// Resets every env so the first `n` setups start immediately.
     pub fn set_fixed(&mut self, setups: Vec<FightSetup>) {
         self.fixed = setups;
         let n = self.slots.len();
-        let (cfg, fixed) = (self.cfg, &self.fixed);
+        let (cfg, fixed, hard) = (self.cfg, &self.fixed, &self.hard);
         for (i, s) in self.slots.iter_mut().enumerate() {
             s.resets = 0;
-            s.reset(i, n, &cfg, fixed);
+            s.reset(i, n, &cfg, fixed, hard);
         }
     }
 
@@ -278,7 +302,7 @@ impl VecEnv {
         self.check_buffers(floats, ids, mask);
         let n = self.slots.len();
         assert!(actions.len() == n && rewards.len() == n && dones.len() == n, "batch size mismatch");
-        let (cfg, fixed) = (self.cfg, &self.fixed);
+        let (cfg, fixed, hard) = (self.cfg, &self.fixed, &self.hard);
         self.slots
             .par_iter_mut()
             .enumerate()
@@ -299,7 +323,7 @@ impl VecEnv {
                 *r = step_reward(before, &s.combat, s.base, over);
                 *d = over;
                 if over {
-                    s.reset(i, n, &cfg, fixed);
+                    s.reset(i, n, &cfg, fixed, hard);
                 }
                 encode::encode(&s.combat, f, ids, m);
                 end
@@ -494,6 +518,21 @@ mod tests {
     }
 
     #[test]
+    fn hard_weights_pick_the_forced_fight() {
+        let cfg = EnvConfig { hard_frac: 1.0, ..Default::default() };
+        let mut env = VecEnv::new(4, 3, cfg);
+        env.set_hard_weights(vec![(Encounter::KnowledgeDemonBoss, 1.0), (Encounter::VantomBoss, 0.0)]);
+        let fixed = vec![];
+        for s in env.slots.iter_mut() {
+            for _ in 0..20 {
+                s.reset(0, 4, &cfg, &fixed, &env.hard);
+                assert_eq!(s.setup.encounter, Encounter::KnowledgeDemonBoss);
+                assert_eq!(act_floor(s.setup.floor), (1, BOSS_FLOOR));
+            }
+        }
+    }
+
+    #[test]
     fn hard_frac_forces_elites_and_bosses() {
         let cfg = EnvConfig { hard_frac: 1.0, ..Default::default() };
         let env = VecEnv::new(200, 3, cfg);
@@ -510,7 +549,7 @@ mod tests {
         env.set_fixed(setups.clone());
         assert_eq!(env.slots[0].setup.encounter, setups[0].encounter);
         assert_eq!(env.slots[1].setup.encounter, setups[1].encounter);
-        env.slots[0].reset(0, 2, &env.cfg, &env.fixed);
+        env.slots[0].reset(0, 2, &env.cfg, &env.fixed, &[]);
         assert_eq!(env.slots[0].setup.encounter, setups[2].encounter);
     }
 }

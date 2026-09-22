@@ -53,6 +53,22 @@ impl VecEnv {
         self.inner.set_floors(min, max);
     }
 
+    /// Weights by encounter name (`ElitesName` as `End.encounter` reports
+    /// it) for the elites and bosses `hard_frac` forces; empty resets to
+    /// drawing them evenly.
+    fn set_hard_weights(&mut self, weights: Vec<(String, f32)>) -> PyResult<()> {
+        let by_name: std::collections::HashMap<String, sim::encounter::Encounter> =
+            sim::encounter::ALL.iter().map(|&e| (format!("{e:?}"), e)).collect();
+        let w = weights
+            .into_iter()
+            .map(|(name, w)| {
+                by_name.get(&name).map(|&e| (e, w)).ok_or_else(|| pyo3::exceptions::PyValueError::new_err(format!("unknown encounter {name}")))
+            })
+            .collect::<PyResult<_>>()?;
+        self.inner.set_hard_weights(w);
+        Ok(())
+    }
+
     /// Copies of the current fight in each of `envs`, `n` per env, for a
     /// turn search over many fights in one batch.
     #[pyo3(signature = (envs, n, groups=4, seed=0))]

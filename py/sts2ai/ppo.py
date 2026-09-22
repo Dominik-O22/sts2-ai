@@ -34,6 +34,9 @@ class Config:
     epochs: int = 4
     minibatches: int = 8
     lr: float = 3e-4
+    # Learning rate at the last iteration, reached linearly; None keeps
+    # `lr` throughout.
+    lr_final: float | None = None
     # Undiscounted: a fight always ends, and discounting would pay the policy
     # to spend HP and potions on finishing a turn sooner.
     gamma: float = 1.0
@@ -52,6 +55,10 @@ class Config:
     # Once the ramp is done, this fraction of fights is forced onto an
     # elite or boss; normal fights are won almost always by then.
     hard_frac: float = 0.4
+    # Draw those forced elites and bosses by how often the policy loses
+    # them (over the last `Stats` window) instead of evenly, so the fights
+    # it already wins stop taking the compute.
+    focus: bool = False
     # Search distillation (expert iteration): each iteration, this many
     # envs get a turn search (`search.py`) over the policy's `search_top`
     # favourite first actions, `search_copies` copies shared between them,
@@ -143,6 +150,19 @@ class Stats:
             if won:
                 out[f"win_{kind.lower()}"] = float(np.mean(won))
         return out
+
+    def loss_weights(self, floor: float = 0.05) -> dict[str, float]:
+        """Per elite and boss seen: its loss rate with a win and a loss of
+        prior (so a few fights do not zero it), plus `floor` so a fight it
+        always wins still comes up now and then. Encounters not seen yet
+        are left out and drawn by nobody until they are."""
+        tally: dict[str, list[int]] = {}
+        for e in self.ends:
+            if e.kind in ("Elite", "Boss"):
+                t = tally.setdefault(e.encounter, [0, 0])
+                t[0] += int(e.won)
+                t[1] += 1
+        return {enc: (n - w + 1) / (n + 2) + floor for enc, (w, n) in tally.items()}
 
 
 class SearchTargets:
@@ -251,6 +271,12 @@ def train(cfg: Config) -> Policy:
         max_floor = last if cfg.resume else min(last, cfg.floor_start + (last - cfg.floor_start) * it // max(1, cfg.floor_ramp))
         envs.set_floors(1, max_floor)
         envs.set_hard_frac(cfg.hard_frac if max_floor >= BOSS_FLOOR else 0.0)
+        if cfg.focus and it % 10 == 0:
+            envs.set_hard_weights(stats.loss_weights())
+        if cfg.lr_final is not None:
+            frac = (it - start_iter) / max(1, cfg.iters - 1)
+            for group in opt.param_groups:
+                group["lr"] = cfg.lr + (cfg.lr_final - cfg.lr) * frac
 
         # Rollout.
         policy.eval()

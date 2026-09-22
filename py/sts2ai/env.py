@@ -116,6 +116,11 @@ class Envs:
     def set_hard_frac(self, frac: float) -> None:
         self.sim.set_hard_frac(frac)
 
+    def set_hard_weights(self, weights: dict[str, float]) -> None:
+        """Draw the forced elites and bosses by these weights, by encounter
+        name; empty draws them evenly."""
+        self.sim.set_hard_weights(list(weights.items()))
+
     def use_holdout(self, seed: int = 0, per_encounter: int = 10, acts: int = 3) -> int:
         """Cycle through a fixed generated set covering every encounter of
         the first `acts` acts."""
