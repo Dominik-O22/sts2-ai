@@ -4,7 +4,7 @@
 
 use std::collections::VecDeque;
 
-use crate::card::{Card, Tag, IRONCLAD_POOL};
+use crate::card::{Affliction, Card, Tag, IRONCLAD_POOL};
 use crate::effect::{AttackTargets, CardFilter, Effect, GenPool, Pile, Then};
 use crate::ids::{CardId, MonsterId, PowerId};
 use crate::monster::{Flags, Monster, RollCtx};
@@ -91,8 +91,10 @@ impl Enemy {
     /// `PowerModel.ShouldStopCombatFromEnding` for the powers that use it.
     /// Steam Eruption survives its owner's death (`ShouldPowerBeRemovedAfter\
     /// OwnerDeath` is false), which is how the blast still goes off.
+    /// Adaptable (the Test Subject) outlives its owner the same way, which
+    /// keeps the fight going while it respawns.
     fn stops_combat_ending(&self) -> bool {
-        self.creature.power(PowerId::SteamEruption).is_some()
+        self.creature.power(PowerId::SteamEruption).is_some() || self.creature.power(PowerId::Adaptable).is_some()
     }
 }
 
@@ -225,6 +227,10 @@ pub struct Stats {
     /// Enemies whose HP was rolled again mid-fight (a hatched Tough Egg), for
     /// the replay to adopt like a fresh spawn's.
     pub hp_rerolled: Vec<usize>,
+    /// Wounds Painful Stabs owes once the attack in flight is over.
+    pub wounds_pending: u32,
+    /// A Bound card has been played this turn (`ChainsOfBindingPower`).
+    pub bound_played: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -367,6 +373,7 @@ impl Combat {
             e.hp = hp;
         }
         c.started = true;
+        c.galvanize_deck();
         let pre = c.relic_before_combat_start();
         c.queue.extend(pre);
         c.queue.push_back(Effect::StartTurn(Side::Player));
@@ -410,6 +417,15 @@ impl Combat {
             let hatch = if self.side == Side::Player { 1 } else { 2 };
             creature.powers.push(Power::new(PowerId::Hatch, hatch));
             creature.powers.push(Power::new(PowerId::Minion, 1));
+        }
+        // Axebot.AfterAddedToRoom: a respawn carries only the stock it has left.
+        if let Some(stock) = flags.stock {
+            creature.powers.retain(|p| p.id != PowerId::Stock);
+            if stock > 0 {
+                let mut p = Power::new(PowerId::Stock, i32::from(stock));
+                p.applier = Some(me);
+                creature.powers.push(p);
+            }
         }
         // AfterAddedToRoom block (Cubex) goes through CreatureCmd.GainBlock,
         // which returns early until IsInProgress is set, and the starting
@@ -460,12 +476,15 @@ impl Combat {
 
     /// `roll_ctx` for a monster not yet in the enemy list (a fresh spawn).
     fn roll_ctx_for(&self, m: &Monster, i: usize) -> RollCtx {
+        let me = self.enemies.get(i).map(|e| &e.creature);
         RollCtx {
-            asleep: self.enemies.get(i).is_some_and(|e| e.creature.power(PowerId::Asleep).is_some()),
+            asleep: me.is_some_and(|c| c.power(PowerId::Asleep).is_some()),
             can_summon: self.can_summon(m, i),
             slumbering: self.enemies.get(i).is_some_and(|e| e.creature.power(PowerId::Slumber).is_some()),
             // GetTeammatesOf counts the monster itself, even one not yet placed.
             living_allies: self.living_enemies().count() + usize::from(i >= self.enemies.len()),
+            allies_alive: self.living_enemies().filter(|&j| j != i).count(),
+            below_half: me.is_some_and(|c| c.hp < c.max_hp / 2),
         }
     }
 
@@ -507,6 +526,8 @@ impl Combat {
             MonsterId::Ovicopter => Some(6),
             // illusion plus obscura.
             MonsterId::TheObscura => Some(2),
+            // bot1, bot2, fabricator, bot3, bot4.
+            MonsterId::Fabricator => Some(5),
             _ => None,
         });
         named.unwrap_or(crate::encode::MAX_ENEMIES).min(crate::encode::MAX_ENEMIES)
@@ -608,6 +629,10 @@ impl Combat {
         }
         // SlothPower.ShouldPlay: only `amount` cards a turn.
         if self.player.creature.power(PowerId::Sloth).is_some_and(|p| p.data >= p.amount) {
+            return false;
+        }
+        // ChainsOfBindingPower.ShouldPlay: one Bound card a turn.
+        if card.affliction == Some(Affliction::Bound) && self.stats.bound_played {
             return false;
         }
         !(card.smogged && self.player.creature.powers.iter().any(|p| p.blocks_smogged()))
@@ -959,7 +984,7 @@ impl Combat {
                 if free_this_turn {
                     card.cost_this_turn = Some(0);
                 }
-                self.relic_card_entered_combat(&mut card);
+                self.card_entered_combat(&mut card);
                 self.put_card(card, to);
             }
             Effect::CloneCard { uid, to } => {
@@ -970,7 +995,7 @@ impl Combat {
                     let mut card = src.clone();
                     card.uid = self.new_uid();
                     card.exhaust_on_next_play = false;
-                    self.relic_card_entered_combat(&mut card);
+                    self.card_entered_combat(&mut card);
                     self.put_card(card, to);
                 }
             }
@@ -1071,7 +1096,7 @@ impl Combat {
                     if self.stats.offer_free {
                         card.cost_this_turn = Some(0);
                     }
-                    self.relic_card_entered_combat(&mut card);
+                    self.card_entered_combat(&mut card);
                     self.put_card(card, Pile::Hand);
                 }
                 self.player.offer.clear();
@@ -1126,7 +1151,7 @@ impl Combat {
                     card.uid = self.new_uid();
                     card.ethereal_added |= ethereal;
                     card.dupe = false;
-                    self.relic_card_entered_combat(&mut card);
+                    self.card_entered_combat(&mut card);
                     self.put_card(card, Pile::Hand);
                 }
             }
@@ -1344,6 +1369,49 @@ impl Combat {
                     }
                 }
             }
+            Effect::FabricateBot { fabricator, aggro } => self.fabricate_bot(fabricator, aggro),
+            Effect::BlockMonsters { id, amount } => {
+                let subs: Vec<Effect> = self
+                    .living_enemies()
+                    .filter(|&j| self.enemies[j].monster.id == id)
+                    .map(|j| Effect::GainBlock {
+                        target: CreatureRef::Enemy(j),
+                        amount: amount as f64,
+                        props: ValueProp::UNPOWERED,
+                        card: None,
+                    })
+                    .collect();
+                self.push_front_all(subs);
+            }
+            Effect::ApplyPowerAllies { source, id, amount } => {
+                let subs: Vec<Effect> = self
+                    .living_enemies()
+                    .filter(|&j| CreatureRef::Enemy(j) != source)
+                    .map(|j| Effect::ApplyPower { target: CreatureRef::Enemy(j), id, amount, applier: Some(source) })
+                    .collect();
+                self.push_front_all(subs);
+            }
+            Effect::SetMaxHp { target, max_hp } => {
+                let c = self.creature_mut(target);
+                c.max_hp = max_hp.max(1);
+                c.hp = c.hp.min(c.max_hp);
+            }
+            Effect::ReviveAt { target, max_hp } => {
+                if let CreatureRef::Enemy(i) = target {
+                    let e = &mut self.enemies[i];
+                    e.creature.max_hp = max_hp;
+                    e.creature.hp = max_hp;
+                    e.reviving = false;
+                }
+            }
+            Effect::UpgradeWithers => {
+                let p = &mut self.player;
+                for pile in [&mut p.hand, &mut p.draw, &mut p.discard, &mut p.exhaust, &mut p.play] {
+                    for c in pile.iter_mut().filter(|c| c.id == CardId::Wither) {
+                        c.extra_damage += 3.0;
+                    }
+                }
+            }
             Effect::Stun { target, next } => {
                 if let CreatureRef::Enemy(i) = target {
                     self.enemies[i].monster.stun(next);
@@ -1403,6 +1471,8 @@ impl Combat {
             Effect::EnemyAct(i) => {
                 // Creature.TakeTurn skips monsters spawned since the last side switch.
                 if self.enemies[i].acts() && !self.enemies[i].monster.spawned_this_turn {
+                    // The Forgotten's Dread reads its own Dexterity.
+                    self.enemies[i].monster.vars.own_dex = self.enemies[i].creature.power_amount(PowerId::Dexterity);
                     let subs = self.enemies[i].monster.perform(CreatureRef::Enemy(i), self.asc);
                     self.push_front_all(subs);
                 }
@@ -1412,7 +1482,11 @@ impl Combat {
             Effect::SideTurnEndEarly(side) => self.side_turn_end_early(side),
             Effect::AfterAttack => {
                 let owed = std::mem::take(&mut self.stats.skittish_pending);
-                let subs = owed
+                // PainfulStabsPower.AfterAttack: the Wounds for the hits that got through.
+                let wounds = std::mem::take(&mut self.stats.wounds_pending);
+                let subs = (0..wounds)
+                    .map(|_| Effect::GenerateCard { id: CardId::Wound, upgraded: false, to: Pile::Discard, free_this_turn: false })
+                    .chain(owed
                     .into_iter()
                     .filter_map(|i| {
                         let amount = self.enemies.get(i)?.creature.power(PowerId::Skittish)?.amount as f64;
@@ -1422,7 +1496,7 @@ impl Combat {
                             props: ValueProp::UNPOWERED,
                             card: None,
                         })
-                    })
+                    }))
                     .collect();
                 self.push_front_all(subs);
             }
@@ -1594,7 +1668,7 @@ impl Combat {
             // Burn and Infection deal damage; Beckon, Bad Luck and Regret
             // take HP through block.
             let hurt = match c.id {
-                CardId::Burn | CardId::Infection | CardId::Decay | CardId::Toxic => {
+                CardId::Burn | CardId::Infection | CardId::Decay | CardId::Toxic | CardId::Wither => {
                     Some((c.vars().damage, ValueProp::UNPOWERED.or(ValueProp::MOVE)))
                 }
                 CardId::Beckon | CardId::BadLuck => Some((c.vars().hp_loss, unblockable)),
@@ -1658,6 +1732,7 @@ impl Combat {
         if side == Side::Player {
             subs.extend(self.relic_before_side_turn_end_early());
             subs.extend(self.relic_before_side_turn_end());
+            self.unbind();
             subs.push(Effect::TurnEndInHand);
         } else {
             subs.push(Effect::FinishEnemyTurn);
@@ -1763,6 +1838,9 @@ impl Combat {
     /// `Hook.BeforeCardPlayed`: Free Attack decrement, Stomp cost reduction.
     fn before_card_played(&mut self, card: &Card) -> Vec<Effect> {
         let mut out = vec![];
+        if card.affliction == Some(Affliction::Bound) && !card.dupe {
+            self.stats.bound_played = true;
+        }
         if card.ty() == CardType::Attack {
             if self.player.creature.power(PowerId::FreeAttack).is_some() {
                 out.push(Effect::DecrementPower { target: CreatureRef::Player, id: PowerId::FreeAttack });
@@ -1825,6 +1903,21 @@ impl Combat {
             // lives, and playing one hands the player that much Tainted.
             if let Some(p) = c.power(PowerId::VitalSpark).filter(|_| card.ty() == CardType::Skill) {
                 out.push(Effect::ApplyPower { target: CreatureRef::Player, id: PowerId::Tainted, amount: p.amount, applier: None });
+            }
+        }
+        // GalvanicPower.AfterCardPlayed: each Galvanic hurts you for a
+        // Galvanized card, by its own amount.
+        if card.affliction == Some(Affliction::Galvanized) {
+            for i in self.living_enemies().collect::<Vec<_>>() {
+                if let Some(amount) = self.enemies[i].creature.power(PowerId::Galvanic).map(|p| p.amount) {
+                    out.push(Effect::Damage {
+                        target: CreatureRef::Player,
+                        amount: amount as f64,
+                        props: ValueProp::UNPOWERED.or(ValueProp::MOVE),
+                        dealer: None,
+                        card: None,
+                    });
+                }
             }
         }
         out
@@ -1943,6 +2036,7 @@ impl Combat {
         }
         self.player.hand.push(card);
         self.stats.last_drawn = Some(uid);
+        self.bind_drawn(uid);
         if strike && self.player.creature.power(PowerId::Hellraiser).is_some() {
             out.push(Effect::AutoPlay { uid, force_exhaust: false });
         }
@@ -2118,6 +2212,7 @@ impl Combat {
         }
         let c = self.creature_mut(target);
         let mut unblocked = (modified - blocked).max(0.0);
+        let through = unblocked > 0.0;
         // SlipperyPower.ModifyHpLostAfterOsty: at most 1 HP per hit.
         if c.power(PowerId::Slippery).is_some() && unblocked >= 1.0 {
             unblocked = 1.0;
@@ -2208,6 +2303,30 @@ impl Combat {
         }
         // Hook.AfterDamageReceived over the target's powers.
         let mut out = vec![];
+        // A monster's powered hit that got through: PaperCutsPower costs max
+        // HP (`CreatureCmd.LoseMaxHp`, a hit for whatever no longer fits,
+        // then the new max), PainfulStabsPower owes Wounds after the attack.
+        if target == CreatureRef::Player && through && props.is_powered() {
+            if let Some(d) = dealer.filter(|d| d.side() == Side::Enemy) {
+                if let Some(cuts) = self.creature(d).power(PowerId::PaperCuts).map(|p| p.amount) {
+                    let new_max = self.player.creature.max_hp - cuts;
+                    let over = self.player.creature.hp - new_max;
+                    if over > 0 {
+                        out.push(Effect::Damage {
+                            target,
+                            amount: over as f64,
+                            props: ValueProp::UNBLOCKABLE.or(ValueProp::UNPOWERED),
+                            dealer: None,
+                            card: None,
+                        });
+                    }
+                    out.push(Effect::SetMaxHp { target, max_hp: new_max });
+                }
+                if let Some(stabs) = self.creature(d).power(PowerId::PainfulStabs).map(|p| p.amount) {
+                    self.stats.wounds_pending += stabs.max(0) as u32;
+                }
+            }
+        }
         if fairy_used {
             // OnUseWrapper ran for the automatic use, so its after hooks fire.
             out.push(Effect::AfterPotionUsed);
@@ -2325,12 +2444,167 @@ impl Combat {
         if !left.is_empty() && (all(PowerId::BackAttackLeft) || all(PowerId::BackAttackRight)) {
             self.face_crab(CreatureRef::Enemy(left[0]));
         }
+        out.extend(self.glory_after_death(i));
         self.player
             .creature
             .powers
             .retain(|p| !(matches!(p.id, PowerId::Constrict | PowerId::Shrink) && p.applier == Some(me)));
         out.extend(self.relic_after_enemy_death());
         out
+    }
+
+    /// The act 3 `AfterDeath` hooks, run while the dead monster still holds
+    /// its powers (`CreatureCmd.Kill` strips them afterwards).
+    fn glory_after_death(&mut self, i: usize) -> Vec<Effect> {
+        let me = CreatureRef::Enemy(i);
+        let mut out = vec![];
+        let dead = self.enemies[i].creature.clone();
+        // PossessStrength/SpeedPower.AfterDeath: what it stole comes back.
+        for (possess, stat) in [(PowerId::PossessStrength, PowerId::Strength), (PowerId::PossessSpeed, PowerId::Dexterity)] {
+            if let Some(stolen) = dead.power(possess).map(|p| p.data).filter(|&n| n != 0) {
+                out.push(Effect::ApplyPower { target: CreatureRef::Player, id: stat, amount: -stolen, applier: None });
+            }
+        }
+        // HexPower / DampenPower go when their caster dies, taking the
+        // Hexed afflictions and the downgrades with them.
+        let owned = |c: &Combat, id: PowerId| c.player.creature.power(id).is_some_and(|p| p.applier == Some(me));
+        if owned(self, PowerId::Hex) {
+            self.player.creature.powers.retain(|p| p.id != PowerId::Hex);
+            self.for_each_card(|c| {
+                if c.affliction == Some(Affliction::Hexed) {
+                    c.affliction = None;
+                }
+            });
+        }
+        if owned(self, PowerId::Dampen) {
+            self.player.creature.powers.retain(|p| p.id != PowerId::Dampen);
+            self.for_each_card(|c| {
+                if std::mem::take(&mut c.dampened) {
+                    c.upgraded = true;
+                }
+            });
+        }
+        // StockPower.AfterDeath: a fresh Axebot takes its slot, one stock down.
+        if let Some(stock) = dead.power(PowerId::Stock).map(|p| p.amount).filter(|&n| n > 0) {
+            let slot = self.enemies[i].slot;
+            self.spawn(MonsterId::Axebot, Flags { stock: Some((stock - 1) as u8), slot, ..Default::default() });
+        }
+        // AdaptablePower.AfterDeath: the Test Subject stays in the fight and
+        // respawns on its next turn, keeping only what outlives a death.
+        if dead.power(PowerId::Adaptable).is_some() {
+            let e = &mut self.enemies[i];
+            e.reviving = true;
+            e.creature.powers.retain(|p| matches!(p.id, PowerId::Adaptable | PowerId::PainfulStabs));
+            e.monster.force_to("RESPAWN_MOVE");
+        }
+        // Queen.AfterDeath: with the Amalgam gone she stops feeding it and,
+        // if she was about to, enrages instead.
+        if self.enemies[i].monster.id == MonsterId::TorchHeadAmalgam {
+            for q in self.living_enemies().collect::<Vec<_>>() {
+                let queen = &mut self.enemies[q].monster;
+                if queen.id == MonsterId::Queen {
+                    queen.vars.amalgam_died = true;
+                    if queen.next_move_name() == Some("BURN_BRIGHT_FOR_ME_MOVE") {
+                        queen.force_to("ENRAGE_MOVE");
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// `Fabricator.SpawnBot`: a bot from the pool other than the last one it
+    /// made, as its Minion, in the next free slot.
+    fn fabricate_bot(&mut self, fabricator: CreatureRef, aggro: bool) {
+        let CreatureRef::Enemy(f) = fabricator else { return };
+        let pool: &[MonsterId] =
+            if aggro { &[MonsterId::Zapbot, MonsterId::Stabbot] } else { &[MonsterId::Guardbot, MonsterId::Noisebot] };
+        let last = self.enemies[f].monster.vars.last_spawned;
+        let options: Vec<MonsterId> = pool.iter().copied().filter(|&m| Some(m) != last).collect();
+        let Some(&id) = self.rngs.monster_ai.pick(&options) else { return };
+        self.enemies[f].monster.vars.last_spawned = Some(id);
+        if self.free_slots() == 0 {
+            return;
+        }
+        self.spawn(id, Flags::default());
+        let bot = self.enemies.len() - 1;
+        let mut minion = Power::new(PowerId::Minion, 1);
+        minion.applier = Some(fabricator);
+        self.enemies[bot].creature.powers.push(minion);
+    }
+
+    /// Every card the player has in combat, mutably.
+    fn for_each_card(&mut self, mut f: impl FnMut(&mut Card)) {
+        let p = &mut self.player;
+        for pile in [&mut p.hand, &mut p.draw, &mut p.discard, &mut p.exhaust, &mut p.play] {
+            pile.iter_mut().for_each(&mut f);
+        }
+    }
+
+    /// `GalvanicPower.BeforeCombatStart`: every power card starts Galvanized.
+    fn galvanize_deck(&mut self) {
+        if !self.enemies.iter().any(|e| e.creature.power(PowerId::Galvanic).is_some()) {
+            return;
+        }
+        self.for_each_card(|c| {
+            if c.ty() == CardType::Power && c.affliction.is_none() {
+                c.affliction = Some(Affliction::Galvanized);
+            }
+        });
+    }
+
+    /// `Hook.AfterCardEnteredCombat` for a card made mid-fight: relics, then
+    /// the powers that afflict or match it (Galvanic, Hex, Aeonglass's Withers).
+    fn card_entered_combat(&self, card: &mut Card) {
+        self.relic_card_entered_combat(card);
+        let living = || self.living_enemies().map(|i| &self.enemies[i]);
+        if card.affliction.is_none() {
+            if card.ty() == CardType::Power && living().any(|e| e.creature.power(PowerId::Galvanic).is_some()) {
+                card.affliction = Some(Affliction::Galvanized);
+            } else if self.player.creature.power(PowerId::Hex).is_some() {
+                card.affliction = Some(Affliction::Hexed);
+            }
+        }
+        // Aeonglass.AfterCardGeneratedForCombat: a new Wither is upgraded as
+        // often as the ones already out.
+        if card.id == CardId::Wither {
+            if let Some(a) = living().find(|e| e.monster.id == MonsterId::Aeonglass) {
+                card.extra_damage = 3.0 * a.monster.vars.wither_upgrades as f64;
+            }
+        }
+    }
+
+    /// `ChainsOfBindingPower.AfterCardDrawn`: on your own turn, the first
+    /// `amount` cards drawn each turn are Bound.
+    fn bind_drawn(&mut self, uid: u32) {
+        if self.side != Side::Player {
+            return;
+        }
+        let Some(chains) = self.player.creature.power_mut(PowerId::ChainsOfBinding) else { return };
+        if chains.data >= chains.amount {
+            return;
+        }
+        let Some(card) = self.player.hand.iter_mut().find(|c| c.uid == uid) else { return };
+        if card.affliction.is_some() || card.smogged {
+            return;
+        }
+        card.affliction = Some(Affliction::Bound);
+        if let Some(chains) = self.player.creature.power_mut(PowerId::ChainsOfBinding) {
+            chains.data += 1;
+        }
+    }
+
+    /// `ChainsOfBindingPower.BeforeSideTurnEnd`: the turn's Bound cards are
+    /// set free and the count starts over.
+    fn unbind(&mut self) {
+        let Some(chains) = self.player.creature.power_mut(PowerId::ChainsOfBinding) else { return };
+        chains.data = 0;
+        self.stats.bound_played = false;
+        self.for_each_card(|c| {
+            if c.affliction == Some(Affliction::Bound) {
+                c.affliction = None;
+            }
+        });
     }
 
     /// `CreatureCmd.GainBlock`. Returns `AfterBlockGained` hook effects.
@@ -2398,6 +2672,35 @@ impl Combat {
         if matches!(id, PowerId::Inferno | PowerId::CrimsonMantle) {
             if let Some(p) = self.creature_mut(target).powers.iter_mut().find(|p| p.id == id) {
                 p.data += 1;
+            }
+        }
+        // HexPower / DampenPower.AfterApplied, on a fresh instance.
+        if existing.is_none() && target == CreatureRef::Player {
+            match id {
+                PowerId::Hex => self.for_each_card(|c| {
+                    if c.affliction.is_none() {
+                        c.affliction = Some(Affliction::Hexed);
+                    }
+                }),
+                PowerId::Dampen => self.for_each_card(|c| {
+                    if c.upgraded {
+                        c.upgraded = false;
+                        c.dampened = true;
+                    }
+                }),
+                _ => {}
+            }
+        }
+        // PossessStrength/SpeedPower.AfterPowerAmountChanged: keep count of
+        // what the owner has taken from the player.
+        if let (CreatureRef::Player, Some(thief @ CreatureRef::Enemy(_))) = (target, applier) {
+            let possess = match id {
+                PowerId::Strength => Some(PowerId::PossessStrength),
+                PowerId::Dexterity => Some(PowerId::PossessSpeed),
+                _ => None,
+            };
+            if let Some(p) = possess.filter(|_| amount < 0).and_then(|pid| self.creature_mut(thief).power_mut(pid)) {
+                p.data += amount;
             }
         }
         // Hook.AfterPowerAmountChanged: Vicious watches Vulnerable the player applied.

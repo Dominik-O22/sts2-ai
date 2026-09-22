@@ -30,7 +30,8 @@ Change one here before changing the code that depends on it.
   by then. Acts 2 and 3 are added later as data.
 - Act 1 is two acts, not one. `ActModel.GetRandomList` rolls one act per index and both
   Overgrowth and Underdocks sit at index 0, so a run gets either. Both are in scope for the
-  first slice; Hive and Glory (indices 1 and 2) are not.
+  first slice. Hive (index 1) and Glory (index 2) are ported as combats; training still
+  draws only act 1 fights, since the generator rolls act 1 run states.
 - Card enchantments live on the card. Relics and events attach them in the deck, so the sim
   never creates one: it reads the `ench` field the recorder logs per card, or the generator
   rolls one the card can take. Their value hooks run ahead of every power and relic, which

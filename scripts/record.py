@@ -135,6 +135,16 @@ ADVICE = {
     "KAISER_CRAB_BOSS": "Target one half, then the other, so Surrounded turns; kill one half to see Crab Rage.",
     "KNOWLEDGE_DEMON_BOSS": "Survive all three Curses of Knowledge, taking a different curse each time.",
     "THE_INSATIABLE_BOSS": "Play Frantic Escape to push the Sandpit back, and let it run down a turn or two.",
+    "AXEBOTS_NORMAL": "Kill it twice: each death sends in a fresh Axebot on Boot Up. The third one stays dead.",
+    "FABRICATOR_NORMAL": "Leave the bots alive so the board fills up and it switches to Disintegrate.",
+    "FROG_KNIGHT_NORMAL": "Get it below half HP so its one Beetle Charge shows.",
+    "GLOBE_HEAD_NORMAL": "Carry a power card and play it: Galvanized cards hurt you when played.",
+    "THE_LOST_AND_FORGOTTEN_NORMAL": "Let both steal once, then kill one while the other lives so its stat comes back.",
+    "TURRET_OPERATOR_WEAK": "Kill the turret first so the Living Shield switches to Smash.",
+    "KNIGHTS_ELITE": "Carry an upgraded card for Dampen. Kill the Spectral Knight to lift Hex, the Magi Knight to lift Dampen.",
+    "AEONGLASS_BOSS": "Hold Withers through two Increasing Intensity turns, and play six cards in a turn for Withering Presence.",
+    "QUEEN_BOSS": "Play a Bound card, then kill the Amalgam while the Queen shows Burn Bright for Me.",
+    "TEST_SUBJECT_BOSS": "Kill it three times: it respawns with Painful Stabs, then with Nemesis.",
 }
 
 

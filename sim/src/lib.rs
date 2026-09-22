@@ -699,6 +699,47 @@ mod tests {
         assert!(!c.enemies[0].reviving);
     }
 
+    /// Put a Strike in hand and play it at enemy 0.
+    fn strike_first_enemy(c: &mut Combat) {
+        if let Some(j) = c.player.draw.iter().position(|k| k.id == ids::CardId::StrikeIronclad) {
+            let card = c.player.draw.remove(j);
+            c.player.hand.insert(0, card);
+        }
+        let i = c.player.hand.iter().position(|k| k.id == ids::CardId::StrikeIronclad).unwrap();
+        c.step(Action::PlayCard { hand_idx: i, target: Some(0) });
+    }
+
+    /// Test Subject: a kill puts it into Respawn instead of ending the fight,
+    /// and its next turn brings it back at its second form's max HP.
+    #[test]
+    fn test_subject_respawns_instead_of_dying() {
+        let mut c = fight(&[one(MonsterId::TestSubject)], 1);
+        c.enemies[0].creature.hp = 1;
+        strike_first_enemy(&mut c);
+        assert!(!c.is_over(), "Adaptable keeps the fight going");
+        assert!(c.enemies[0].reviving);
+        assert_eq!(c.enemies[0].monster.next_move_name(), Some("RESPAWN_MOVE"));
+        c.step(Action::EndTurn);
+        let second = Ascension(10).pick(types::AscensionLevel::ToughEnemies, 212, 200);
+        assert_eq!((c.enemies[0].creature.hp, c.enemies[0].creature.max_hp), (second, second));
+        assert!(c.enemies[0].creature.power(PowerId::PainfulStabs).is_some());
+        assert!(c.enemies[0].creature.power(PowerId::Enrage).is_none(), "death strips what does not outlive it");
+    }
+
+    /// Axebot: its Stock sends a fresh one into the same slot, one stock
+    /// down, opening on Boot Up.
+    #[test]
+    fn axebot_respawns_from_stock() {
+        let mut c = fight(&[one(MonsterId::Axebot)], 1);
+        c.enemies[0].creature.hp = 1;
+        strike_first_enemy(&mut c);
+        assert!(!c.is_over());
+        let fresh = &c.enemies[1];
+        assert_eq!((fresh.monster.id, fresh.slot), (MonsterId::Axebot, c.enemies[0].slot));
+        assert_eq!(fresh.creature.power_amount(PowerId::Stock), 1);
+        assert_eq!(fresh.monster.next_move_name(), Some("BOOT_UP_MOVE"));
+    }
+
     /// Pael's Eye: a turn with nothing played burns the hand and comes round
     /// again before the enemy moves, once a combat.
     #[test]

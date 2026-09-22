@@ -57,6 +57,9 @@ pub fn is_debuff(id: PowerId) -> bool {
             | PowerId::MindRot
             | PowerId::Sloth
             | PowerId::WasteAway
+            | PowerId::Hex
+            | PowerId::Dampen
+            | PowerId::ChainsOfBinding
     )
 }
 
@@ -150,6 +153,8 @@ impl Power {
             PowerId::DiamondDiadem if target == owner => 0.5,
             // FlutterPower.cs: DamageDecrease 50.
             PowerId::Flutter if target == owner => 0.5,
+            // SoarPower.cs: DamageDecrease 50.
+            PowerId::Soar if target == owner => 0.5,
             _ => 1.0,
         }
     }
@@ -290,6 +295,11 @@ impl Power {
 
     /// `AfterSideTurnStart`. `turn` is the player's turn number.
     pub fn after_side_turn_start(&self, owner: CreatureRef, side: Side, turn: u32, round: u32) -> Vec<Effect> {
+        // RampartPower.cs: the Living Shield blocks for its turret as your
+        // turn starts.
+        if self.id == PowerId::Rampart && side == Side::Player {
+            return vec![Effect::BlockMonsters { id: crate::ids::MonsterId::TurretOperator, amount: self.amount }];
+        }
         if owner.side() != side {
             return vec![];
         }
@@ -528,6 +538,23 @@ impl Power {
                 self.data = 0;
                 vec![]
             }
+            // HighVoltagePower.cs
+            PowerId::HighVoltage if own_side => vec![Effect::ApplyPower {
+                target: owner,
+                id: PowerId::Strength,
+                amount: self.amount,
+                applier: Some(owner),
+            }],
+            // NemesisPower.cs: Intangible on every other turn end; `data`
+            // is `_shouldApplyIntangible`.
+            PowerId::Nemesis if own_side => {
+                self.data ^= 1;
+                if self.data == 1 {
+                    vec![Effect::ApplyPower { target: owner, id: PowerId::Intangible, amount: 1, applier: Some(owner) }]
+                } else {
+                    vec![Effect::RemovePower { target: owner, id: PowerId::Intangible }]
+                }
+            }
             _ => vec![],
         }
     }
@@ -574,6 +601,23 @@ impl Power {
         if self.id == PowerId::Slow {
             self.data += 1;
             return vec![];
+        }
+        // EnragePower.cs: Strength for every Skill you play.
+        if self.id == PowerId::Enrage {
+            if ty != CardType::Skill {
+                return vec![];
+            }
+            return vec![Effect::ApplyPower { target: owner, id: PowerId::Strength, amount: self.amount, applier: Some(owner) }];
+        }
+        // WitheringPresencePower.cs: every `amount`th card you play (the
+        // CardsLeft count) puts a Wither in your hand.
+        if self.id == PowerId::WitheringPresence {
+            self.data += 1;
+            if self.data < self.amount {
+                return vec![];
+            }
+            self.data = 0;
+            return vec![Effect::GenerateCard { id: crate::ids::CardId::Wither, upgraded: false, to: Pile::Hand, free_this_turn: false }];
         }
         if owner != CreatureRef::Player {
             return vec![];

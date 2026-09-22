@@ -217,6 +217,21 @@ pub enum Effect {
 
     /// `CreatureCmd.Add`: a monster joins the enemy side mid-combat.
     SpawnMonster { id: MonsterId, flags: Flags },
+    /// `Fabricator.SpawnBot`: a random defense or aggro bot, never the one
+    /// it made last, joining as its Minion.
+    FabricateBot { fabricator: CreatureRef, aggro: bool },
+    /// Block on every living monster of a kind (Guardbot shields the
+    /// Fabricator, Rampart the Turret Operator).
+    BlockMonsters { id: MonsterId, amount: i32 },
+    /// A power on every other living enemy (Queen's Burn Bright for Me).
+    ApplyPowerAllies { source: CreatureRef, id: PowerId, amount: i32 },
+    /// `CreatureCmd.SetMaxHp`, current HP held under it. Paper Cuts' max HP
+    /// loss is this, after a hit for whatever HP no longer fits.
+    SetMaxHp { target: CreatureRef, max_hp: i32 },
+    /// `TestSubject.Revive`: back at a new max HP, healed to it.
+    ReviveAt { target: CreatureRef, max_hp: i32 },
+    /// `Wither.FakeUpgrade` on every Wither in combat (Aeonglass).
+    UpgradeWithers,
     /// `CreatureCmd.Stun`: replace the next move with a STUNNED move.
     Stun { target: CreatureRef, next: Option<&'static str> },
     /// Plow: strip every Strength-type power from the target.
