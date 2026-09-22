@@ -77,3 +77,40 @@ Useful commands: `fight <ENCOUNTER>`, `card <CARD> [Hand|Deck|Draw|Discard]`,
 `upgrade <hand-index>`, `win`, `unlock all`. Ids are the class names in
 screaming snake case. Encounter ids match `sim/src/encounter.rs`.
 Ascension is fixed at run start, so start the run at the level you want.
+
+## Advisor
+
+The same harness, one record at a time, in front of a trained policy:
+
+```
+uv run python -m sts2ai.advise runs/<run>/latest.pt
+uv run python -m sts2ai.advise runs/<run>/latest.pt --replay FILE.jsonl --delay 0.2
+```
+
+It follows the newest file in the recordings folder, picking up a new one
+when a new combat starts, and prints the policy's pick with two
+alternatives at every decision point:
+
+```
+turn 1 | 3 energy | HP 80/80 (10 block) | Nibbit 46/46 Butt
+  -> Flame Barrier                          86.7%
+     Pyre                                    6.6%
+     Drum Of Battle                          2.4%
+```
+
+You play the moves yourself. Nothing is sent back to the game.
+
+`sim::replay::Replayer` holds the state: `feed` takes one record,
+`flush` releases a snapshot it is holding, and `at_decision` says whether
+the game is waiting on the player. The holding matters because a snapshot
+is only known to be a real decision point once the next record arrives, or
+once the recorder goes quiet, which is what `flush` means. A snapshot the
+sim cannot settle stays held, so a mid-resolution poll never diverges; the
+cost is that a decision point needing a reseed gets no advice until the
+next record lands. A card choice open in the sim (Armaments, an exhaust
+pick) is a decision point too, and the next snapshot settles which card the
+game actually applied.
+
+`--replay` feeds an existing recording as if it were being written, which
+is how the advisor is tested. Divergences print and the advisor keeps
+going.

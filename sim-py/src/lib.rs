@@ -1,15 +1,18 @@
 //! Python bindings for the training environment (DESIGN.md, Training).
-//! One class, `VecEnv`, plus the layout constants the model needs. Buffers
+//! Two classes: `VecEnv` for training, `Advisor` for following a real
+//! combat from the recorder's log. Plus the layout constants the model needs. Buffers
 //! are numpy arrays the caller allocates once; `observe` and `step` fill
 //! them in place with the GIL released.
 
 use numpy::{PyReadonlyArray1, PyReadwriteArray1, PyReadwriteArray2};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
+use serde_json::Value;
 use sim::encode::*;
 use sim::env::{EnvConfig, VecEnv as Inner};
 use sim::gen::{holdout, load_recordings, BOSS_FLOOR};
 use sim::ids::{ALL_CARDS, ALL_MONSTERS};
+use sim::replay::{Ids, Replayer, Step};
 use sim::types::Ascension;
 
 /// A batch of combats. See `sim::env::VecEnv`.
@@ -115,6 +118,119 @@ impl VecEnv {
     }
 }
 
+/// Live view of one real combat: recorder lines in, the sim's state and
+/// plain-words actions out (`sim::replay::Replayer`).
+#[pyclass]
+struct Advisor {
+    ids: Ids,
+    seed: u64,
+    start: Option<Value>,
+    inner: Option<Replayer>,
+}
+
+/// `Step` as the status string the advisor prints.
+fn status(step: Result<Step, String>) -> String {
+    match step {
+        Ok(Step::Ok) => "ok".into(),
+        Ok(Step::Decision) => "decision".into(),
+        Ok(Step::Ended) => "ended".into(),
+        Ok(Step::Diverged(e)) | Err(e) => format!("diverged: {e}"),
+    }
+}
+
+#[pymethods]
+impl Advisor {
+    #[new]
+    #[pyo3(signature = (seed=0))]
+    fn new(seed: u64) -> Self {
+        Self { ids: Ids::new(), seed, start: None, inner: None }
+    }
+
+    /// Feed one line of the recording. Returns "ok", "decision", "ended",
+    /// "diverged: <why>", or "waiting" before the combat has started.
+    /// A `start` record begins a new combat and drops the old one.
+    fn feed_line(&mut self, line: &str) -> PyResult<String> {
+        let line = line.trim();
+        if line.is_empty() {
+            return Ok("ok".into());
+        }
+        let rec: Value = serde_json::from_str(line)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("bad json: {e}")))?;
+        match rec["t"].as_str().unwrap_or("") {
+            "start" => {
+                self.start = Some(rec);
+                self.inner = None;
+                return Ok("ok".into());
+            }
+            // The first snapshot carries the opening draw order and the
+            // player's HP, so the combat is built from it and the start.
+            "snapshot" if self.inner.is_none() => {
+                let Some(start) = self.start.clone() else { return Ok("waiting".into()) };
+                let r = Replayer::new(&start, &rec, self.ids.clone(), self.seed)
+                    .map_err(pyo3::exceptions::PyValueError::new_err)?;
+                self.inner = Some(r);
+            }
+            _ => {}
+        }
+        let Some(r) = self.inner.as_mut() else { return Ok("waiting".into()) };
+        Ok(status(r.feed(&rec)))
+    }
+
+    /// Release a snapshot the replayer is holding back. Call this when the
+    /// recorder has gone quiet: the game is waiting on the player, so the
+    /// snapshot is a real decision point and not a mid-resolution poll.
+    fn flush(&mut self) -> String {
+        match self.inner.as_mut() {
+            Some(r) => status(r.flush()),
+            None => "waiting".into(),
+        }
+    }
+
+    /// True when the sim is settled at a decision point.
+    fn at_decision(&self) -> bool {
+        self.inner.as_ref().is_some_and(Replayer::at_decision)
+    }
+
+    fn is_over(&self) -> bool {
+        self.inner.as_ref().is_some_and(|r| r.combat().is_over())
+    }
+
+    /// Fill `floats [1, N_FLOATS]`, `ids [1, N_IDS]`, `mask [1, N_ACTIONS]`
+    /// with the current state, the same encoding training used.
+    fn observe(
+        &self,
+        mut floats: PyReadwriteArray2<f32>,
+        mut ids: PyReadwriteArray2<i64>,
+        mut mask: PyReadwriteArray2<bool>,
+    ) -> PyResult<()> {
+        let c = self.combat()?;
+        encode(c, floats.as_slice_mut()?, ids.as_slice_mut()?, mask.as_slice_mut()?);
+        Ok(())
+    }
+
+    /// An action index in plain words, or None if it is not legal now.
+    fn describe(&self, index: usize) -> PyResult<Option<String>> {
+        Ok(describe(self.combat()?, index))
+    }
+
+    /// Turn, energy, HP, and the enemies with their intents.
+    fn summary(&self) -> PyResult<String> {
+        Ok(summary(self.combat()?))
+    }
+
+    /// Decision points matched, actions applied, reseeds needed.
+    fn counts(&self) -> PyResult<(usize, usize, u32)> {
+        let r = self.inner.as_ref().ok_or_else(|| pyo3::exceptions::PyValueError::new_err("no combat yet"))?;
+        Ok((r.report().snapshots, r.report().actions, r.report().reseeds))
+    }
+}
+
+impl Advisor {
+    fn combat(&self) -> PyResult<&sim::combat::Combat> {
+        self.inner.as_ref().map(Replayer::combat).ok_or_else(|| pyo3::exceptions::PyValueError::new_err("no combat yet"))
+    }
+}
+
 /// Offsets into the float, id, and action vectors, by name.
 #[pyfunction]
 fn layout(py: Python<'_>) -> PyResult<Bound<'_, PyDict>> {
@@ -167,6 +283,7 @@ fn monster_names() -> Vec<String> {
 #[pymodule]
 fn _sim(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<VecEnv>()?;
+    m.add_class::<Advisor>()?;
     m.add_function(wrap_pyfunction!(layout, m)?)?;
     m.add_function(wrap_pyfunction!(card_names, m)?)?;
     m.add_function(wrap_pyfunction!(monster_names, m)?)?;
