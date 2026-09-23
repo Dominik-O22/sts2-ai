@@ -318,21 +318,27 @@ impl Forks {
         self.inner.len()
     }
 
-    /// Encode forks `rows` into the first `len(rows)` rows of the buffers.
-    fn observe_rows(
+    /// Encode forks `rows`, one row per distinct observation, packed at
+    /// the front of the buffers; `inverse[k]` is fork `rows[k]`'s row.
+    /// Returns the number of rows (`sim::env::Forks::observe_unique`).
+    fn observe_unique(
         &self,
         py: Python<'_>,
         rows: Vec<usize>,
         mut floats: PyReadwriteArray2<f32>,
         mut ids: PyReadwriteArray2<i64>,
         mut mask: PyReadwriteArray2<bool>,
-    ) -> PyResult<()> {
+        mut inverse: PyReadwriteArray1<i64>,
+    ) -> PyResult<usize> {
         let k = rows.len();
-        let f = &mut floats.as_slice_mut()?[..k * N_FLOATS];
-        let i = &mut ids.as_slice_mut()?[..k * N_IDS];
-        let m = &mut mask.as_slice_mut()?[..k * N_ACTIONS];
-        py.detach(|| self.inner.observe_rows(&rows, f, i, m));
-        Ok(())
+        let f = floats.as_slice_mut()?;
+        let i = ids.as_slice_mut()?;
+        let m = mask.as_slice_mut()?;
+        let inv = &mut inverse.as_slice_mut()?[..k];
+        let mut rows_of = vec![0usize; k];
+        let n = py.detach(|| self.inner.observe_unique(&rows, f, i, m, &mut rows_of));
+        inv.iter_mut().zip(rows_of).for_each(|(o, r)| *o = r as i64);
+        Ok(n)
     }
 
     /// Apply `actions [n]` to the forks still in their turn; write the
