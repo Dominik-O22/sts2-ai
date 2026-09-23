@@ -70,8 +70,17 @@ class Layout:
         return cls(**_sim.layout())
 
 
+class RunFight(NamedTuple):
+    """A run-mode fight's place in its run."""
+
+    seed: int
+    act: int  # 0-based
+    # How the run ended with this fight: "won", "died", "stuck: <why>".
+    end: str | None
+
+
 class End(NamedTuple):
-    """One finished fight."""
+    """One finished fight. In run mode `floor` is the run's floor."""
 
     env: int
     won: bool
@@ -83,6 +92,7 @@ class End(NamedTuple):
     encounter: str
     kind: str
     reward: float
+    run: RunFight | None
 
 
 def pinned(shape: tuple[int, ...], dtype: torch.dtype) -> np.ndarray:
@@ -116,7 +126,7 @@ class Envs:
             self.rewards,
             self.dones,
         )
-        return [End(*e) for e in ends]
+        return [End(*e[:-1], RunFight(*e[-1]) if e[-1] else None) for e in ends]
 
     def set_floors(self, lo: int, hi: int) -> None:
         self.sim.set_floors(lo, hi)
@@ -135,6 +145,12 @@ class Envs:
         n = self.sim.use_holdout(seed, per_encounter, acts)
         self.sim.observe(self.floats, self.ids, self.mask)
         return n
+
+    def use_runs(self, seed: int = 0, asc: int = 10) -> None:
+        """Play whole runs, fight after fight, with random run decisions;
+        a run that ends starts a fresh one from the next seed."""
+        self.sim.use_runs(seed, asc)
+        self.sim.observe(self.floats, self.ids, self.mask)
 
     def load_recordings(self, directory: Path = DEFAULT_RECORDINGS) -> int:
         """Cycle through recorded fights instead of generated ones."""

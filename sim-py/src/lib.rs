@@ -27,8 +27,22 @@ struct VecEnv {
     inner: Inner,
 }
 
-/// One finished fight: (env, won, hp_frac, hp_lost, potions_used, steps, floor, encounter, kind, reward).
-type End = (usize, bool, f32, f32, u32, u32, u32, String, String, f32);
+/// One finished fight: (env, won, hp_frac, hp_lost, potions_used, steps, floor, encounter, kind, reward, run).
+type End = (usize, bool, f32, f32, u32, u32, u32, String, String, f32, Option<RunFight>);
+
+/// A run fight's place in its run: (seed index, act, how the run ended
+/// with it: "won", "died", "stuck: <why>", or None).
+type RunFight = (u64, u32, Option<String>);
+
+fn run_fight(r: sim::env::RunFight) -> RunFight {
+    use sim::forward::End;
+    let end = r.end.map(|end| match end {
+        End::Won => "won".into(),
+        End::Died => "died".into(),
+        End::Stuck(why) => format!("stuck: {why}"),
+    });
+    (r.seed, r.act, end)
+}
 
 impl VecEnv {
     fn inner_asc(&self) -> Ascension {
@@ -116,6 +130,14 @@ impl VecEnv {
         Ok(n)
     }
 
+    /// Switch to run mode: every env plays whole runs at `asc`, fight
+    /// after fight, with random run decisions; the envs' k-th runs are seed
+    /// indices `seed + env + k * n` (`sim::env::VecEnv::set_runs`).
+    #[pyo3(signature = (seed=0, asc=10))]
+    fn use_runs(&mut self, py: Python<'_>, seed: u64, asc: u8) {
+        py.detach(|| self.inner.set_runs(Ascension(asc), seed));
+    }
+
     /// Switch to cycling through the recordings in `dir` (the held-out
     /// set). Returns the number loaded and the files that failed to parse.
     fn load_recordings(&mut self, dir: &str) -> PyResult<(usize, Vec<String>)> {
@@ -166,7 +188,10 @@ impl VecEnv {
         let ends = py.detach(|| self.inner.step(a, f, i, m, r, d));
         Ok(ends
             .into_iter()
-            .map(|e| (e.env, e.won, e.hp_frac, e.hp_lost, e.potions_used, e.steps, e.floor, format!("{:?}", e.encounter), format!("{:?}", e.kind), e.reward))
+            .map(|e| {
+                let (encounter, kind) = (format!("{:?}", e.encounter), format!("{:?}", e.kind));
+                (e.env, e.won, e.hp_frac, e.hp_lost, e.potions_used, e.steps, e.floor, encounter, kind, e.reward, e.run.map(run_fight))
+            })
             .collect())
     }
 }
