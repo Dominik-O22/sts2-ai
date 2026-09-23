@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import fields
-from pathlib import Path
+from typing import get_args, get_type_hints
 
 from sts2ai.ppo import Config, train
 
@@ -18,13 +18,15 @@ from sts2ai.ppo import Config, train
 def main() -> None:
     ap = argparse.ArgumentParser()
     defaults = Config()
+    hints = get_type_hints(Config)
     for f in fields(Config):
         default = getattr(defaults, f.name)
         flag = f"--{f.name.replace('_', '-')}"
         if isinstance(default, bool):
             ap.add_argument(flag, action=argparse.BooleanOptionalAction, default=default)
             continue
-        kind = Path if default is None or isinstance(default, Path) else type(default)
+        # The annotation says what an optional field holds (`float | None`).
+        kind = next(t for t in get_args(hints[f.name]) or (hints[f.name],) if t is not type(None))
         ap.add_argument(flag, type=kind, default=default)
     args = ap.parse_args()
     train(Config(**vars(args)))
