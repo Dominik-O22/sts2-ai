@@ -1334,7 +1334,17 @@ impl Replayer {
         if !pid.usable_in_combat() {
             return Applied::Ok;
         }
-        let Some(slot) = self.c.potions.iter().position(|p| *p == Some(pid)) else {
+        // The recorder logs a use once it resolves, but the slot empties as
+        // it starts: a potion drunk as the fight opened is missing from the
+        // start record and the first snapshot, with its effect not yet
+        // landed. It was in the slot that snapshot showed empty. A potion
+        // the sim really lacks shows as a snapshot diff before any use.
+        let held = self.c.potions.iter().position(|p| *p == Some(pid));
+        let Some(slot) = held.or_else(|| {
+            let empty = self.c.potions.iter().position(Option::is_none)?;
+            self.c.potions[empty] = Some(pid);
+            Some(empty)
+        }) else {
             return Applied::Diverged(format!("game used {name}; sim has no such potion"));
         };
         let living: Vec<usize> = self.c.present_enemies().collect();
