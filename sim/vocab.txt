@@ -358,6 +358,7 @@ power Fasten
 power Knockdown
 power Mayhem
 power BattlewornDummyTimeLimit
+power ReptileTrinket
 monster Nibbit
 monster FuzzyWurmCrawler
 monster ShrinkerBeetle

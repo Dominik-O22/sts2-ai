@@ -547,6 +547,8 @@ pub enum PowerId {
     Mayhem,
     /// The enemy turns left before the Battleworn Dummy walks off.
     BattlewornDummyTimeLimit,
+    /// `TemporaryStrengthPower`, positive (Reptile Trinket).
+    ReptileTrinket,
 }
 
 /// `Models/Monsters/<Name>.cs`.
@@ -1033,6 +1035,7 @@ pub const ALL_POWERS: &[PowerId] = &[
     PowerId::Knockdown,
     PowerId::Mayhem,
     PowerId::BattlewornDummyTimeLimit,
+    PowerId::ReptileTrinket,
 ];
 
 pub const ALL_MONSTERS: &[MonsterId] = &[

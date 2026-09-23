@@ -104,7 +104,9 @@ pub fn is_debuff_for_amount(id: PowerId, amount: i32) -> bool {
 /// real power they apply and the sign.
 pub fn temp_power(id: PowerId) -> Option<(PowerId, i32)> {
     match id {
-        PowerId::SetupStrike | PowerId::FlexPotion | PowerId::FeedingFrenzy => Some((PowerId::Strength, 1)),
+        PowerId::SetupStrike | PowerId::FlexPotion | PowerId::FeedingFrenzy | PowerId::ReptileTrinket => {
+            Some((PowerId::Strength, 1))
+        }
         PowerId::Mangle | PowerId::ShacklingPotion | PowerId::DarkShackles => Some((PowerId::Strength, -1)),
         PowerId::SpeedPotion => Some((PowerId::Dexterity, 1)),
         _ => None,
@@ -624,6 +626,7 @@ impl Power {
             | PowerId::SpeedPotion
             | PowerId::FeedingFrenzy
             | PowerId::DarkShackles
+            | PowerId::ReptileTrinket
                 if own_side =>
             {
                 let (real, sign) = temp_power(self.id).unwrap();

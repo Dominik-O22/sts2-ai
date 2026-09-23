@@ -1040,16 +1040,22 @@ impl Combat {
     }
 
     /// `AfterPotionUsed`: Belt Buckle grants its Dexterity once the last
-    /// potion is gone.
+    /// potion is gone, and Reptile Trinket 3 Strength for the turn.
     pub(crate) fn relic_after_potion_used(&mut self) -> Vec<Effect> {
+        use RelicId::*;
         let no_potions = self.potions.iter().all(|p| p.is_none());
-        match self.relic_mut(RelicId::BeltBuckle) {
-            Some(r) if no_potions && !r.used => {
-                r.used = true;
-                vec![self_power(PowerId::Dexterity, 2)]
+        let mut out = vec![];
+        for r in &mut self.relics {
+            match r.id {
+                BeltBuckle if no_potions && !r.used => {
+                    r.used = true;
+                    out.push(self_power(PowerId::Dexterity, 2));
+                }
+                ReptileTrinket => out.push(self_power(PowerId::ReptileTrinket, 3)),
+                _ => {}
             }
-            _ => vec![],
         }
+        out
     }
 
     /// `AfterPotionProcured`: Belt Buckle takes its Dexterity back while a

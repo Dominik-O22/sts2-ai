@@ -334,8 +334,10 @@ RELIC_FIGHTS = [
     relic_job("very_hot_cocoa", ["VERY_HOT_COCOA"], "Spend the four extra energy on turn 1."),
     relic_job("stone_cracker", ["STONE_CRACKER"],
               "Two draw pile cards start the fight upgraded. Go a few turns so both get played."),
-    relic_job("petrified_toad", ["PETRIFIED_TOAD"],
-              "The Toad puts a Potion-Shaped Rock in the belt. Throw it at the clam."),
+    # Potion Belt makes room for the rock next to the per-fight potions.
+    relic_job("potion_relics", ["PETRIFIED_TOAD", "REPTILE_TRINKET", "POTION_BELT"],
+              "The Toad puts a Potion-Shaped Rock in the belt. Throw it on turn 1, then attack: "
+              "Reptile Trinket gives 3 Strength until the turn ends."),
     relic_job("bellows", ["BELLOWS"], "Nothing to steer: the opening hand starts upgraded."),
     relic_job("gambling_chip", ["GAMBLING_CHIP"],
               "Turn 1 asks which cards to discard: pick two, and as many are drawn in their place.",
