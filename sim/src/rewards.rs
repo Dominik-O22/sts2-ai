@@ -436,7 +436,8 @@ impl RunState {
         }
 
         // `Hook.ModifyRewards`, over the relics in the order they came.
-        for relic in self.relics.clone() {
+        let held: Vec<String> = self.relics.iter().map(|r| r.id.clone()).collect();
+        for relic in held {
             match relic.as_str() {
                 "PRAYER_WHEEL" if room == RoomType::Monster => {
                     let cards = self.card_reward(&CardOptions::for_room(RoomType::Monster));
@@ -444,8 +445,8 @@ impl RunState {
                 }
                 // A fixed amount, which draws nothing.
                 "AMETHYST_AUBERGINE" => rewards.gold.push(15),
-                "LAVA_ROCK" if room == RoomType::Boss && self.act == 0 && !self.lava_rock_used => {
-                    self.lava_rock_used = true;
+                "LAVA_ROCK" if room == RoomType::Boss && self.act == 0 && !self.relic_mut("LAVA_ROCK").unwrap().flag => {
+                    self.relic_mut("LAVA_ROCK").unwrap().flag = true;
                     rewards.relics.push(self.relic_reward());
                     rewards.relics.push(self.relic_reward());
                 }
@@ -471,7 +472,8 @@ impl RunState {
         self.card_odds = odds;
         // Lasting Candy, on every second fight it has seen: a power card
         // besides, from a pool of powers with the reward's odds but no source.
-        if options.encounter && self.lasting_candy_fights.is_some_and(|n| n > 0 && n % 2 == 0) {
+        let candy = self.relics.iter().find(|r| r.id == "LASTING_CANDY").map(|r| r.counter);
+        if options.encounter && candy.is_some_and(|n| n > 0 && n % 2 == 0) {
             let not_offered = |c: &&PoolCard| c.kind == CardType::Power && !cards.iter().any(|o| o.id == c.id);
             let mut powers: Vec<&'static PoolCard> = options.cards.iter().copied().filter(not_offered).collect();
             if powers.is_empty() {
@@ -499,9 +501,9 @@ impl RunState {
 
     /// Silver Crucible on a card reward (`CardCreationFlags.IsCardReward`).
     pub(crate) fn upgrade_by_crucible(&mut self, cards: &mut [Offer]) {
-        if self.has_relic("SILVER_CRUCIBLE") && self.crucible_used < 3 {
+        if let Some(crucible) = self.relic_mut("SILVER_CRUCIBLE").filter(|r| r.counter < 3) {
+            crucible.counter += 1;
             cards.iter_mut().for_each(|o| o.upgraded = true);
-            self.crucible_used += 1;
         }
     }
 

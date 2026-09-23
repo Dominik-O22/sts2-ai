@@ -13,10 +13,10 @@
 
 use crate::encounter::{Act, Encounter};
 use crate::game_rng::{GameRng, RunRngs, RunStream};
-use crate::map::PointType;
+use crate::map::{PointId, PointType};
 use crate::plan::{RunPlan, Unlocks};
 use crate::rewards::{CardOdds, PotionOdds};
-use crate::types::Ascension;
+use crate::types::{Ascension, AscensionLevel};
 
 /// `Rooms/RoomType.cs`, the rooms a map point can become, in the game's
 /// order.
@@ -119,7 +119,14 @@ pub struct Visited {
 pub struct DeckCard {
     pub id: String,
     pub upgraded: bool,
-    pub enchantment: Option<String>,
+    pub enchantment: Option<Enchant>,
+}
+
+/// A card's enchantment (`EnchantmentModel`): its game id and `Amount`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Enchant {
+    pub id: String,
+    pub amount: i32,
 }
 
 impl DeckCard {
@@ -130,11 +137,31 @@ impl DeckCard {
     /// `CardModel.IsRemovable`: not Eternal, which Tezcatara's Ember makes
     /// a card.
     pub fn removable(&self) -> bool {
-        self.enchantment.as_deref() != Some("TEZCATARAS_EMBER")
+        self.enchantment.as_ref().is_none_or(|e| e.id != "TEZCATARAS_EMBER")
     }
 
     fn basic(&self) -> bool {
         matches!(self.id.as_str(), "STRIKE_IRONCLAD" | "DEFEND_IRONCLAD" | "BASH")
+    }
+}
+
+/// A relic held, by game id, with what it keeps from room to room: the
+/// combat sim's persistent `counter` and `flag` (`relic::Relic`, in the
+/// sim's meaning), and the run layer's own (Lasting Candy's `CombatsSeen`
+/// and Silver Crucible's `TimesUsed` as the counter, Lava Rock's
+/// `HasTriggered` as the flag).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RunRelic {
+    pub id: String,
+    pub counter: i32,
+    pub flag: bool,
+}
+
+impl RunRelic {
+    /// A fresh one, with the charges the sim's comes with.
+    pub fn new(id: &str) -> Self {
+        let counter = crate::pools::sim_relic(id).map_or(0, |r| crate::relic::Relic::new(r).counter);
+        RunRelic { id: id.to_string(), counter, flag: false }
     }
 }
 
@@ -161,15 +188,15 @@ pub struct RunState {
     pub hp: i32,
     pub max_hp: i32,
     pub deck: Vec<DeckCard>,
-    /// Game ids, in the order they came.
-    pub relics: Vec<String>,
-    pub potions: Vec<String>,
-    /// Lasting Candy's `CombatsSeen`, once it is held.
-    pub lasting_candy_fights: Option<u32>,
-    /// Lava Rock's `HasTriggered`.
-    pub lava_rock_used: bool,
-    /// Silver Crucible's `TimesUsed`.
-    pub crucible_used: u32,
+    /// In the order they came.
+    pub relics: Vec<RunRelic>,
+    /// `Player.PotionSlots`: one entry per slot, game ids.
+    pub potions: Vec<Option<String>>,
+    /// The map point the player stands on, once the act's first is entered.
+    pub point: Option<PointId>,
+    /// The room that point became, which the next point's shop blacklist
+    /// reads.
+    pub room: Option<Room>,
 }
 
 impl RunState {
@@ -193,16 +220,16 @@ impl RunState {
             hp: 80,
             max_hp: 80,
             deck: Self::starting_deck(ascension),
-            relics: vec!["BURNING_BLOOD".into()],
-            potions: Vec::new(),
-            lasting_candy_fights: None,
-            lava_rock_used: false,
-            crucible_used: 0,
+            relics: vec![RunRelic::new("BURNING_BLOOD")],
+            potions: vec![None; if ascension.has(AscensionLevel::TightBelt) { 2 } else { 3 }],
+            point: None,
+            room: None,
         }
     }
 
     /// `Ironclad.StartingDeck`, and Ascender's Bane from A5
-    /// (`AscensionManager.ApplyEffectsTo`).
+    /// (`AscensionManager.ApplyEffectsTo`, which also takes a potion slot
+    /// at Tight Belt).
     fn starting_deck(ascension: Ascension) -> Vec<DeckCard> {
         let mut deck: Vec<DeckCard> = ["STRIKE_IRONCLAD"; 5]
             .into_iter()
@@ -210,27 +237,33 @@ impl RunState {
             .chain(["BASH"])
             .map(DeckCard::new)
             .collect();
-        if ascension.has(crate::types::AscensionLevel::AscendersBane) {
+        if ascension.has(AscensionLevel::AscendersBane) {
             deck.push(DeckCard::new("ASCENDERS_BANE"));
         }
         deck
     }
 
     pub fn has_relic(&self, id: &str) -> bool {
-        self.relics.iter().any(|r| r == id)
+        self.relics.iter().any(|r| r.id == id)
+    }
+
+    pub fn relic_mut(&mut self, id: &str) -> Option<&mut RunRelic> {
+        self.relics.iter_mut().find(|r| r.id == id)
+    }
+
+    /// The potions held, slot order.
+    pub fn held_potions(&self) -> impl Iterator<Item = &str> {
+        self.potions.iter().flatten().map(String::as_str)
     }
 
     /// `RelicCmd.Obtain`'s bookkeeping: the relic leaves both bags. What
-    /// it does on pickup is the caller's.
+    /// it does on pickup is `obtain`'s.
     pub fn obtain_relic(&mut self, id: &str) {
         if let Some(relic) = crate::plan::BagRelic::from_game_id(id) {
             self.plan.player_bag.remove(relic);
             self.plan.shared_bag.remove(relic);
         }
-        if id == "LASTING_CANDY" {
-            self.lasting_candy_fights = Some(0);
-        }
-        self.relics.push(id.to_string());
+        self.relics.push(RunRelic::new(id));
     }
 
     /// `RunManager.SetActInternal`: a new act starts its unknown odds over.
@@ -322,8 +355,8 @@ impl RunState {
         use crate::types::RelicRarity::{Common, Rare, Shop, Uncommon};
         self.relics
             .iter()
-            .filter(|id| !UPON_PICKUP.contains(&id.as_str()))
-            .filter_map(|id| crate::plan::BagRelic::from_game_id(id))
+            .filter(|r| !UPON_PICKUP.contains(&r.id.as_str()))
+            .filter_map(|r| crate::plan::BagRelic::from_game_id(&r.id))
             .filter(|r| matches!(r.rarity(), Common | Uncommon | Rare | Shop))
             .count()
     }
@@ -334,7 +367,7 @@ impl RunState {
     /// Ironclad deck always holds a card that can.
     pub fn event_allowed(&self, event: &str) -> bool {
         let (act, gold, hp, floor) = (self.act, self.gold, self.hp, self.floor);
-        let potions = self.potions.len();
+        let potions = self.held_potions().count();
         let removable = || self.deck.iter().filter(|c| c.removable());
         let basics = |id: &str| removable().filter(|c| c.id == id).count();
         match event {
@@ -357,7 +390,7 @@ impl RunState {
             "StoneOfAllTime" => act == 1 && potions > 0,
             "UnrestSite" => hp as f64 <= self.max_hp as f64 * 0.7,
             "ZenWeaver" => gold >= 125,
-            "FakeMerchant" => act >= 1 && (gold >= 100 || self.potions.iter().any(|p| p == "FOUL_POTION")),
+            "FakeMerchant" => act >= 1 && (gold >= 100 || self.held_potions().any(|p| p == "FOUL_POTION")),
             "MorphicGrove" => gold >= 100 && removable().count() >= 2,
             "TrashHeap" => hp > 5,
             "TeaMaster" => act < 2 && gold >= 150,

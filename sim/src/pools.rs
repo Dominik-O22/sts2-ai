@@ -8,13 +8,14 @@
 //! (`testdata/oracle-pools.txt`); a test holds these tables to it.
 //!
 //! Entries are game ids, so a card or potion the combat sim lacks can still
-//! be offered; `sim_card` and `sim_potion` map to the sim's where it has
-//! one.
+//! be offered; `sim_card`, `sim_potion` and `sim_relic` map to the sim's
+//! where it has one.
 
 use std::fmt::Write;
 
 use crate::ids::{CardId, ALL_CARDS};
 use crate::potion::{PotionId, ALL as ALL_POTIONS};
+use crate::relic::{RelicId, ALL as ALL_RELICS};
 use crate::replay::slug;
 use crate::types::CardType::{self, Attack, Power, Skill};
 
@@ -281,6 +282,11 @@ pub fn sim_card(id: &str) -> Option<CardId> {
 /// The sim's potion for a game id, if it has one.
 pub fn sim_potion(id: &str) -> Option<PotionId> {
     ALL_POTIONS.iter().copied().find(|p| slug(&format!("{p:?}")) == id)
+}
+
+/// The sim's relic for a game id, if it has one.
+pub fn sim_relic(id: &str) -> Option<RelicId> {
+    ALL_RELICS.iter().copied().find(|r| slug(&format!("{r:?}")) == id)
 }
 
 /// The tables as `tools/oracle pools` prints them.

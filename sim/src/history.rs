@@ -23,7 +23,7 @@ use crate::map::{ActMap, PointId, PointType};
 use crate::plan::Unlocks;
 use crate::replay::slug;
 use crate::rewards::{Offer, Offered, UNPORTED_RELICS};
-use crate::run::{DeckCard, Room, RoomType, RunState};
+use crate::run::{DeckCard, Enchant, Room, RoomType, RunState};
 use crate::types::Ascension;
 
 /// Whether the port can walk the run: a standard singleplayer Ironclad run
@@ -240,8 +240,8 @@ fn same_set(mut a: Vec<String>, mut b: Vec<String>) -> bool {
 /// run recorded, then the player's choices. An error says why the stream
 /// can no longer be followed.
 fn follow(state: &mut RunState, room: Room, rooms: &[Value], stats: &Value) -> Result<(), String> {
-    if let Some(id) = state.relics.iter().find(|r| UNPORTED_RELICS.contains(&r.as_str())) {
-        return Err(format!("holds {id}, not ported"));
+    if let Some(relic) = state.relics.iter().find(|r| UNPORTED_RELICS.contains(&r.id.as_str())) {
+        return Err(format!("holds {}, not ported", relic.id));
     }
     if rooms.len() > 1 && !matches!(room, Room::Event(_)) {
         return Err(format!("a second room ({}) in the floor", rooms[1]["model_id"]));
@@ -262,8 +262,8 @@ fn follow(state: &mut RunState, room: Room, rooms: &[Value], stats: &Value) -> R
 
     match room {
         Room::Combat(kind, encounter) => {
-            if let Some(n) = state.lasting_candy_fights.as_mut() {
-                *n += 1;
+            if let Some(candy) = state.relic_mut("LASTING_CANDY") {
+                candy.counter += 1;
             }
             // `GremlinMercNormal.CalculateGoldProportion`: the Fat Gremlin
             // fled with the gold the Merc stole, which the record shows as
@@ -313,8 +313,8 @@ fn follow(state: &mut RunState, room: Room, rooms: &[Value], stats: &Value) -> R
                     Some("elite") => RoomType::Elite,
                     _ => return Err(format!("event {name} led to {}", fight["room_type"])),
                 };
-                if let Some(n) = state.lasting_candy_fights.as_mut() {
-                    *n += 1;
+                if let Some(candy) = state.relic_mut("LASTING_CANDY") {
+                    candy.counter += 1;
                 }
                 let rewards = state.combat_rewards(kind, 1.0);
                 gold = (!rewards.gold.is_empty()).then(|| rewards.gold.iter().sum());
@@ -476,14 +476,15 @@ fn track_deck(state: &mut RunState, stats: &Value) {
     }
     for e in stats["cards_enchanted"].as_array().into_iter().flatten() {
         let card = id(&e["card"]);
-        let enchantment = e["enchantment"].as_str().unwrap().split_once('.').unwrap().1.to_string();
+        let id = e["enchantment"].as_str().unwrap().split_once('.').unwrap().1.to_string();
+        let amount = e["card"]["enchantment"]["amount"].as_i64().unwrap_or(0) as i32;
         if let Some(c) = state.deck.iter_mut().find(|c| c.id == card && c.enchantment.is_none()) {
-            c.enchantment = Some(enchantment);
+            c.enchantment = Some(Enchant { id, amount });
         }
     }
     for relic in stats["relics_removed"].as_array().into_iter().flatten() {
         let relic = relic.as_str().unwrap().split_once('.').unwrap().1;
-        state.relics.retain(|r| r != relic);
+        state.relics.retain(|r| r.id != relic);
     }
     for card in stats["upgraded_cards"].as_array().into_iter().flatten() {
         let card = card.as_str().unwrap().split_once('.').unwrap().1;
@@ -493,19 +494,22 @@ fn track_deck(state: &mut RunState, stats: &Value) {
     }
 }
 
-/// The potions held after a floor: kept from its choices, less the used
-/// and discarded ones.
+/// The potions held after a floor: less the used and discarded ones, then
+/// the ones kept from its choices.
 fn track_potions(state: &mut RunState, stats: &Value) {
-    for (id, picked) in choices(stats, "potion_choices", "choice") {
-        if picked {
-            state.potions.push(id);
-        }
-    }
     for list in ["potion_used", "potion_discarded"] {
         for p in stats[list].as_array().into_iter().flatten() {
             let id = p.as_str().unwrap().split_once('.').unwrap().1;
-            if let Some(i) = state.potions.iter().position(|q| q == id) {
-                state.potions.remove(i);
+            if let Some(slot) = state.potions.iter().position(|q| q.as_deref() == Some(id)) {
+                state.potions[slot] = None;
+            }
+        }
+    }
+    for (id, picked) in choices(stats, "potion_choices", "choice") {
+        if picked {
+            match state.potions.iter().position(Option::is_none) {
+                Some(slot) => state.potions[slot] = Some(id),
+                None => state.potions.push(Some(id)),
             }
         }
     }
