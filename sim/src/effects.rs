@@ -340,7 +340,7 @@ impl RunState {
     }
 
     /// The deck indices a pick of `action` may take, in deck order.
-    fn pickable(&self, action: DeckAction) -> Vec<usize> {
+    pub(crate) fn pickable(&self, action: DeckAction) -> Vec<usize> {
         let ok = |c: &DeckCard| match action {
             DeckAction::Upgrade => c.upgradable(),
             DeckAction::Remove => c.removable(),

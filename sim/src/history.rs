@@ -37,6 +37,7 @@ use crate::replay::slug;
 use crate::rewards::{Offer, UNPORTED_RELICS};
 use crate::rooms::{Chooser, Decision};
 use crate::run::{DeckCard, Enchant, Room, RoomType, RunRelic, RunState};
+use crate::shop::{Item, Ware};
 use crate::types::Ascension;
 
 /// Whether the port can walk the run: a standard singleplayer Ironclad run
@@ -524,6 +525,31 @@ impl Chooser for Recorded {
                 }
             }
             Decision::Ancient(options) => options.iter().position(|o| Some(o) == self.ancient.as_ref()).unwrap_or(options.len()),
+            // What the record bought, relics first, then cards, potions and
+            // the removal: the record does not keep the order, which only a
+            // discount or an egg bought on the way would show.
+            Decision::Shop(wares) => {
+                let bought = |w: &Ware| match &w.item {
+                    Item::Relic(r) => self.relics.contains(r),
+                    Item::Card(o) => self.cards.iter().any(|c| c.id == o.id),
+                    Item::Potion(p) => self.potions.iter().any(|q| q == p),
+                    Item::Removal => !self.removed.is_empty(),
+                };
+                let rank = |w: &Ware| match w.item {
+                    Item::Relic(_) => 0,
+                    Item::Card(_) => 1,
+                    Item::Potion(_) => 2,
+                    Item::Removal => 3,
+                };
+                let Some(i) = (0..wares.len()).filter(|&i| bought(&wares[i])).min_by_key(|&i| rank(&wares[i])) else { return wares.len() };
+                match &wares[i].item {
+                    Item::Relic(r) => drop(Self::take(&mut self.relics, std::slice::from_ref(r), |a, b| a == b)),
+                    Item::Card(o) => drop(Self::take(&mut self.cards, std::slice::from_ref(o), |c, o| c.id == o.id)),
+                    Item::Potion(p) => drop(Self::take(&mut self.potions, std::slice::from_ref(p), |a, b| a == b)),
+                    Item::Removal => {}
+                }
+                i
+            }
             Decision::Deck { action, cards, .. } => {
                 let deck = |i: &usize| &run.deck[*i];
                 match action {
@@ -702,26 +728,13 @@ fn follow(state: &mut RunState, room: Room, rooms: &[Value], stats: &Value) -> W
         }
         Room::Treasure => gold = Some(state.treasure_room(&mut chooser, &mut log)),
         Room::Shop => {
-            let shop = state.shop();
-            log.push(Offered::Cards(shop.cards.iter().chain(&shop.colorless).copied().collect()));
-            log.push(Offered::Potions(shop.potions.iter().map(|p| p.to_string()).collect()));
-            // What was bought, from the record: prices are not ported.
-            let spent = stats["gold_spent"].as_i64().unwrap_or(0) as i32;
-            state.lose_gold(spent);
-            if spent > 0 {
-                if let Some(bank) = state.relic_mut("MAW_BANK") {
-                    bank.flag = true;
-                }
-            }
-            state.settle(vec![Offered::Relics(shop.relics.iter().map(|r| r.game_id()).collect())], &mut chooser, &mut log);
-            for card in std::mem::take(&mut chooser.cards) {
-                state.add_card(DeckCard { enchantment: None, upgraded: false, ..card });
-            }
-            for potion in std::mem::take(&mut chooser.potions) {
-                state.add_potion(&potion);
-            }
-            for card in std::mem::take(&mut chooser.removed) {
-                remove_card(&mut state.deck, &card);
+            state.shop_room(&mut chooser, &mut log);
+            // What the record bought that the port did not sell or the
+            // player could not pay for.
+            let unbought = chooser.relics.drain(..).chain(chooser.cards.drain(..).map(|c| c.id)).chain(chooser.potions.drain(..));
+            let unbought: Vec<String> = unbought.chain(chooser.removed.drain(..).map(|c| format!("removing {}", c.id))).collect();
+            if !unbought.is_empty() {
+                chooser.missing.push(format!("not bought {unbought:?}"));
             }
         }
         Room::RestSite => {

@@ -3,7 +3,8 @@
 //!
 //! `rewardcheck walks N` prints N random walks, one `SEED ASCENSION
 //! STEP...` line each, through all three acts at A0, A3, A6, A7 and A10:
-//! fights, shops and unknown points; `tools/oracle rewards` turns those
+//! fights, shops (with their prices, removals bought and The Courier's
+//! restocks) and unknown points; `tools/oracle rewards` turns those
 //! into what the game offered; `rewardcheck` with no arguments reads that
 //! and compares.
 //!
@@ -40,6 +41,17 @@ fn main() {
                 for _ in 0..rng.next_int_in(8, 17) {
                     let step = *rng.pick(&["M", "M", "M", "M", "M", "E", "E", "S", "?", "?", "?s"]).unwrap();
                     steps.push(if step.starts_with('?') { step.to_string() } else { format!("{step}{act}") });
+                    if step == "S" {
+                        // The shop's prices, a removal bought now and then,
+                        // and a few of The Courier's restocks.
+                        steps.push("$".to_string());
+                        if rng.next_bool() {
+                            steps.push("X".to_string());
+                        }
+                        for _ in 0..rng.next_int(3) {
+                            steps.push(format!("C{}", rng.next_int(13)));
+                        }
+                    }
                 }
                 steps.push(format!("B{act}"));
             }

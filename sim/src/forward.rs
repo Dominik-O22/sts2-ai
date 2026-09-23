@@ -1,12 +1,13 @@
 //! A run played forward from its seed: each act's map walked point by
 //! point, each room entered, fights fought by a `Fights`, the rewards
-//! taken, rest sites used, treasure opened, shops and events passed
-//! through, act after act, to the last boss or a death. Every decision goes
-//! to a `Chooser` (`rooms.rs`), which is where a run policy plugs in.
+//! taken, rest sites used, treasure opened, ancients' relics taken, shops
+//! bought from, events passed through, act after act, to the last boss or
+//! a death. Every decision goes to a `Chooser` (`rooms.rs`), which is where
+//! a run policy plugs in.
 //!
 //! What the port lacks is counted, not an error: events (entered and left
-//! after what laying them out draws), shops (stocked and left), the
-//! ancients' options, and relic pickups that come back `Offered::Unported`.
+//! after what laying them out draws) and relic pickups that come back
+//! `Offered::Unported`.
 //! From the first of them that draws on the Rewards stream the run no
 //! longer rolls what the game would (docs/run-env.md, Exactness).
 
@@ -210,8 +211,7 @@ impl Run {
             }
             Room::RestSite => self.state.rest_site(chooser, &mut log),
             Room::Shop => {
-                self.state.shop();
-                self.count("shop".into());
+                self.state.shop_room(chooser, &mut log);
             }
             Room::Event(name) => {
                 self.state.event_offer(name);

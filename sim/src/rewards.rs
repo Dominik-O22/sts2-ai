@@ -541,7 +541,7 @@ impl RunState {
 pub const UNPORTED_RELICS: &[&str] = &[
     "BIG_GAME_HUNTER", "BLACK_STAR", "CALLING_BELL", "CAULDRON", "DELICATE_FROND", "DINGY_RUG", "DREAM_CATCHER",
     "DRIFTWOOD", "GLASS_EYE", "GLITTER", "KALEIDOSCOPE", "LAVA_LAMP", "MASSIVE_SCROLL",
-    "ORRERY", "PAELS_TOOTH", "PAELS_WING", "PRISMATIC_GEM", "SEA_GLASS", "THE_COURIER", "TOY_BOX",
+    "ORRERY", "PAELS_TOOTH", "PAELS_WING", "PRISMATIC_GEM", "SEA_GLASS", "TOY_BOX",
     "VAKUU_CARD_SELECTOR", "WHITE_STAR", "WING_CHARM", "WONGOS_MYSTERY_TICKET",
 ];
 
@@ -569,8 +569,26 @@ fn port_text(header: &str) -> String {
     let acts = [Act::Overgrowth, Act::Hive, Act::Glory];
     let mut run = RunState::new(parts[0], acts, ascension, &Unlocks::default());
     let mut out = String::new();
+    let mut last_shop: Option<crate::shop::Shop> = None;
     for step in &parts[2..] {
         let line = match *step {
+            "X" => {
+                run.shop_removals += 1;
+                "X".to_string()
+            }
+            "$" => {
+                let shop = last_shop.as_ref().expect("a shop stocked");
+                let costs: Vec<String> = shop.costs().iter().map(i32::to_string).collect();
+                format!("$ {} remove {}", costs.join(" "), run.removal_cost())
+            }
+            _ if step.starts_with('C') => {
+                let shop = last_shop.as_mut().expect("a shop stocked");
+                let slot = shop.slot(step[1..].parse().unwrap());
+                run.restock(shop, slot);
+                let cost = shop.costs()[step[1..].parse::<usize>().unwrap()];
+                let (rewards, shops) = (run.rewards().counter, run.rngs.player(PlayerStream::Shops).counter);
+                format!("{step} {} {cost} counter {rewards} shops {shops}", shop.item_text(slot))
+            }
             "R" => {
                 run.unknown_odds.reset();
                 "R".to_string()
@@ -581,9 +599,11 @@ fn port_text(header: &str) -> String {
             }
             _ if step.starts_with('S') => {
                 run.act = (step.as_bytes()[1] - b'0') as usize;
-                let shop = run.shop().oracle_text();
+                let shop = run.shop();
+                let text = shop.oracle_text();
+                last_shop = Some(shop);
                 let (rewards, shops) = (run.rewards().counter, run.rngs.player(PlayerStream::Shops).counter);
-                format!("{step} {shop} counter {rewards} shops {shops}")
+                format!("{step} {text} counter {rewards} shops {shops}")
             }
             _ => {
                 run.act = (step.as_bytes()[1] - b'0') as usize;
@@ -635,9 +655,10 @@ mod tests {
     use super::*;
 
     /// `tools/oracle rewards` for runs at A0, A3, A6, A7 and A10: long walks
-    /// through all three acts with shops among the fights, so the potion
-    /// and card odds, the relic bag and the unknown odds all move far from
-    /// where they start (`examples/rewardcheck.rs` makes more).
+    /// through all three acts with shops among the fights (their prices,
+    /// removals bought, The Courier's restocks), so the potion and card
+    /// odds, the relic bag and the unknown odds all move far from where they
+    /// start (`examples/rewardcheck.rs` makes more).
     #[test]
     fn matches_the_game() {
         let (runs, mismatches) = diff_oracle(include_str!("../testdata/oracle-rewards.txt"));

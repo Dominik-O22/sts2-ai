@@ -200,6 +200,9 @@ pub struct RunState {
     /// The room that point became, which the next point's shop blacklist
     /// reads.
     pub room: Option<Room>,
+    /// `ExtraPlayerFields.CardShopRemovalsUsed`: card removals bought, which
+    /// price the next.
+    pub shop_removals: i32,
 }
 
 impl RunState {
@@ -227,6 +230,7 @@ impl RunState {
             potions: vec![None; if ascension.has(AscensionLevel::TightBelt) { 2 } else { 3 }],
             point: None,
             room: None,
+            shop_removals: 0,
         }
     }
 

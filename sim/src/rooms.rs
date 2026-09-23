@@ -16,6 +16,7 @@ use crate::map::PointId;
 use crate::rewards::{Offer, Rewards};
 use crate::rng::Rng;
 use crate::run::{DeckCard, RunState};
+use crate::shop::{Item, Shop, Slot, Ware};
 
 /// One decision, with what it chooses among.
 #[derive(Clone, Copy, Debug)]
@@ -38,6 +39,8 @@ pub enum Decision<'a> {
     /// A card out of the deck for `action`, as deck indices; past the end
     /// stops picking, which `optional` says the screen allows.
     Deck { action: DeckAction, cards: &'a [usize], optional: bool },
+    /// A ware to buy; past the end leaves the shop.
+    Shop(&'a [Ware]),
 }
 
 /// Makes the run's decisions: an index into what the decision lists.
@@ -46,8 +49,8 @@ pub trait Chooser {
 }
 
 /// Takes the first option every time: the first path, relic, card, bundle
-/// and rest option, keeps every potion, and picks from the front of the
-/// deck.
+/// and rest option, keeps every potion, picks from the front of the deck,
+/// and buys the first ware it can until it can buy none.
 pub struct First;
 
 impl Chooser for First {
@@ -59,7 +62,7 @@ impl Chooser for First {
 /// Chooses at random on its own RNG, never the run's streams
 /// (docs/run-env.md, Hidden information): uniformly among the options, a
 /// skip counting as one where the decision has one (a card or bundle
-/// reward, an optional deck pick). Relics are all taken, in a random
+/// reward, an optional deck pick, leaving a shop). Relics are all taken, in a random
 /// order, and potions kept: leaving one only throws it away.
 pub struct Random(pub Rng);
 
@@ -74,6 +77,7 @@ impl Chooser for Random {
             Decision::Rest(options) => options.len(),
             Decision::Ancient(relics) => relics.len(),
             Decision::Deck { cards, optional, .. } => cards.len() + optional as usize,
+            Decision::Shop(wares) => wares.len() + 1,
         };
         self.0.next_int(options.max(1))
     }
@@ -178,6 +182,59 @@ impl RunState {
             self.settle(offered, chooser, log);
             if !self.has_relic("MINIATURE_TENT") {
                 break;
+            }
+        }
+    }
+
+    /// A merchant's room: the stock laid out (`shop`), Lord's Parasol
+    /// buying everything on entry, then what the chooser buys, one ware at
+    /// a time, until it leaves. The card removal asks which card, and
+    /// leaving that pick buys nothing. Returns the shop as left.
+    pub fn shop_room(&mut self, chooser: &mut impl Chooser, log: &mut Vec<Offered>) -> Shop {
+        let mut shop = self.shop();
+        log.push(Offered::Cards(shop.cards.iter().chain(&shop.colorless).flatten().map(|e| e.item).collect()));
+        log.push(Offered::Relics(shop.relics.iter().flatten().map(|e| e.item.game_id()).collect()));
+        log.push(Offered::Potions(shop.potions.iter().flatten().map(|e| e.item.to_string()).collect()));
+        if self.has_relic("LORDS_PARASOL") {
+            self.buy_everything(&mut shop, chooser, log);
+        }
+        loop {
+            let wares = self.wares(&shop);
+            let Some(ware) = wares.get(chooser.choose(self, Decision::Shop(&wares))) else { break };
+            if ware.item == Item::Removal {
+                let cards = self.pickable(DeckAction::Remove);
+                let pick = Decision::Deck { action: DeckAction::Remove, cards: &cards, optional: true };
+                if let Some(&card) = cards.get(chooser.choose(self, pick)) {
+                    self.remove_for(&mut shop, card, ware.price);
+                }
+                continue;
+            }
+            let pickup = self.buy(&mut shop, ware.slot, ware.price);
+            self.settle(pickup, chooser, log);
+        }
+        shop
+    }
+
+    /// `LordsParasol.PurchaseEverything`: every stocked entry bought for
+    /// nothing, the character's cards, the colorless ones, the relics and
+    /// the potions in turn; a potion with no slot to go to stays.
+    fn buy_everything(&mut self, shop: &mut Shop, chooser: &mut impl Chooser, log: &mut Vec<Offered>) {
+        let slots = (0..shop.cards.len())
+            .map(Slot::Card)
+            .chain((0..shop.colorless.len()).map(Slot::Colorless))
+            .chain((0..shop.relics.len()).map(Slot::Relic))
+            .chain((0..shop.potions.len()).map(Slot::Potion));
+        for slot in slots.collect::<Vec<_>>() {
+            let stocked = match slot {
+                Slot::Card(i) => shop.cards[i].is_some(),
+                Slot::Colorless(i) => shop.colorless[i].is_some(),
+                Slot::Relic(i) => shop.relics[i].is_some(),
+                Slot::Potion(i) => shop.potions[i].is_some() && self.potions.iter().any(Option::is_none) && !self.has_relic("SOZU"),
+                Slot::Removal => false,
+            };
+            if stocked {
+                let pickup = self.buy(shop, slot, 0);
+                self.settle(pickup, chooser, log);
             }
         }
     }

@@ -56,7 +56,12 @@ switch (args[0])
     // unknown odds as a new act does. Prints the line as a `run` header,
     // then one line per step: the rewards in the order the screen lists
     // them, or the shop's stock, with the player's Rewards counter (and
-    // Shops counter), or the room type rolled.
+    // Shops counter), or the room type rolled. On the last shop stocked,
+    // `$` prints every entry's price as rolled (`MerchantEntry._cost`) and
+    // the card removal's; `C4` restocks entry 4 as The Courier does
+    // (`RestockAfterPurchase`; the character's cards, the colorless ones,
+    // the relics, the potions, counted from 0) and prints what it holds
+    // now and its price; `X` counts a card removal bought.
     case "rewards":
     {
         LoadModelDb();
@@ -71,8 +76,36 @@ switch (args[0])
             }
             var (state, player) = NewRun(parts[0], int.Parse(parts[1]));
             Console.WriteLine($"run {line}");
+            MegaCrit.Sts2.Core.Entities.Merchant.MerchantInventory? lastShop = null;
+            var costField = typeof(MegaCrit.Sts2.Core.Entities.Merchant.MerchantEntry).GetField("_cost", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
             foreach (var step in parts.Skip(2))
             {
+                if (step == "X")
+                {
+                    player.ExtraFields.CardShopRemovalsUsed++;
+                    Console.WriteLine("X");
+                    continue;
+                }
+                if (step == "$")
+                {
+                    var costs = lastShop!.CardEntries.Cast<MegaCrit.Sts2.Core.Entities.Merchant.MerchantEntry>().Concat(lastShop.RelicEntries).Concat(lastShop.PotionEntries);
+                    Console.WriteLine($"$ {string.Join(" ", costs.Select(e => costField.GetValue(e)))} remove {costField.GetValue(lastShop.CardRemovalEntry)}");
+                    continue;
+                }
+                if (step[0] == 'C')
+                {
+                    var entry = lastShop!.CardEntries.Cast<MegaCrit.Sts2.Core.Entities.Merchant.MerchantEntry>().Concat(lastShop.RelicEntries).Concat(lastShop.PotionEntries).ElementAt(int.Parse(step[1..]));
+                    typeof(MegaCrit.Sts2.Core.Entities.Merchant.MerchantEntry).GetMethod("RestockAfterPurchase", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.Invoke(entry, [lastShop]);
+                    var item = entry switch
+                    {
+                        MegaCrit.Sts2.Core.Entities.Merchant.MerchantCardEntry c => c.CreationResult!.Card.Id.Entry + (c.CreationResult.Card.IsUpgraded ? "+" : ""),
+                        MegaCrit.Sts2.Core.Entities.Merchant.MerchantRelicEntry r => r.Model!.Id.Entry,
+                        MegaCrit.Sts2.Core.Entities.Merchant.MerchantPotionEntry p => p.Model!.Id.Entry,
+                        _ => throw new InvalidOperationException(),
+                    };
+                    Console.WriteLine($"{step} {item} {costField.GetValue(entry)} counter {player.PlayerRng.Rewards.Counter} shops {player.PlayerRng.Shops.Counter}");
+                    continue;
+                }
                 if (step.StartsWith('?'))
                 {
                     var blacklist = step == "?s" ? new[] { RoomType.Shop } : [];
@@ -89,6 +122,7 @@ switch (args[0])
                 if (step[0] == 'S')
                 {
                     var shop = MegaCrit.Sts2.Core.Entities.Merchant.MerchantInventory.CreateForNormalMerchant(player);
+                    lastShop = shop;
                     string Card(MegaCrit.Sts2.Core.Entities.Merchant.MerchantCardEntry e) => e.CreationResult!.Card.Id.Entry + (e.CreationResult.Card.IsUpgraded ? "+" : "");
                     var sale = shop.CharacterCardEntries.Select((e, i) => (e, i)).First(x => x.e.IsOnSale).i;
                     Console.WriteLine($"{step} cards {string.Join(" ", shop.CharacterCardEntries.Select(Card))} sale {sale}"
