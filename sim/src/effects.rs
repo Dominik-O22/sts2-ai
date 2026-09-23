@@ -15,7 +15,7 @@
 use crate::card::{def, Card};
 use crate::enchant::Enchantment;
 use crate::game_rng::{PlayerStream, RunStream};
-use crate::pools::{sim_card, PoolCard, Rarity, IRONCLAD_CARDS};
+use crate::pools::{sim_card, sim_enchantment, PoolCard, Rarity, IRONCLAD_CARDS};
 use crate::rewards::{create_cards, create_potion, create_potions, CardOptions, Offer, UNPORTED_RELICS};
 use crate::run::{DeckCard, Enchant, Room, RunState};
 use crate::types::{AscensionLevel, CardType};
@@ -152,10 +152,7 @@ impl DeckCard {
     /// card (`enchant.rs`), and no enchantment there already, since none
     /// stacks.
     pub fn can_enchant(&self, enchantment: &str) -> bool {
-        let Some(card) = sim_card(&self.id) else { return false };
-        let Some(id) = crate::enchant::ALL.iter().copied().find(|e| crate::replay::slug(&format!("{e:?}")) == enchantment) else {
-            return false;
-        };
+        let (Some(card), Some(id)) = (sim_card(&self.id), sim_enchantment(enchantment)) else { return false };
         self.enchantment.is_none() && Enchantment::new(id, 0).can_enchant(&Card::new(0, card, self.upgraded))
     }
 }

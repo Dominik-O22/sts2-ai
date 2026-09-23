@@ -23,7 +23,7 @@ use crate::{ironclad_starter_deck, IRONCLAD_ENERGY, IRONCLAD_HP};
 /// only stand there, and Pael's Legion's block is ported. Anything the
 /// recorder names that is neither here nor ported is an error, not a silent
 /// drop, because a missing relic replays clean while being wrong.
-const INERT_RELICS: &[&str] = &[
+pub(crate) const INERT_RELICS: &[&str] = &[
     "ALCHEMICAL_COFFER", "ARCANE_SCROLL", "ARCHAIC_TOOTH", "ASTROLABE", "BEAUTIFUL_BRACELET", "BING_BONG",
     "BLACK_STAR", "BYRDPIP", "CALLING_BELL", "CHOSEN_CHEESE", "CLAWS", "CURSED_PEARL", "DARKSTONE_PERIAPT",
     "DISTINGUISHED_CAPE", "DREAM_CATCHER", "DRIFTWOOD", "DUSTY_TOME", "ELECTRIC_SHRYMP", "EMPTY_CAGE",
@@ -341,7 +341,7 @@ impl RunParts {
 /// A relic's `counter` from the value the recorder logs for it at combat
 /// setup (`Recorder.RelicState`), which is the game's own field. Lizard
 /// Tail and the Venerable Tea Set log a bool that goes into `flag`.
-fn relic_counter(id: RelicId, game: i32) -> i32 {
+pub(crate) fn relic_counter(id: RelicId, game: i32) -> i32 {
     match id {
         // Counts that only matter modulo the play or turn they fire on,
         // which is how the sim keeps them.

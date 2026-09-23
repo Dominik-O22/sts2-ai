@@ -8,13 +8,14 @@
 //! (`testdata/oracle-pools.txt`); a test holds these tables to it.
 //!
 //! Entries are game ids, so a card or potion the combat sim lacks can still
-//! be offered; `sim_card`, `sim_potion` and `sim_relic` map to the sim's
-//! where it has one.
+//! be offered; `sim_card`, `sim_potion`, `sim_relic` and `sim_enchantment`
+//! map to the sim's where it has one.
 
 use std::collections::HashMap;
 use std::fmt::Write;
 use std::sync::OnceLock;
 
+use crate::enchant::{EnchantmentId, ALL as ALL_ENCHANTMENTS};
 use crate::ids::{CardId, ALL_CARDS};
 use crate::potion::{PotionId, ALL as ALL_POTIONS};
 use crate::relic::{RelicId, ALL as ALL_RELICS};
@@ -291,9 +292,15 @@ pub fn sim_relic(id: &str) -> Option<RelicId> {
     by_game_id(&RELICS, ALL_RELICS, id)
 }
 
+/// The sim's enchantment for a game id, if it has one.
+pub fn sim_enchantment(id: &str) -> Option<EnchantmentId> {
+    by_game_id(&ENCHANTMENTS, ALL_ENCHANTMENTS, id)
+}
+
 static CARDS: OnceLock<HashMap<String, CardId>> = OnceLock::new();
 static POTIONS: OnceLock<HashMap<String, PotionId>> = OnceLock::new();
 static RELICS: OnceLock<HashMap<String, RelicId>> = OnceLock::new();
+static ENCHANTMENTS: OnceLock<HashMap<String, EnchantmentId>> = OnceLock::new();
 
 /// A lookup from game id to the sim's id, built on first use: the run layer
 /// asks on every card it adds or checks.

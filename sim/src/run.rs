@@ -5,13 +5,22 @@
 //! `Rooms/RoomSet.cs`). Rewards live in `rewards.rs`.
 //!
 //! Cards, relics and potions are game ids here, so the run can hold what the
-//! combat sim has no model for.
+//! combat sim has no model for. A fight is built from the run in the sim's
+//! ids (`fight_setup`) and written back once it is over (`end_fight`).
 //!
 //! Not here: the first run's tutorial rooms and rewards (a fully unlocked
 //! profile never meets them), multiplayer, and the relic hooks on unknown
 //! rooms besides Juzu Bracelet's (Golden Compass, the Lantern Key card).
 
-use crate::encounter::{Act, Encounter};
+use crate::card::{Card, UNSUPPORTED_CARDS};
+use crate::combat::{Combat, EnemySpec, RoomKind};
+use crate::enchant::Enchantment;
+use crate::encounter::{Act, Encounter, Kind};
+use crate::gen::{FightSetup, INERT_RELICS};
+use crate::ids::MonsterId;
+use crate::pools::{sim_card, sim_enchantment, sim_potion, sim_relic};
+use crate::relic::Relic;
+use crate::replay::slug;
 use crate::game_rng::{GameRng, RunRngs, RunStream};
 use crate::map::{ActMap, PointId, PointType};
 use crate::plan::{RunPlan, Unlocks};
@@ -409,6 +418,161 @@ impl RunState {
             "RanwidTheElder" => act > 0 && self.tradable_relics() > 0 && gold >= 100 && potions > 0,
             "EndlessConveyor" => gold >= 120,
             _ => true,
+        }
+    }
+}
+
+impl RunState {
+    /// A fight against `enemies` of `encounter`, from the run as it stands:
+    /// its deck, relics with their counters, potion slots, HP and gold in
+    /// the combat sim's ids. Relics that do nothing in a fight
+    /// (`gen::INERT_RELICS`) stay out. An error names what the sim lacks, or
+    /// a card it cannot play (`UNSUPPORTED_CARDS`).
+    pub fn fight_setup(&self, encounter: Encounter, enemies: Vec<EnemySpec>) -> Result<FightSetup, String> {
+        let deck = self
+            .deck
+            .iter()
+            .map(|c| {
+                let id = sim_card(&c.id).ok_or_else(|| format!("unknown card {}", c.id))?;
+                if let Some((_, why)) = UNSUPPORTED_CARDS.iter().find(|(u, _)| *u == id) {
+                    return Err(format!("unsupported card {id:?}: {why}"));
+                }
+                let mut card = Card::new(0, id, c.upgraded);
+                if let Some(e) = &c.enchantment {
+                    let ench = sim_enchantment(&e.id).ok_or_else(|| format!("unknown enchantment {}", e.id))?;
+                    card.attach(Enchantment::new(ench, e.amount));
+                }
+                Ok(card)
+            })
+            .collect::<Result<Vec<Card>, String>>()?;
+        let relics = self
+            .relics
+            .iter()
+            .filter(|r| !INERT_RELICS.contains(&r.id.as_str()))
+            .map(|r| {
+                let id = sim_relic(&r.id).ok_or_else(|| format!("unknown relic {}", r.id))?;
+                Ok(Relic { counter: r.counter, flag: r.flag, ..Relic::new(id) })
+            })
+            .collect::<Result<Vec<Relic>, String>>()?;
+        let potions = self
+            .potions
+            .iter()
+            .map(|p| p.as_deref().map(|id| sim_potion(id).ok_or_else(|| format!("unknown potion {id}"))).transpose())
+            .collect::<Result<_, String>>()?;
+        let room = match encounter.kind() {
+            Kind::Weak | Kind::Normal => RoomKind::Monster,
+            Kind::Elite => RoomKind::Elite,
+            Kind::Boss => RoomKind::Boss,
+        };
+        Ok(FightSetup {
+            deck,
+            hp: self.hp,
+            max_hp: self.max_hp,
+            max_energy: crate::IRONCLAD_ENERGY,
+            relics,
+            potions,
+            enemies,
+            encounter,
+            room,
+            asc: self.ascension,
+            floor: self.floor as u32,
+            gold: self.gold,
+        })
+    }
+
+    /// Writes a fight `setup` started back into the run once it is over:
+    /// HP, max HP, gold, the potion slots and the relics' counters. The sim
+    /// never changes the deck, and its post-victory heals (Burning Blood)
+    /// are already in the HP. Returns `CombatRoom.GoldProportion` for the
+    /// rewards (`EncounterModel.CalculateGoldProportion`): the share of the
+    /// monsters that did not escape; Gremlin Merc's none if its Fat Gremlin
+    /// fled with stolen gold, half if with none.
+    pub fn end_fight(&mut self, setup: &FightSetup, combat: &Combat) -> f32 {
+        self.hp = combat.player.creature.hp.max(0);
+        self.max_hp = combat.player.creature.max_hp;
+        self.gold = combat.gold;
+        self.potions = combat.potions.iter().map(|p| p.map(|id| slug(&format!("{id:?}")))).collect();
+        for relic in &combat.relics {
+            if let Some(held) = self.relic_mut(&slug(&format!("{:?}", relic.id))) {
+                held.counter = relic.counter;
+                held.flag = relic.flag;
+            }
+        }
+        let escaped: Vec<MonsterId> = combat.enemies.iter().filter(|e| e.escaped).map(|e| e.monster.id).collect();
+        if setup.encounter == Encounter::GremlinMercNormal {
+            return match (escaped.contains(&MonsterId::FatGremlin), combat.gold < setup.gold) {
+                (false, _) => 1.0,
+                (true, false) => 0.5,
+                (true, true) => 0.0,
+            };
+        }
+        1.0 - escaped.len() as f32 / setup.enemies.len() as f32
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::replay::Ids;
+    use serde_json::Value;
+
+    /// A recorder `start` as the run would hold it: the deck, the relics
+    /// with the counters the recorder logs (read as `gen` reads them), the
+    /// potion slots, HP and gold.
+    fn run_of(start: &Value) -> RunState {
+        let acts = [Act::Overgrowth, Act::Hive, Act::Glory];
+        let mut run = RunState::new("SEED", acts, Ascension(start["ascension"].as_u64().unwrap() as u8), &Unlocks::default());
+        run.hp = start["hp"].as_i64().unwrap() as i32;
+        run.max_hp = start["max_hp"].as_i64().unwrap() as i32;
+        run.gold = start["gold"].as_i64().unwrap() as i32;
+        run.deck = start["deck"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| DeckCard {
+                id: c["id"].as_str().unwrap().to_string(),
+                upgraded: c["up"] == true,
+                enchantment: c["ench"].as_array().map(|e| Enchant { id: e[0].as_str().unwrap().to_string(), amount: e[1].as_i64().unwrap() as i32 }),
+            })
+            .collect();
+        run.relics = start["relics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| {
+                let mut relic = RunRelic::new(r.as_str().unwrap());
+                if let (Some(n), Some(id)) = (start["relic_state"][&relic.id].as_i64(), sim_relic(&relic.id)) {
+                    relic.counter = crate::gen::relic_counter(id, n as i32);
+                }
+                relic
+            })
+            .collect();
+        run.potions = start["potions"].as_array().unwrap().iter().map(|p| p.as_str().map(str::to_string)).collect();
+        run
+    }
+
+    /// Three recorded starts (the older two with HP from their first
+    /// snapshot): an enchanted card, inert relics, Happy Flower's count and
+    /// Petrified Toad's rock among them. The fight the run builds holds what
+    /// `FightSetup::from_start` builds from the record, except that the
+    /// rock stays, since only the recorder logs it twice.
+    #[test]
+    fn builds_the_fight_a_recording_starts() {
+        let ids = Ids::new();
+        for line in include_str!("../testdata/fight-starts.jsonl").lines() {
+            let start: Value = serde_json::from_str(line).unwrap();
+            let recorded = FightSetup::from_start(&start, None, &ids).unwrap();
+            let built = run_of(&start).fight_setup(recorded.encounter, recorded.enemies.clone()).unwrap();
+            let cards = |s: &FightSetup| s.deck.iter().map(|c| (c.id, c.upgraded, c.enchantment)).collect::<Vec<_>>();
+            assert_eq!(cards(&built), cards(&recorded));
+            assert_eq!(built.relics, recorded.relics);
+            assert_eq!((built.hp, built.max_hp, built.gold, built.max_energy, built.asc, built.room), (recorded.hp, recorded.max_hp, recorded.gold, recorded.max_energy, recorded.asc, recorded.room));
+            let mut potions = built.potions.clone();
+            if built.relics.iter().any(|r| r.id == crate::relic::RelicId::PetrifiedToad) {
+                let rock = potions.iter().position(|&p| p == Some(crate::potion::PotionId::PotionShapedRock)).expect("the Toad's rock");
+                potions[rock] = None;
+            }
+            assert_eq!(potions, recorded.potions);
         }
     }
 }
