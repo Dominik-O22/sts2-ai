@@ -18,7 +18,7 @@
 
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt::Write;
-use std::ops::{Index, IndexMut};
+use std::ops::{Index, IndexMut, Range};
 
 use crate::encounter::Act;
 use crate::game_rng::{hash, GameRng};
@@ -541,53 +541,99 @@ impl Generator {
         }
     }
 
-    /// Groups of path segments that run between the same two points (or
-    /// from the start to the same point) through the same room types. Each
-    /// group is non-overlapping and in the order the paths were found; the
-    /// groups are in key order (`SortedDictionary` with `StringComparer.Ordinal`).
+    /// `FindMatchingSegments`: groups of path segments that run between the
+    /// same two points (or from the start to the same point) through the
+    /// same room types, the groups with more than one in key order
+    /// (`SortedDictionary` with `StringComparer.Ordinal`), each group
+    /// non-overlapping and in the order the game's paths find them.
+    ///
+    /// The game lists every start-to-boss path (`FindAllPaths`) and files
+    /// every fork-to-merge segment of each (`AddSegmentsToDictionary`), so a
+    /// segment is filed once per path through it. This walks each distinct
+    /// segment once instead, which gives the same groups:
+    /// - A segment is on some listed path exactly when the start reaches its
+    ///   first point and its last point reaches the boss.
+    /// - A segment filed again overlaps itself, so only its first filing can
+    ///   join its group, and one turned away stays out as groups only grow.
+    /// - Segments with one key share both ends, so the first listed paths
+    ///   through them differ only between the ends, and are listed in the
+    ///   order of the children taken there: depth first from the first
+    ///   point, children in `HashSet` order, as `walk_segments` goes.
     fn find_matching_segments(&self) -> Vec<Vec<Vec<PointId>>> {
-        let mut segments: BTreeMap<String, Vec<Vec<PointId>>> = BTreeMap::new();
-        for path in self.find_all_paths(self.map.start) {
-            self.add_segments(&path, &mut segments);
-        }
-        segments.into_values().filter(|group| group.len() > 1).collect()
-    }
+        let mut reaches_boss = vec![None; self.map.points.len()];
+        self.reaches_boss(self.map.start, &mut reaches_boss);
+        let on_path: Vec<bool> = reaches_boss.iter().map(|r| *r == Some(true)).collect();
 
-    /// Every path from `point` to the boss, children in `HashSet` order.
-    fn find_all_paths(&self, point: PointId) -> Vec<Vec<PointId>> {
-        if self.map[point].kind == PointType::Boss {
-            return vec![vec![point]];
-        }
-        let mut paths = Vec::new();
-        for child in self.map[point].children.iter() {
-            for rest in self.find_all_paths(child) {
-                let mut path = Vec::with_capacity(rest.len() + 1);
-                path.push(point);
-                path.extend(rest);
-                paths.push(path);
+        let mut walk = SegmentWalk { on_path, path: Vec::new(), found: Vec::new(), points: Vec::new() };
+        for first in self.map.all_points() {
+            let p = &self.map[first];
+            // `IsValidSegmentStartMapPoint`.
+            if walk.on_path[first.0 as usize] && (p.children.len() > 1 || p.row == 0) {
+                let from = walk.found.len();
+                walk.path.push(first);
+                self.walk_segments(&mut walk, 0);
+                walk.path.pop();
+                // Brings each key's segments together, still in walk order.
+                walk.found[from..].sort_by_key(|s| (s.last.0, s.inner_kinds));
             }
         }
-        paths
-    }
 
-    /// `AddSegmentsToDictionary`: each stretch of `path` from a fork (or the
-    /// start) to a merge, at least three points long.
-    fn add_segments(&self, path: &[PointId], segments: &mut BTreeMap<String, Vec<Vec<PointId>>>) {
-        let map = &self.map;
-        for i in 0..path.len() - 1 {
-            let first = &map[path[i]];
-            if first.children.len() <= 1 && first.row != 0 {
+        let SegmentWalk { found, points, .. } = walk;
+        let mut groups: BTreeMap<String, Vec<Vec<PointId>>> = BTreeMap::new();
+        for same_key in found.chunk_by(|a, b| (a.first, a.last, a.inner_kinds) == (b.first, b.last, b.inner_kinds)) {
+            if same_key.len() < 2 {
                 continue;
             }
-            for j in 2..path.len() - i {
-                if map[path[i + j]].parents.len() < 2 {
-                    continue;
-                }
-                let segment = &path[i..=i + j];
-                let group = segments.entry(self.segment_key(segment)).or_default();
+            let mut group: Vec<&[PointId]> = Vec::new();
+            for found in same_key {
+                let segment = &points[found.points.clone()];
                 if !group.iter().any(|other| overlapping(other, segment)) {
-                    group.push(segment.to_vec());
+                    group.push(segment);
                 }
+            }
+            if group.len() > 1 {
+                groups.insert(self.segment_key(group[0]), group.iter().map(|s| s.to_vec()).collect());
+            }
+        }
+        groups.into_values().collect()
+    }
+
+    /// Whether `point` reaches the boss, filling `memo` for every point the
+    /// start reaches (`None` for the rest), so it asks every child. Like
+    /// `FindAllPaths` it stops at the boss, whatever follows it.
+    fn reaches_boss(&self, point: PointId, memo: &mut [Option<bool>]) -> bool {
+        if let Some(reaches) = memo[point.0 as usize] {
+            return reaches;
+        }
+        let p = &self.map[point];
+        let reaches = p.kind == PointType::Boss
+            || p.children.iter().fold(false, |any, child| self.reaches_boss(child, memo) | any);
+        memo[point.0 as usize] = Some(reaches);
+        reaches
+    }
+
+    /// Walks every path on from `walk.path`, depth first with children in
+    /// `HashSet` order, and records each segment that ends on a merge
+    /// (`IsValidSegmentEndMapPoint`) at least two steps from its first point.
+    /// `inner_kinds` holds the types strictly between the first point and
+    /// the last, four bits each; a segment has at most 15 of them.
+    fn walk_segments(&self, walk: &mut SegmentWalk, inner_kinds: u64) {
+        let (first, last) = (walk.path[0], *walk.path.last().unwrap());
+        let p = &self.map[last];
+        if walk.path.len() >= 3 && p.parents.len() >= 2 {
+            let start = walk.points.len();
+            walk.points.extend_from_slice(&walk.path);
+            walk.found.push(FoundSegment { first, last, inner_kinds, points: start..walk.points.len() });
+        }
+        if p.kind == PointType::Boss {
+            return;
+        }
+        let inner_kinds = if walk.path.len() == 1 { 0 } else { inner_kinds << 4 | p.kind as u64 };
+        for child in p.children.iter() {
+            if walk.on_path[child.0 as usize] {
+                walk.path.push(child);
+                self.walk_segments(walk, inner_kinds);
+                walk.path.pop();
             }
         }
     }
@@ -803,6 +849,26 @@ impl Generator {
             }
         }
     }
+}
+
+/// `find_matching_segments`' state while it walks the map from each fork.
+struct SegmentWalk {
+    /// By `PointId`: whether some start-to-boss path goes through it.
+    on_path: Vec<bool>,
+    /// The points from the segment's first to where the walk is.
+    path: Vec<PointId>,
+    found: Vec<FoundSegment>,
+    /// Every found segment's points, end to end.
+    points: Vec<PointId>,
+}
+
+/// A fork-to-merge segment: its ends and inner types, which make its
+/// `GenerateSegmentKey`, and where its points sit in `SegmentWalk::points`.
+struct FoundSegment {
+    first: PointId,
+    last: PointId,
+    inner_kinds: u64,
+    points: Range<usize>,
 }
 
 /// `MapPathPruning.OverlappingSegment`: two segments with the same key share
