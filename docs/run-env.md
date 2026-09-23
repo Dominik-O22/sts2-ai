@@ -2,8 +2,8 @@
 
 Status: steps 1 and 2 built (the effect layer, direct fights, a forward
 run; runs as a `VecEnv` fight source with random run decisions); of step
-4, Neow, the act ancients and shops are built and events are not; steps
-3 and 5 are design. The run layer under it (`game_rng.rs`, `map.rs`,
+4, Neow, the act ancients, shops and all events but three are built;
+steps 3 and 5 are design. The run layer under it (`game_rng.rs`, `map.rs`,
 `plan.rs`, `run.rs`, `rewards.rs`, `shop.rs`, `pools.rs`, `events.rs`,
 `ancients.rs`) replays real runs floor for floor; `effects.rs`,
 `rooms.rs` and `forward.rs` make it something a policy plays.
@@ -37,10 +37,9 @@ too), potion slots, enchantments with their amount, and the map point, so
 `enter(map, point)` works the shop blacklist out itself.
 
 Rooms whose options draw while they are laid out split into the draws and
-the choice: `event_offer` then `event_option` (Wongo's featured item, the
-Relic Trader's relics, the Fake Merchant's prices), `rest_options` then
-`rest`, `ancient_offer` then the relic taken in `rooms::ancient`, `shop`
-then what `rooms::shop_room` buys.
+the choice: `rest_options` then `rest`, `ancient_offer` then the relic
+taken in `rooms::ancient`, `shop` then what `rooms::shop_room` buys. An
+event does both in one flow (`RunState::event`, below).
 
 Ancients (`ancients.rs`) lay their options out on the event's own stream,
 seeded from the run's seed and the ancient's id, with the conditions each
@@ -73,10 +72,57 @@ characters' cards, and the port has only the Ironclad's and colorless
 pools), Golden Compass and Fur Coat (they change the act's map), Glass
 Eye, Driftwood, Sea Glass, Prismatic Gem, Pael's Wing and Tooth, Toy Box,
 Black Star, Calling Bell, Delicate Frond and Glitter (`UNPORTED_RELICS`).
-The events' Byrdpip and Fragrant Mushroom are not either.
+The event relic Byrdpip is not either.
 
-Still not here, and the rest of step 4: event effects (a forward run lays
-the options out, which draws, and leaves).
+### Events
+
+`events.rs` has one function per event, written as the game's
+`Models/Events/<Name>.cs` is, over the effect layer's commands (`damage`,
+`gain_gold`, `lose_max_hp`, `add_card`, `obtain`, `transform`) and a few of
+its own on `Ev`: `ask` lays a page out and puts it to the chooser as
+`Decision::Event` (the open options only, each by its page and key, with
+the potion, relic or card the layout drew for it), `pick` and the
+enchant, upgrade, remove and transform helpers put deck picks, `grid` a
+card grid. `EVENTS` maps class names to those functions; an event not in
+it is entered and left. The event's own stream is seeded from the run's
+seed and the hash of its id, as the ancients' is. The relics'
+`AfterRoomEntered` (Maw Bank, Planisphere) runs once the first page is
+laid out, as `EventRoom.EnterInternal` does, so a layout that reads gold
+or HP reads it before them.
+
+An event that starts a fight returns it (`EventFight`): the encounter,
+the rewards it adds (`CombatRoom.ExtraRewards`: Punch Off's relic and
+potion, the Fake Merchant's rug and shelf, the Lantern Key card), the
+gold an encounter fixes, and Battleworn Dummy's setting, whose fight gives
+no rewards and whose event pays out once the dummy is beaten
+(`event_fight_won`). The run hands the fight out like a combat room's.
+Punch Off and The Lantern Key lay out as a combat, which creates their
+monsters on the run's Niche stream as the room is entered, fight or not.
+
+What the events need of the effect layer is there too: damage out of
+combat goes through Tungsten Rod, and a death out of combat is prevented
+by a Fairy in a Bottle, then an unused Lizard Tail; a card joining the
+deck triggers Darkstone Periapt, Bing Bong and Book of Five Rings;
+Fragrant Mushroom's pickup and Dream Catcher's card reward at a rest heal
+are ported. The combat sim has the Foul Potion and the Glowwater Potion
+the events hand out.
+
+Not ported: Tinker Time (its Mad Science carries a type and rider the deck
+card has no field for, and the sim cannot play it), Colorful Philosophers
+(the other characters' card pools) and Crystal Sphere (a grid minigame).
+Where the port differs on purpose:
+
+- The Fake Merchant lays out no options in the game, only a shop and a
+  Foul Potion to throw. The port asks first whether to throw it (`THROW`
+  or `SHOP`, no page), then sells the shelf through `Decision::Shop`.
+- Welcome to Wongo's never gives the Customer Appreciation Badge, which
+  counts Wongo points across the profile's runs.
+- Trial's Double Down abandons the run; the port ends it as a death.
+- A Spoils Map (The Legends Were True) pays its 600 gold and leaves the
+  deck at the second act's first treasure room. The game generates that
+  act's map as an hourglass through a single treasure (`SpoilsActMap`),
+  which the port does not: it keeps the act's usual map.
+- A shop does not take a Foul Potion for 100 gold, which the game allows.
 
 ### Checked against the game's code
 
@@ -97,6 +143,16 @@ per command diffs it with the port over many seeds:
 - `rewards` (`examples/rewardcheck.rs`): walks through three acts of
   fights, shops and unknown rooms, now with each shop's prices, removals
   bought and The Courier's restocks. 1000 of 1000 match.
+- `events` (`examples/eventcheck.rs`): every ported event from
+  `BeginEvent` on, in any act, with decks, gold, HP, relics (Tungsten Rod,
+  the eggs, Bowler Hat, Lucky Fysh, Silver Crucible) and potions that turn
+  each option's condition on and off, walked through its pages by a
+  scripted choice per page, deck picks from the front. It prints each page
+  laid out, the fight an option starts, the player left and the Rewards,
+  Niche, Transformations, CombatPotionGeneration and event stream
+  counters. The oracle stubs out what needs a running game (Godot nodes,
+  hover tip icons, the reward synchronizer) and cannot finish a death or
+  Trial's Double Down; those runs are left out. 4949 of 4949 match.
 
 ### Checked against real runs
 
@@ -111,16 +167,26 @@ compare. Fights are not simulated there: what a fight did (gold stolen,
 potions used, Petrified Toad's rock, a card a thief took and gave back)
 comes from the record, and so do HP and max HP after a fight, since the
 record does not split the fight's healing from the rewards'.
-`runcheck --effects` prints it. On the modded profile as of 2026-09-23
-(24 runs, 486 floors): 373 floors compared, none differ. The 25 shops
-among them buy what the record bought at the port's prices and must
-leave the recorded gold; 37 of the 38 ancients take their relic from the
-options the port laid out. Not compared: 22 fights that ended a run, 58
-events, Dingy Rug's pickup, 31 floors whose draws follow a Rewards stream
-already lost, and a Pandora's Box whose transforms follow a Niche stream
-already lost. Before Neow, the ancients and shops were ported, the same
-files gave 364 compared with one differing (a Whetstone upgrade on the
-Niche stream) and 11 floors of unported pickups.
+`runcheck --effects` prints it. On the modded profile as of 2026-09-24
+(25 runs, 528 floors): 496 floors compared, none differ, the 60 event
+floors among them; the Rewards stream is followed through 496.
+Not compared: 23 fights that ended a run, 5 floors whose draws follow a
+Rewards stream already lost, 2 that drew on a Niche stream already lost,
+Dingy Rug's pickup and one Crystal Sphere. Before the events, the same
+files gave 411 floors compared, none differing, 61 event floors not
+compared, and the Rewards stream followed through 455.
+
+The history check walks an event with the record's `event_choices` as
+the chooser's answers, by page and key; a page with one option that the
+record does not keep (`ThatWontSaveToChoiceHistory`) takes it. Three
+limits of the record shape it. The record does not say which copy of a
+card an upgrade went to, nor the deck's order, which an event's random
+pick reads, so after a floor it does not compare the check keeps the
+port's deck if it holds the same cards. The events that throw a potion
+away themselves (Ranwid, The Future of Potions, Stone of All Time, the
+Fake Merchant) pick it off the potions held, so the record's discards on
+those floors wait for the event. And a chest's relic left behind is not
+recorded at all.
 
 runcheck also compares every ancient's options with the record's apart
 from the effects, the dev console's runs included up to their first
@@ -281,16 +347,18 @@ from the game's for the rest of that run (as `history.rs` models with
 
 ### Unported content
 
-An event whose effects are not ported is entered and left with no effect
-(after what laying its options out draws, `event_offer`), counted per
-event. A relic whose pickup is not ported returns an `Unported` marker,
+An event that is not ported is entered and left with no effect, counted
+per event. A relic whose pickup is not ported returns an `Unported` marker,
 not an error, and is counted. The counts, weighted by how often a thing
 comes up and whether it draws on the Rewards stream, say what to port
-next. `examples/forward.rs` prints them: over 200 seeds taking the first
-option (which now buys the first ware it can in every shop), every run
-reaches floor 49. What it
-meets unported is events (56 kinds, 1186 times), then Kaleidoscope (18),
-Glass Eye and Sea Glass (13 each), and a handful of other ancient relics.
+next. `examples/forward.rs` prints them. Over 200 seeds taking the first option,
+which now also lingers in the Abyssal Baths and deciphers the Tablet of
+Truth until they kill, 176 runs reach floor 49, 23 die on the way and
+one is stuck on a Splash an event's transform rolled. The events they
+meet unported are Tinker Time (22 times), Colorful Philosophers (18) and
+Crystal Sphere (16), 56 visits over 200 runs where all 1186 were before;
+then Kaleidoscope (18), Sea Glass (12), Glass Eye (9) and a handful of
+other ancient relics.
 
 ### Rewards and value
 
@@ -356,7 +424,8 @@ the second they are worth nothing.
 3. Run decisions exposed to Python (`step_run`, token rows), the run policy
    with afterstate scoring, PPO over run decisions.
 4. Shops (prices, removal), Neow and the act ancients' options: done.
-   Events by frequency: next.
+   Events: done but Tinker Time, Colorful Philosophers and Crystal
+   Sphere.
 5. The run value as the combat reward; combat fine-tuned inside runs.
 
 ## Open questions
