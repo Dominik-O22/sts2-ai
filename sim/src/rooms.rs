@@ -13,6 +13,7 @@
 use crate::effects::{DeckAction, DeckPick, Offered, RestOption};
 use crate::map::PointId;
 use crate::rewards::{Offer, Rewards};
+use crate::rng::Rng;
 use crate::run::{DeckCard, RunState};
 
 /// One decision, with what it chooses among.
@@ -51,6 +52,29 @@ pub struct First;
 impl Chooser for First {
     fn choose(&mut self, _: &RunState, _: Decision<'_>) -> usize {
         0
+    }
+}
+
+/// Chooses at random on its own RNG, never the run's streams
+/// (docs/run-env.md, Hidden information): uniformly among the options, a
+/// skip counting as one where the decision has one (a card or bundle
+/// reward, an optional deck pick). Relics are all taken, in a random
+/// order, and potions kept: leaving one only throws it away.
+pub struct Random(pub Rng);
+
+impl Chooser for Random {
+    fn choose(&mut self, _: &RunState, decision: Decision<'_>) -> usize {
+        let options = match decision {
+            Decision::Path(points) => points.len(),
+            Decision::Relic(relics) => relics.len(),
+            Decision::Card(cards) => cards.len() + 1,
+            Decision::Bundle(bundles) => bundles.len() + 1,
+            Decision::Potion(_) => 1,
+            Decision::Rest(options) => options.len(),
+            Decision::Ancient(relics) => relics.len(),
+            Decision::Deck { cards, optional, .. } => cards.len() + optional as usize,
+        };
+        self.0.next_int(options.max(1))
     }
 }
 
