@@ -118,6 +118,9 @@ fn then_kind(then: Then) -> usize {
         // keeps the observation layout.
         Then::Select { done: Picked::Exhaust, .. } => 8,
         Then::Select { done: Picked::ToHand, .. } => 2,
+        // The card leaves the hand for good, as an exhaust does. A kind of
+        // its own would change the observation layout.
+        Then::TransformPick { .. } => 0,
     }
 }
 
@@ -412,6 +415,7 @@ fn choice_verb(then: Then) -> &'static str {
         Then::CloneToHand { .. } => "copy",
         Then::Select { done: Picked::Exhaust, .. } => "exhaust",
         Then::Select { done: Picked::ToHand, .. } => "take",
+        Then::TransformPick { .. } => "transform",
     }
 }
 

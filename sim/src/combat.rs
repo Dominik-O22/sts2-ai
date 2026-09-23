@@ -261,6 +261,24 @@ pub struct Stats {
     pub last_card_hit: Option<(u32, i32)>,
     /// Cards picked so far in an open `Then::Select`.
     pub selected: Vec<u32>,
+    /// `History.CardPlaysFinished.Count()`: every play of every card this
+    /// combat, auto-plays and replays included (Gold Axe).
+    pub card_plays_finished: u32,
+    /// Uids whose play finished this player turn and the one before, the
+    /// enemy turn in between counting as the earlier one (Bolas).
+    pub finished_this_turn: Vec<u32>,
+    pub finished_last_turn: Vec<u32>,
+    /// Damage the card play in progress has dealt, blocked and overkill
+    /// included (`TotalDamage + OverkillDamage`, Fisticuffs), with the
+    /// uid of the card that dealt it.
+    pub card_dealt: (u32, i32),
+    /// Entropy's picks so far, transformed together once all are in.
+    pub transform_picks: Vec<u32>,
+    /// Uids of cards transformed at random, and potion slots filled at
+    /// random, since the last snapshot: the replay adopts what the game
+    /// rolled for them.
+    pub transformed: Vec<u32>,
+    pub procured_potions: Vec<usize>,
 }
 
 #[derive(Clone, Debug)]
@@ -721,8 +739,11 @@ impl Combat {
         if card.has(Keyword::Unplayable) || !self.hook_allows_play(card) {
             return false;
         }
-        // Clash.IsPlayable: only with nothing but attacks in hand.
-        if card.id == CardId::Clash && self.player.hand.iter().any(|k| k.ty() != CardType::Attack) {
+        // Clash.IsPlayable: only with nothing but attacks in hand. NoLivingAllies:
+        // a single-player fight has no one else for an AnyAlly card to target.
+        if (card.id == CardId::Clash && self.player.hand.iter().any(|k| k.ty() != CardType::Attack))
+            || card.def().target == TargetType::AnyAlly
+        {
             return false;
         }
         if card.def().x_cost {
@@ -1045,11 +1066,11 @@ impl Combat {
                     self.put_card(card, to);
                 }
             }
-            Effect::GenerateRandom { pool, count, to, free_this_turn, distinct } => {
+            Effect::GenerateRandom { pool, count, to, free_this_turn, distinct, upgraded } => {
                 let subs = self
                     .roll_cards(pool, count, distinct)
                     .into_iter()
-                    .map(|id| Effect::GenerateCard { id, upgraded: false, to, free_this_turn })
+                    .map(|id| Effect::GenerateCard { id, upgraded: upgraded && Card::new(0, id, false).upgradable(), to, free_this_turn })
                     .collect();
                 self.push_front_all(subs);
             }
@@ -1117,11 +1138,14 @@ impl Combat {
                     Pile::Exhaust => &self.player.exhaust,
                     Pile::DrawTop | Pile::DrawBottom | Pile::DrawRandom => &self.player.draw,
                 };
-                let options: Vec<u32> = pile
+                let mut options: Vec<u32> = pile
                     .iter()
                     .filter(|c| filter_ok(filter, c) && !self.stats.selected.contains(&c.uid))
                     .map(|c| c.uid)
                     .collect();
+                if let Then::TransformPick { .. } = then {
+                    options.retain(|u| !self.stats.transform_picks.contains(u));
+                }
                 if !options.is_empty() {
                     self.pending = Some(Pending { options, then, can_skip });
                 } else if let Then::DiscardThenDraw { picked } = then {
@@ -1326,6 +1350,7 @@ impl Combat {
                 if matches!(card.ty(), CardType::Attack | CardType::Skill) {
                     self.stats.attack_skill_plays_this_turn += 1;
                 }
+                self.stats.card_dealt = (uid, 0);
                 // SlothPower.BeforeCardPlayed, SurroundedPower.BeforeCardPlayed.
                 if let Some(p) = self.player.creature.power_mut(PowerId::Sloth) {
                     p.data += 1;
@@ -1360,6 +1385,9 @@ impl Combat {
                 if card.id == CardId::ThrummingHatchet && !self.stats.hatchets_played.contains(&uid) {
                     self.stats.hatchets_played.push(uid);
                 }
+                // History.CardPlayFinished, logged just before the hook.
+                self.stats.card_plays_finished += 1;
+                self.stats.finished_this_turn.push(uid);
                 let subs = self.after_card_played(&card);
                 self.push_front_all(subs);
             }
@@ -1500,6 +1528,110 @@ impl Combat {
                     }
                 }
             }
+            // BeatDown.OnPlay: `StableShuffle` on the Shuffle stream, then the
+            // first `count`. Each is auto-played at a random enemy if it
+            // needs one, which `auto_play` rolls.
+            Effect::AutoPlayDiscardAttacks { count } => {
+                let mut uids: Vec<u32> = self
+                    .player
+                    .discard
+                    .iter()
+                    .filter(|c| c.ty() == CardType::Attack && !c.has(Keyword::Unplayable))
+                    .map(|c| c.uid)
+                    .collect();
+                let mut subs = vec![];
+                for _ in 0..count {
+                    let Some(uid) = self.pick_hit_or_random(&uids) else { break };
+                    uids.retain(|&u| u != uid);
+                    subs.push(Effect::AutoPlay { uid, force_exhaust: false });
+                }
+                self.push_front_all(subs);
+            }
+            // Catastrophe.OnPlay: one card at a time, a playable one if the
+            // draw pile has any, and no reshuffle when it runs dry.
+            Effect::AutoPlayFromDraw { count } => {
+                if count == 0 {
+                    return;
+                }
+                let playable: Vec<u32> =
+                    self.player.draw.iter().filter(|c| !c.has(Keyword::Unplayable)).map(|c| c.uid).collect();
+                let any: Vec<u32> = self.player.draw.iter().map(|c| c.uid).collect();
+                let pick = if playable.is_empty() { self.pick_hit_or_random(&any) } else { self.pick_hit_or_random(&playable) };
+                let mut subs: Vec<Effect> = pick.map(|uid| Effect::AutoPlay { uid, force_exhaust: false }).into_iter().collect();
+                subs.push(Effect::AutoPlayFromDraw { count: count - 1 });
+                self.push_front_all(subs);
+            }
+            // Anointed.OnPlay: `TakeRandom` on CombatCardSelection, as many
+            // as the hand has room for.
+            Effect::PullRaresToHand => {
+                let room = MAX_HAND.saturating_sub(self.player.hand.len());
+                let mut uids: Vec<u32> = self
+                    .player
+                    .draw
+                    .iter()
+                    .filter(|c| c.def().rarity == crate::types::CardRarity::Rare)
+                    .map(|c| c.uid)
+                    .collect();
+                self.rngs.card_selection.shuffle(&mut uids);
+                let subs = uids.into_iter().take(room).map(|uid| Effect::MoveCard { uid, to: Pile::Hand }).collect();
+                self.push_front_all(subs);
+            }
+            // HiddenGem.OnPlay: a playable draw pile card that is not a
+            // curse and not already replayed, an attack, skill or power if
+            // there is one, picked on CombatCardSelection.
+            Effect::ReplayRandomDrawCard { replays } => {
+                let eligible = |c: &Card| {
+                    !c.has(Keyword::Unplayable)
+                        && c.ty() != CardType::Curse
+                        && c.enchantment.map_or(c.replay, |e| e.play_count(c.replay)) < 1
+                };
+                let all: Vec<u32> = self.player.draw.iter().filter(|c| eligible(c)).map(|c| c.uid).collect();
+                let main: Vec<u32> = self
+                    .player
+                    .draw
+                    .iter()
+                    .filter(|c| eligible(c) && matches!(c.ty(), CardType::Attack | CardType::Skill | CardType::Power))
+                    .map(|c| c.uid)
+                    .collect();
+                let options = if main.is_empty() { all } else { main };
+                if let Some(&uid) = self.rngs.card_selection.pick(&options) {
+                    if let Some(c) = self.find_card_mut(uid) {
+                        c.replay += replays;
+                    }
+                }
+            }
+            // EntropyPower.AfterPlayerTurnStart: CardSelectCmd.FromHand for
+            // exactly `count`, which takes the whole hand without asking
+            // when that is no more than `count`.
+            Effect::TransformFromHand { count } => {
+                let hand: Vec<u32> = self.player.hand.iter().map(|c| c.uid).collect();
+                if count == 0 || hand.is_empty() {
+                    return;
+                }
+                if hand.len() <= count as usize {
+                    let subs = self.transforms_in_hand_order(&hand);
+                    self.push_front_all(subs);
+                } else {
+                    self.stats.transform_picks.clear();
+                    self.pending = Some(Pending { options: hand, then: Then::TransformPick { left: count }, can_skip: false });
+                }
+            }
+            // CardCmd.TransformToRandom: a fresh card from the original's
+            // transform pool, in its place, rolled on CombatCardSelection.
+            Effect::TransformRandom { uid } => {
+                let Some(i) = self.player.hand.iter().position(|c| c.uid == uid) else { return };
+                let options = crate::card::transform_options(self.player.hand[i].id);
+                let Some(&id) = self.rngs.card_selection.pick(&options) else { return };
+                let mut card = Card::new(self.new_uid(), id, false);
+                self.card_entered_combat(&mut card);
+                self.stats.transformed.push(card.uid);
+                self.player.hand[i] = card;
+            }
+            Effect::ProcureRandomPotion => {
+                let subs = self.procure_random_potion();
+                self.push_front_all(subs);
+            }
+            Effect::GainGold { amount } => self.gold += amount,
             // EncounterModel.GetNextSlot: a summon with no slot left is
             // simply skipped, which is how Living Fog stops at five bombs.
             Effect::SpawnMonster { id, flags } => {
@@ -1732,6 +1864,15 @@ impl Combat {
                         subs.push(Effect::MoveCard { uid, to: Pile::Hand });
                     }
                 }
+                // Bolas.BeforeHandDraw, a card hook, so after the relics: a
+                // Bolas played last turn comes back to hand.
+                let bolas: Vec<u32> = self
+                    .all_cards()
+                    .filter(|k| k.id == CardId::Bolas && self.stats.finished_last_turn.contains(&k.uid))
+                    .filter(|k| !self.player.hand.iter().any(|h| h.uid == k.uid))
+                    .map(|k| k.uid)
+                    .collect();
+                subs.extend(bolas.into_iter().map(|uid| Effect::MoveCard { uid, to: Pile::Hand }));
                 subs.push(Effect::TurnDraw);
                 // Imbued.AfterAutoPrePlayPhaseEntered: on turn one it plays
                 // itself out of hand, which the bottom-of-pile rule feeds.
@@ -1783,6 +1924,8 @@ impl Combat {
         subs.extend(self.collect_powers(|p, owner, _| p.after_side_turn_start(owner, side, turn, round)));
         subs.extend(self.relic_after_side_turn_start(side));
         if side == Side::Player {
+            // Hook.AfterAutoPrePlayPhaseEntered: powers, then relics.
+            subs.extend(self.player.creature.powers.iter().flat_map(|p| p.after_auto_pre_play()));
             subs.extend(self.relic_auto_pre_play());
         }
         if side == Side::Enemy {
@@ -1977,6 +2120,7 @@ impl Combat {
         s.last_turn_card = s.last_card.take();
         s.attack_skill_plays_this_turn = 0;
         s.hatchets_played_last_turn = std::mem::take(&mut s.hatchets_played);
+        s.finished_last_turn = std::mem::take(&mut s.finished_this_turn);
     }
 
     /// `PlayerCombatState.EndOfTurnCleanup` over every card in combat.
@@ -2162,7 +2306,8 @@ impl Combat {
         if !self.player.creature.alive() {
             return vec![];
         }
-        if card.has(Keyword::Unplayable) || !self.hook_allows_play(&card) {
+        // An AnyAlly card finds no ally to aim at and is not played either.
+        if card.has(Keyword::Unplayable) || !self.hook_allows_play(&card) || card.def().target == TargetType::AnyAlly {
             // MoveToResultPileWithoutPlaying. AutoPlayFromDrawPile sets
             // ExhaustOnNextPlay before it plays anything, so Havoc burns a
             // card it could not play rather than discarding it, and burning
@@ -2199,6 +2344,59 @@ impl Combat {
             self.player.play.push(c);
         }
         vec![Effect::PlayCard { uid, target, paid: 0 }]
+    }
+
+    /// One card from `uids` for a random auto-play (Beat Down, Catastrophe).
+    /// The recording names the cards that dealt damage since the snapshot,
+    /// so the first candidate it names wins, and the run of hit records
+    /// that card left (one per hit) is spent with it. Otherwise a roll on
+    /// CombatCardSelection, which a replay can re-roll; the game uses the
+    /// Shuffle stream, which the sim never shares with it.
+    fn pick_hit_or_random(&mut self, uids: &[u32]) -> Option<u32> {
+        let hit = self.script.hit_cards.iter().enumerate().find_map(|(i, &id)| {
+            let uid = uids.iter().copied().find(|&u| self.find_card(u).is_some_and(|k| k.id == id))?;
+            Some((i, id, uid))
+        });
+        match hit {
+            Some((i, id, uid)) => {
+                let run = self.script.hit_cards[i..].iter().take_while(|&&h| h == id).count();
+                self.script.hit_cards.drain(i..i + run);
+                Some(uid)
+            }
+            None => self.rngs.card_selection.pick(uids).copied(),
+        }
+    }
+
+    /// `CardCmd.Transform` sorts its transformations by pile and index, so
+    /// several picked cards are transformed left to right.
+    fn transforms_in_hand_order(&self, uids: &[u32]) -> Vec<Effect> {
+        self.player.hand.iter().filter(|c| uids.contains(&c.uid)).map(|c| Effect::TransformRandom { uid: c.uid }).collect()
+    }
+
+    /// `PotionCmd.TryToProcure` of a random in-combat potion
+    /// (`PotionFactory.CreateRandomPotionInCombat`: a rarity roll, then a
+    /// pick among what can be made in combat). Sozu refuses it, a full belt
+    /// has no room, and Belt Buckle takes back its Dexterity once a potion
+    /// arrives.
+    fn procure_random_potion(&mut self) -> Vec<Effect> {
+        use crate::potion::{Rarity, ALL};
+        let roll = self.rngs.potion_generation.next_float(1.0);
+        let rarity = if roll <= 0.1 {
+            Rarity::Rare
+        } else if roll <= 0.35 {
+            Rarity::Uncommon
+        } else {
+            Rarity::Common
+        };
+        let options: Vec<PotionId> = ALL.iter().copied().filter(|p| p.rarity() == rarity && p.generatable_in_combat()).collect();
+        let Some(&id) = self.rngs.potion_generation.pick(&options) else { return vec![] };
+        if self.has_relic(crate::relic::RelicId::Sozu) {
+            return vec![];
+        }
+        let Some(slot) = self.potions.iter().position(Option::is_none) else { return vec![] };
+        self.potions[slot] = Some(id);
+        self.stats.procured_potions.push(slot);
+        self.relic_after_potion_procured()
     }
 
     // ---- piles -------------------------------------------------------------
@@ -2262,6 +2460,9 @@ impl Combat {
         self.player.hand.push(card);
         self.stats.last_drawn = Some(uid);
         self.bind_drawn(uid);
+        for p in &mut self.player.creature.powers {
+            out.extend(p.after_card_drawn());
+        }
         if strike && self.player.creature.power(PowerId::Hellraiser).is_some() {
             out.push(Effect::AutoPlay { uid, force_exhaust: false });
         }
@@ -2391,8 +2592,10 @@ impl Combat {
         if let Some(e) = card.and_then(|u| self.find_card(u)).and_then(|c| c.enchantment.as_ref()) {
             num += e.block_additive();
         }
+        // FastenPower only looks at block from Defends or from no card.
+        let defend_source = card.and_then(|u| self.find_card(u)).is_none_or(|c| c.has_tag(Tag::Defend));
         for (owner, p) in self.listeners() {
-            num += p.modify_block_additive(owner, source_owner, props);
+            num += p.modify_block_additive(owner, source_owner, props, defend_source);
         }
         for (owner, p) in self.listeners() {
             num *= p.modify_block_multiplicative(owner, target, props, plays, card.is_some());
@@ -2472,9 +2675,15 @@ impl Combat {
                 buffered = true;
             }
         }
-        let c = self.creature_mut(target);
         // Creature.LoseHpInternal: truncate once.
         let mut lost = unblocked.min(CLAMP) as i32;
+        // The hit's TotalDamage + OverkillDamage, before any death save.
+        if let Some(u) = card {
+            if self.stats.card_dealt.0 == u {
+                self.stats.card_dealt.1 += blocked as i32 + lost;
+            }
+        }
+        let c = self.creature_mut(target);
         let was_alive = c.alive();
         let before = c.hp;
         c.hp = (c.hp - lost).max(0);
@@ -3228,6 +3437,15 @@ impl Combat {
                 let then = Then::Select { from, filter, left: left - 1, optional, done };
                 vec![Effect::Choose { from, filter, then, can_skip: optional }]
             }
+            Then::TransformPick { left } => {
+                self.stats.transform_picks.push(uid);
+                if left > 1 {
+                    vec![Effect::Choose { from: Pile::Hand, filter: CardFilter::Any, then: Then::TransformPick { left: left - 1 }, can_skip: false }]
+                } else {
+                    let picks = std::mem::take(&mut self.stats.transform_picks);
+                    self.transforms_in_hand_order(&picks)
+                }
+            }
         }
     }
 }
@@ -3294,20 +3512,31 @@ fn shuffle_cards(cards: &mut Vec<Card>, script: &mut Script, rng: &mut crate::rn
     log.push(cards.iter().map(|c| (c.id, c.upgraded)).collect());
 }
 
-/// Generatable Ironclad cards for a `GenPool`.
+/// The cards a `GenPool` draws from: `CardFactory.FilterForCombat` (can be
+/// generated in combat, not Basic, not Ancient, which in the Ironclad pool
+/// is every Special) and `FilterForPlayerCount` (no multiplayer-only cards).
 fn pool_cards(pool: GenPool) -> Vec<CardId> {
-    IRONCLAD_POOL
+    use crate::types::CardRarity::{Common, Rare, Uncommon};
+    let source = match pool {
+        GenPool::Colorless => crate::card::COLORLESS_POOL,
+        _ => IRONCLAD_POOL,
+    };
+    source
         .iter()
         .copied()
         .filter(|id| {
             let d = crate::card::def(*id);
             d.generatable
+                && matches!(d.rarity, Common | Uncommon | Rare)
+                && !crate::card::MULTIPLAYER_ONLY.contains(id)
                 && match pool {
                     GenPool::Ironclad => true,
                     GenPool::IroncladAttacks => d.ty == CardType::Attack,
                     GenPool::IroncladSkills => d.ty == CardType::Skill,
                     GenPool::IroncladPowers => d.ty == CardType::Power,
                     GenPool::IroncladCommon => d.rarity == crate::types::CardRarity::Common,
+                    GenPool::IroncladZeroCost => d.cost == 0 && !d.x_cost,
+                    GenPool::Colorless => *id != CardId::JackOfAllTrades,
                 }
         })
         .collect()

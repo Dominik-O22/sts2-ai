@@ -75,6 +75,9 @@ pub enum Then {
     /// a time, acted on together once it closes (`CardSelectCmd` with a max
     /// above 1: Purity, Stratagem). `optional` allows stopping early.
     Select { from: Pile, filter: CardFilter, left: u8, optional: bool, done: Picked },
+    /// Set it aside for a random transform, `left` picks still to make;
+    /// the transforms happen once every pick is in (Entropy).
+    TransformPick { left: u32 },
 }
 
 /// What a finished `Then::Select` does with every card picked.
@@ -95,6 +98,11 @@ pub enum GenPool {
     IroncladPowers,
     /// Ironclad Commons (Hello World).
     IroncladCommon,
+    /// Ironclad cards printed at 0 energy, X costs left out (Jackpot).
+    IroncladZeroCost,
+    /// The colorless pool less Jack of All Trades, the one card drawing
+    /// from it.
+    Colorless,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -170,7 +178,8 @@ pub enum Effect {
     /// card already in combat, enchantment and modifiers included.
     CloneCard { uid: u32, to: Pile },
     /// Random cards from a pool (`CardFactory.GetForCombat` / `GetDistinctForCombat`).
-    GenerateRandom { pool: GenPool, count: u32, to: Pile, free_this_turn: bool, distinct: bool },
+    /// `upgraded` upgrades each one as it is made (Jackpot+).
+    GenerateRandom { pool: GenPool, count: u32, to: Pile, free_this_turn: bool, distinct: bool, upgraded: bool },
     /// `GenerateRandom` whose cards are `SetToFreeThisCombat` before they go
     /// in (Metamorphosis).
     GenerateRandomFreeThisCombat { pool: GenPool, count: u32, to: Pile, distinct: bool },
@@ -265,6 +274,28 @@ pub enum Effect {
     AutoPlayRandomAttack,
     /// Aggression: move up to `count` random attacks from discard to hand, upgraded.
     AggressionPull { count: u32 },
+    /// Beat Down: auto-play up to `count` random playable attacks from the
+    /// discard pile, all picked before the first is played.
+    AutoPlayDiscardAttacks { count: u32 },
+    /// Catastrophe: auto-play a random card from the draw pile (a playable
+    /// one if there is any), `count` times, picking each after the last
+    /// has resolved.
+    AutoPlayFromDraw { count: u32 },
+    /// Anointed: every Rare in the draw pile that fits into the hand, a
+    /// random selection of them when not all do.
+    PullRaresToHand,
+    /// Hidden Gem: a random draw pile card gets `replays` extra plays.
+    ReplayRandomDrawCard { replays: u32 },
+    /// `EntropyPower`: pick `count` hand cards (all of them if that is
+    /// every card) and transform each into a random one.
+    TransformFromHand { count: u32 },
+    /// `CardCmd.TransformToRandom` for one card, in place.
+    TransformRandom { uid: u32 },
+    /// `PotionCmd.TryToProcure` of `PotionFactory.CreateRandomPotionInCombat`
+    /// (Alchemize): into the first empty slot, if there is one.
+    ProcureRandomPotion,
+    /// `PlayerCmd.GainGold` (Hand of Greed).
+    GainGold { amount: i32 },
 
     /// `CreatureCmd.Add`: a monster joins the enemy side mid-combat.
     SpawnMonster { id: MonsterId, flags: Flags },

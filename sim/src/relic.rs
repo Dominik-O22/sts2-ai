@@ -431,6 +431,7 @@ impl Combat {
                     to: Pile::Hand,
                     free_this_turn: true,
                     distinct: true,
+                    upgraded: false,
                 }),
                 PaelsLegion => r.combat_counter -= 1,
                 // PaelsTears: `used` is HadLeftoverEnergy from last turn's end.
@@ -491,6 +492,7 @@ impl Combat {
                     to: Pile::Hand,
                     free_this_turn: true,
                     distinct: true,
+                    upgraded: false,
                 }),
                 MrStruggles => out.push(all_enemies_damage(turn as i32)),
                 RoyalPoison if turn <= 1 => out.push(Effect::Damage {
@@ -1027,6 +1029,19 @@ impl Combat {
             Some(r) if no_potions && !r.used => {
                 r.used = true;
                 vec![self_power(PowerId::Dexterity, 2)]
+            }
+            _ => vec![],
+        }
+    }
+
+    /// `AfterPotionProcured`: Belt Buckle takes its Dexterity back while a
+    /// potion is carried (`used` is its `DexterityApplied`).
+    pub(crate) fn relic_after_potion_procured(&mut self) -> Vec<Effect> {
+        let carrying = self.potions.iter().any(Option::is_some);
+        match self.relic_mut(RelicId::BeltBuckle) {
+            Some(r) if carrying && r.used => {
+                r.used = false;
+                vec![self_power(PowerId::Dexterity, -2)]
             }
             _ => vec![],
         }

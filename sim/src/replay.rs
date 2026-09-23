@@ -219,8 +219,10 @@ fn diff(recorded: &Value, sim: &Value) -> Option<String> {
 /// matches: the recording does not say which card was picked.
 fn settle(c: &Combat, snap: &Value, depth: u32) -> Result<Combat, String> {
     if c.pending.is_none() {
-        return match diff(snap, &snapshot_of(c)) {
-            None => Ok(c.clone()),
+        let mut k = c.clone();
+        adopt_random_results(&mut k, snap);
+        return match diff(snap, &snapshot_of(&k)) {
+            None => Ok(k),
             Some(d) => Err(d),
         };
     }
@@ -314,6 +316,51 @@ fn adopt_layout(c: &mut Combat, snap: &Value, opening: bool) {
     let (hand, draw): (Vec<_>, Vec<_>) = want.iter().zip(placed).partition(|((in_hand, _), _)| *in_hand);
     c.player.hand = hand.into_iter().filter_map(|(_, k)| k).collect();
     c.player.draw = draw.into_iter().filter_map(|(_, k)| k).collect();
+}
+
+/// Results the game rolls and nothing records, which the snapshot shows
+/// once they are in: a card Entropy transformed at random, and a potion
+/// Alchemize procured. Take the snapshot's hand card that the sim cannot
+/// account for in place of each transformed card, and the snapshot's potion
+/// in each slot filled at random. Runs on the settled branch, after any
+/// choice, since Entropy's picks decide which cards were transformed.
+fn adopt_random_results(c: &mut Combat, snap: &Value) {
+    let transformed = std::mem::take(&mut c.stats.transformed);
+    let procured = std::mem::take(&mut c.stats.procured_potions);
+    if transformed.is_empty() && procured.is_empty() {
+        return;
+    }
+    let ids = Ids::new();
+    let empty = vec![];
+    let key = |k: &Card| (slug(&format!("{:?}", k.id)), k.upgraded);
+    // Snapshot hand cards left over once every untransformed sim card
+    // has claimed its match.
+    let mut unclaimed: Vec<(String, bool)> = snap["hand"]
+        .as_array()
+        .unwrap_or(&empty)
+        .iter()
+        .filter_map(|r| Some((r["id"].as_str()?.to_string(), r["up"].as_bool().unwrap_or(false))))
+        .collect();
+    for k in c.player.hand.iter().filter(|k| !transformed.contains(&k.uid)) {
+        if let Some(i) = unclaimed.iter().position(|u| *u == key(k)) {
+            unclaimed.remove(i);
+        }
+    }
+    for k in c.player.hand.iter_mut().filter(|k| transformed.contains(&k.uid)) {
+        if let Some(i) = unclaimed.iter().position(|u| *u == key(k)) {
+            unclaimed.remove(i);
+            continue;
+        }
+        if let Some(i) = unclaimed.iter().position(|(id, up)| !up && ids.cards.contains_key(id)) {
+            k.id = ids.cards[&unclaimed.remove(i).0];
+        }
+    }
+    let slots = snap["potions"].as_array().unwrap_or(&empty);
+    for slot in procured {
+        if let Some(&id) = slots.get(slot).and_then(Value::as_str).and_then(|name| ids.potions.get(name)) {
+            c.potions[slot] = Some(id);
+        }
+    }
 }
 
 /// Snecko Oil rolls each hand card's cost; the recording shows the

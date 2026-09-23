@@ -349,6 +349,14 @@ power Stratagem
 power TagTeam
 power TheBomb
 power TheGambit
+power Automation
+power BeaconOfHope
+power Calamity
+power DarkShackles
+power Entropy
+power Fasten
+power Knockdown
+power Mayhem
 monster Nibbit
 monster FuzzyWurmCrawler
 monster ShrinkerBeetle

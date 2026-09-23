@@ -54,6 +54,11 @@ pub enum TargetType {
     AnyEnemy,
     AllEnemies,
     RandomEnemy,
+    /// Another living player. Alone there is none, so `CardModel.CanPlay`
+    /// refuses the card (`NoLivingAllies`) and an auto-play skips it.
+    AnyAlly,
+    /// Every player on your side, you included.
+    AllAllies,
 }
 
 /// `Entities/Cards/CardKeyword.cs`.
