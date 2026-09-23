@@ -77,6 +77,11 @@ impl UnknownOdds {
     const ROOMS: [RoomType; 4] = [RoomType::Monster, RoomType::Elite, RoomType::Treasure, RoomType::Shop];
     const BASE: [f32; 4] = [0.1, -1.0, 0.02, 0.03];
 
+    /// The odds as the player can count them, in `ROOMS` order.
+    pub fn odds(&self) -> [f32; 4] {
+        self.0
+    }
+
     /// `ResetToBase`, which every new act does.
     pub fn reset(&mut self) {
         self.0 = Self::BASE;

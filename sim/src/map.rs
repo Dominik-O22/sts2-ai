@@ -47,6 +47,13 @@ pub enum PointType {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PointId(u32);
 
+impl PointId {
+    /// Its slot in the map's points, for tables over them.
+    pub fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
 /// A .NET `HashSet<MapPoint>` as far as its enumeration order goes. `MapPoint`
 /// hashes by identity, and a `HashSet` enumerates its entry array in slot
 /// order whatever the hashes: an add takes the most recently freed slot, or
