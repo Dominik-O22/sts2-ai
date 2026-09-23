@@ -476,15 +476,16 @@ class Pilot:
     run in the background and logged to `sts2ai/pilot.log`. It steps
     aside for jobs that need a person."""
 
-    def __init__(self, checkpoint: Path):
+    def __init__(self, checkpoint: Path, search: int = 0):
         self.checkpoint = checkpoint
+        self.search = search
         self.proc: subprocess.Popen | None = None
 
     def start(self) -> None:
         if self.proc is None:
             log = open(GAME_DIR / "pilot.log", "a")
             self.proc = subprocess.Popen(
-                [sys.executable, "-m", "sts2ai.play", str(self.checkpoint), "--record"],
+                [sys.executable, "-m", "sts2ai.play", str(self.checkpoint), "--record", "--search", str(self.search)],
                 cwd=ROOT, stdout=log, stderr=subprocess.STDOUT,
             )
 
@@ -594,6 +595,7 @@ def main() -> None:
     ap.add_argument("--redo", action="store_true", help="include jobs that already replay clean")
     ap.add_argument("--repeat", type=int, default=1, metavar="N", help="run each job N times")
     ap.add_argument("--pilot", type=Path, metavar="CKPT", help="let this checkpoint play the fights")
+    ap.add_argument("--search", type=int, default=0, metavar="N", help="the pilot runs a turn search with N sim copies (stronger, slower)")
     ap.add_argument("--queue", action="store_true", help="keep running, taking jobs from sts2ai/queue.jsonl")
     ap.add_argument("--no-deck", action="store_true", help="leave the run's deck alone")
     ap.add_argument("--plain", action="store_true", help="drop Fresnel Lens, so no card arrives enchanted")
@@ -633,7 +635,7 @@ def main() -> None:
         send(PLAIN)
     run = None if args.no_deck else Run()
 
-    pilot = Pilot(args.pilot) if args.pilot else None
+    pilot = Pilot(args.pilot, args.search) if args.pilot else None
     # Unattended, the animations are only time: instant mode, put back after.
     instant_before = instant_mode(True) if pilot else None
     clean, failed = [], []
