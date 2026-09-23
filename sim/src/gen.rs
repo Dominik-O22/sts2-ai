@@ -128,6 +128,9 @@ impl FightSetup {
                 Ok::<_, String>(k)
             })
             .collect::<Result<_, _>>()?;
+        if let Some((id, why)) = crate::card::UNSUPPORTED_CARDS.iter().find(|(id, _)| deck.iter().any(|k| k.id == *id)) {
+            return Err(format!("unsupported card {id:?}: {why}"));
+        }
         let relics: Vec<Relic> = start["relics"]
             .as_array()
             .map(|a| {

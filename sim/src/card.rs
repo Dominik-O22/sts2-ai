@@ -244,46 +244,50 @@ defs! {
     UltimateDefend: 1, Skill, Uncommon, Self_;
     UltimateStrike: 1, Attack, Uncommon, AnyEnemy;
     Volley: -1, Attack, Uncommon, RandomEnemy, x = true;
-    Apotheosis: 2, Skill, Special, Self_;
-    Apparition: 1, Skill, Special, Self_;
+    Apotheosis: 2, Skill, Special, Self_, kw = [Exhaust, Innate];
+    Apparition: 1, Skill, Special, Self_, kw = [Ethereal, Exhaust];
     BrightestFlame: 0, Skill, Special, Self_;
     ByrdSwoop: 0, Attack, Special, AnyEnemy;
     Caltrops: 1, Power, Special, Self_;
     Clash: 0, Attack, Special, AnyEnemy;
-    Distraction: 1, Skill, Special, Self_;
+    Distraction: 1, Skill, Special, Self_, kw = [Exhaust];
     DualWield: 1, Skill, Special, Self_;
-    Enlightenment: 0, Skill, Special, Self_;
+    Enlightenment: 0, Skill, Special, Self_, kw = [Exhaust];
     Entrench: 2, Skill, Special, Self_;
     Exterminate: 1, Attack, Special, AllEnemies;
     FeedingFrenzy: 0, Skill, Special, Self_;
     HelloWorld: 1, Power, Special, Self_;
     MadScience: 1, Attack, Special, AnyEnemy;
     Maul: 1, Attack, Special, AnyEnemy;
-    Metamorphosis: 2, Skill, Special, Self_;
-    NeowsFury: 1, Attack, Special, AnyEnemy;
+    Metamorphosis: 2, Skill, Special, Self_, kw = [Exhaust];
+    NeowsFury: 1, Attack, Special, AnyEnemy, kw = [Exhaust], gen = false;
     Outmaneuver: 1, Skill, Special, Self_;
     Peck: 1, Attack, Special, AnyEnemy;
     Rebound: 1, Attack, Special, AnyEnemy;
-    Relax: 3, Skill, Special, Self_;
+    Relax: 3, Skill, Special, Self_, kw = [Exhaust];
     RipAndTear: 1, Attack, Special, RandomEnemy;
     Squash: 1, Attack, Special, AnyEnemy;
     Stack: 1, Skill, Special, Self_;
     ToricToughness: 2, Skill, Special, Self_;
-    Whistle: 3, Attack, Special, AnyEnemy;
-    Wish: 0, Skill, Special, Self_;
-    ByrdonisEgg: -1, Curse, Special, None;
-    LanternKey: -1, Curse, Special, Self_;
-    SpoilsMap: -1, Curse, Special, Self_;
-    Debris: 1, Status, Special, None;
-    Void: -1, Status, Special, None;
-    Shiv: 0, Attack, Special, AnyEnemy;
-    Soul: 0, Skill, Special, Self_;
-    Fuel: 0, Skill, Special, Self_;
-    SovereignBlade: 2, Attack, Special, AnyEnemy;
-    MinionDiveBomb: 0, Attack, Special, AnyEnemy;
-    MinionSacrifice: 0, Skill, Special, Self_;
-    MinionStrike: 0, Attack, Special, AnyEnemy;
-    SweepingGaze: 0, Attack, Special, RandomEnemy;
+    Whistle: 3, Attack, Special, AnyEnemy, kw = [Exhaust];
+    Wish: 0, Skill, Special, Self_, kw = [Exhaust];
+    // Quest cards (`CardType.Quest`, kept as Curse): unplayable, all their
+    // effects are outside combat.
+    ByrdonisEgg: -1, Curse, Special, None, kw = [Unplayable], gen = false;
+    LanternKey: -1, Curse, Special, Self_, kw = [Unplayable], gen = false;
+    SpoilsMap: -1, Curse, Special, Self_, kw = [Unplayable], gen = false;
+    Debris: 1, Status, Special, None, kw = [Exhaust], gen = false;
+    Void: -1, Status, Special, None, kw = [Unplayable, Ethereal], gen = false;
+    // Tokens. The Shiv, Minion and OstyAttack tags carry no logic the
+    // Ironclad can reach, so only Minion Strike's Strike tag is kept.
+    Shiv: 0, Attack, Special, AnyEnemy, kw = [Exhaust];
+    Soul: 0, Skill, Special, Self_, kw = [Exhaust];
+    Fuel: 0, Skill, Special, Self_, kw = [Exhaust];
+    SovereignBlade: 2, Attack, Special, AnyEnemy, kw = [Retain];
+    MinionDiveBomb: 0, Attack, Special, AnyEnemy, kw = [Exhaust];
+    MinionSacrifice: 0, Skill, Special, Self_, kw = [Exhaust];
+    MinionStrike: 0, Attack, Special, AnyEnemy, kw = [Exhaust], tags = [Strike];
+    SweepingGaze: 0, Attack, Special, RandomEnemy, kw = [Ethereal, Exhaust];
 }
 
 /// The Ironclad card pool in `IroncladCardPool.cs` order, for generation.
@@ -306,6 +310,14 @@ pub const IRONCLAD_POOL: &[CardId] = &[
     CardId::SwordBoomerang, CardId::Taunt, CardId::TearAsunder, CardId::Thrash, CardId::Thunderclap,
     CardId::Tremble, CardId::TrueGrit, CardId::TwinStrike, CardId::Unmovable, CardId::Unrelenting,
     CardId::Uppercut, CardId::Vicious, CardId::Whirlwind,
+];
+
+/// Cards the sim cannot play faithfully. A fight whose deck holds one is
+/// refused by `gen::FightSetup::from_start` rather than simulated wrong.
+pub const UNSUPPORTED_CARDS: &[(CardId, &str)] = &[
+    // MadScience.cs: its type and rider are picked at the Tinker Time event
+    // and saved on the card; the recorded deck carries neither.
+    (CardId::MadScience, "type and rider come from Tinker Time and are not recorded"),
 ];
 
 /// `Models/Afflictions/*.cs` from act 3. Smog predates this and lives in
@@ -408,6 +420,9 @@ impl Card {
             Barricade | BodySlam | Corruption | DarkEmbrace | ExpectAFight | Havoc | Hellraiser | MindBlast
                 | InfernalBlade | Stampede | Unmovable
         );
+        // Event and token cards whose `OnUpgrade` is `EnergyCost.UpgradeBy(-1)`.
+        let cheaper_when_upgraded =
+            cheaper_when_upgraded || matches!(self.id, Apotheosis | Distraction | Entrench | SovereignBlade);
         if self.upgraded && cheaper_when_upgraded {
             c - 1
         } else {
@@ -452,7 +467,19 @@ impl Card {
         if k == Keyword::Retain && self.retain_added {
             return true;
         }
-        if self.def().keywords.contains(&k) {
+        // Upgrades that drop a keyword: Apparition+ is not Ethereal.
+        let dropped = self.upgraded && self.id == CardId::Apparition && k == Keyword::Ethereal;
+        if self.def().keywords.contains(&k) && !dropped {
+            return true;
+        }
+        // Upgrades that add one: Hello World+ and Mad Science+ are Innate,
+        // Wish+ Retains.
+        if self.upgraded
+            && matches!(
+                (self.id, k),
+                (CardId::HelloWorld | CardId::MadScience, Keyword::Innate) | (CardId::Wish, Keyword::Retain)
+            )
+        {
             return true;
         }
         if k == Keyword::Ethereal && (self.ethereal_added || self.affliction == Some(Affliction::Hexed)) {
@@ -464,7 +491,8 @@ impl Card {
     /// `CardModel.GainsBlock`: whether the printed card ever grants block,
     /// which is what Nimble and Goopy check before they can sit on it.
     pub fn gains_block(&self) -> bool {
-        self.vars().block > 0.0
+        // Entrench and Stack compute their block, and override GainsBlock.
+        matches!(self.id, CardId::Entrench | CardId::Stack) || self.vars().block > 0.0
     }
 
     pub fn has_tag(&self, t: Tag) -> bool {
@@ -495,8 +523,42 @@ impl Card {
             Alchemize | Anointed | Automation | BeaconOfHope | BeatDown | BelieveInYou | Bolas | Calamity | Catastrophe | Coordinate | DarkShackles | Discovery | DramaticEntrance | Entropy | Equilibrium | EternalArmor | Fasten | Finesse | Fisticuffs | FlashOfSteel | GangUp | GoldAxe | HandOfGreed | HiddenGem | HuddleUp | Impatience | Intercept | JackOfAllTrades | Jackpot | Knockdown | Lift | MasterOfStrategy | Mayhem | Mimic => d(),
             // Not ported yet, group B; the porter deletes this arm.
             Nostalgia | Omnislice | Panache | PanicButton | PrepTime | Production | Prolong | Prowess | Purity | Rally | Rend | Restlessness | RollingBoulder | Salvo | Scrawl | SecretTechnique | SecretWeapon | SeekerStrike | Shockwave | Splash | Stratagem | TagTeam | TheBomb | TheGambit | ThinkingAhead | ThrummingHatchet | UltimateDefend | UltimateStrike | Volley => d(),
-            // Not ported yet, group C; the porter deletes this arm.
-            Apotheosis | Apparition | BrightestFlame | ByrdSwoop | Caltrops | Clash | Distraction | DualWield | Enlightenment | Entrench | Exterminate | FeedingFrenzy | HelloWorld | MadScience | Maul | Metamorphosis | NeowsFury | Outmaneuver | Peck | Rebound | Relax | RipAndTear | Squash | Stack | ToricToughness | Whistle | Wish | ByrdonisEgg | LanternKey | SpoilsMap | Debris | Void | Shiv | Soul | Fuel | SovereignBlade | MinionDiveBomb | MinionSacrifice | MinionStrike | SweepingGaze => d(),
+            // Event, quest, status and token cards. Mad Science is in
+            // UNSUPPORTED_CARDS.
+            Apotheosis | Distraction | Enlightenment | Entrench | HelloWorld | MadScience | Wish | ByrdonisEgg
+            | LanternKey | SpoilsMap | Debris => d(),
+            Apparition => Vars { magic: 1.0, ..d() },
+            // `magic` is the max HP it costs.
+            BrightestFlame => Vars { magic: 1.0, energy: if up { 3 } else { 2 }, cards: picku(2, 3), ..d() },
+            ByrdSwoop | Clash => Vars { damage: pick(14.0, 18.0), ..d() },
+            Caltrops => Vars { magic: pick(3.0, 5.0), ..d() },
+            DualWield => Vars { cards: picku(1, 2), ..d() },
+            Exterminate => Vars { damage: pick(3.0, 4.0), hits: 4, ..d() },
+            FeedingFrenzy => Vars { magic: pick(5.0, 7.0), ..d() },
+            // `magic` is the Increase every Maul gets per Maul played.
+            Maul => Vars { damage: pick(5.0, 6.0), magic: pick(1.0, 2.0), hits: 2, ..d() },
+            Metamorphosis => Vars { cards: picku(3, 5), ..d() },
+            NeowsFury => Vars { damage: pick(10.0, 14.0), cards: picku(2, 3), ..d() },
+            Outmaneuver => Vars { energy: if up { 3 } else { 2 }, ..d() },
+            Peck => Vars { damage: 2.0, hits: picku(3, 4), ..d() },
+            Rebound => Vars { damage: pick(9.0, 12.0), ..d() },
+            Relax => Vars { block: pick(15.0, 17.0), cards: picku(2, 3), energy: if up { 3 } else { 2 }, ..d() },
+            RipAndTear => Vars { damage: pick(7.0, 9.0), hits: 2, ..d() },
+            Squash => Vars { damage: pick(10.0, 12.0), magic: pick(2.0, 3.0), ..d() },
+            // CalculationBase; one more per card in the discard pile.
+            Stack => Vars { block: pick(0.0, 3.0), ..d() },
+            // `magic` is the Turns.
+            ToricToughness => Vars { block: pick(5.0, 7.0), magic: 2.0, ..d() },
+            Whistle => Vars { damage: pick(33.0, 44.0), ..d() },
+            Void => Vars { energy: 1, ..d() },
+            Shiv => Vars { damage: pick(4.0, 6.0), ..d() },
+            Soul => Vars { cards: picku(2, 3), ..d() },
+            Fuel => Vars { energy: 1, cards: picku(1, 2), ..d() },
+            SovereignBlade => Vars { damage: 10.0, hits: 1, ..d() },
+            MinionDiveBomb => Vars { damage: pick(13.0, 16.0), ..d() },
+            MinionSacrifice => Vars { block: pick(8.0, 11.0), ..d() },
+            MinionStrike => Vars { damage: pick(6.0, 9.0), cards: 1, ..d() },
+            SweepingGaze => Vars { damage: pick(10.0, 15.0), ..d() },
             Aggression | Barricade | Cascade | Havoc | Hellraiser | InfernalBlade | PrimalForce
             | Stoke | Unmovable | Wound | Dazed | AscendersBane | DarkEmbrace | Juggling | Corruption => d(),
             // Curses. Regret reads the hand it ends the turn in, so its
@@ -638,8 +700,97 @@ impl Card {
             Alchemize | Anointed | Automation | BeaconOfHope | BeatDown | BelieveInYou | Bolas | Calamity | Catastrophe | Coordinate | DarkShackles | Discovery | DramaticEntrance | Entropy | Equilibrium | EternalArmor | Fasten | Finesse | Fisticuffs | FlashOfSteel | GangUp | GoldAxe | HandOfGreed | HiddenGem | HuddleUp | Impatience | Intercept | JackOfAllTrades | Jackpot | Knockdown | Lift | MasterOfStrategy | Mayhem | Mimic => vec![],
             // Not ported yet, group B; the porter deletes this arm.
             Nostalgia | Omnislice | Panache | PanicButton | PrepTime | Production | Prolong | Prowess | Purity | Rally | Rend | Restlessness | RollingBoulder | Salvo | Scrawl | SecretTechnique | SecretWeapon | SeekerStrike | Shockwave | Splash | Stratagem | TagTeam | TheBomb | TheGambit | ThinkingAhead | ThrummingHatchet | UltimateDefend | UltimateStrike | Volley => vec![],
-            // Not ported yet, group C; the porter deletes this arm.
-            Apotheosis | Apparition | BrightestFlame | ByrdSwoop | Caltrops | Clash | Distraction | DualWield | Enlightenment | Entrench | Exterminate | FeedingFrenzy | HelloWorld | MadScience | Maul | Metamorphosis | NeowsFury | Outmaneuver | Peck | Rebound | Relax | RipAndTear | Squash | Stack | ToricToughness | Whistle | Wish | ByrdonisEgg | LanternKey | SpoilsMap | Debris | Void | Shiv | Soul | Fuel | SovereignBlade | MinionDiveBomb | MinionSacrifice | MinionStrike | SweepingGaze => vec![],
+            // Apotheosis.cs: every other card in combat.
+            Apotheosis => vec![Effect::UpgradeAll { except: uid }],
+            Apparition => vec![self_power(PowerId::Intangible, m)],
+            // BrightestFlame.cs: `LoseMaxHp(isFromCard: true)`.
+            BrightestFlame => vec![
+                Effect::GainEnergy { amount: v.energy },
+                draw(v.cards),
+                Effect::LoseMaxHp { target: me, amount: m, from_card: true },
+            ],
+            // ByrdSwoop.cs: Byrdpip only animates it.
+            ByrdSwoop | Clash | MinionDiveBomb => vec![attack(1)],
+            Caltrops => vec![self_power(PowerId::Thorns, m)],
+            // Distraction.cs: a distinct Skill from the character pool, free
+            // this turn.
+            Distraction => vec![Effect::GenerateRandom {
+                pool: GenPool::IroncladSkills,
+                count: 1,
+                to: Pile::Hand,
+                free_this_turn: true,
+                distinct: true,
+            }],
+            DualWield => vec![Effect::Choose {
+                from: Pile::Hand,
+                filter: CardFilter::AttackOrPower,
+                then: Then::CloneToHand { copies: v.cards },
+                can_skip: false,
+            }],
+            // Enlightenment.cs: reduce-only cost 1, this turn (or until
+            // played), or for the combat once upgraded.
+            Enlightenment => vec![Effect::CapHandCost { cost: 1, this_combat: self.upgraded }],
+            // Entrench.cs: block equal to the block you have, Unpowered.
+            Entrench => vec![Effect::GainBlock {
+                target: me,
+                amount: c.player.creature.block as f64,
+                props: ValueProp::UNPOWERED.or(ValueProp::MOVE),
+                card: Some(uid),
+            }],
+            Exterminate => vec![aoe(v.hits)],
+            FeedingFrenzy => vec![self_power(PowerId::FeedingFrenzy, m)],
+            HelloWorld => vec![self_power(PowerId::HelloWorld, 1)],
+            // Unsupported, see UNSUPPORTED_CARDS.
+            MadScience => vec![],
+            // Maul.cs: after the hits, every Maul in combat grows by this
+            // one's Increase.
+            Maul => vec![attack(v.hits), Effect::GrowDamage { id: Maul, amount: v.magic }],
+            // Metamorphosis.cs: `GetForCombat` attacks (repeats allowed), free
+            // for the combat, each shuffled into the draw pile.
+            Metamorphosis => vec![Effect::GenerateRandomFreeThisCombat {
+                pool: GenPool::IroncladAttacks,
+                count: v.cards,
+                to: Pile::DrawRandom,
+                distinct: false,
+            }],
+            NeowsFury => vec![attack(1), step(1)],
+            Outmaneuver => vec![self_power(PowerId::EnergyNextTurn, v.energy)],
+            Peck => vec![attack(v.hits)],
+            Rebound => vec![attack(1), self_power(PowerId::Rebound, 1)],
+            Relax => vec![
+                block(),
+                self_power(PowerId::DrawCardsNextTurn, v.cards as i32),
+                self_power(PowerId::EnergyNextTurn, v.energy),
+            ],
+            RipAndTear => vec![hit(v.damage, v.hits, AttackTargets::RandomOpponent)],
+            Squash => vec![attack(1), power(t(), PowerId::Vulnerable, m)],
+            Stack => {
+                let n = v.block + c.player.discard.len() as f64;
+                vec![Effect::GainBlock { target: me, amount: n, props: ValueProp::MOVE, card: Some(uid) }]
+            }
+            // ToricToughness.cs: the power remembers the block the card
+            // actually gave.
+            ToricToughness => vec![block(), step(1)],
+            // Whistle.cs: stunned whether or not the hit killed.
+            Whistle => vec![attack(1), Effect::Stun { target: t(), next: None }],
+            Wish => vec![Effect::Choose {
+                from: Pile::DrawTop,
+                filter: CardFilter::Any,
+                then: Then::MoveTo(Pile::Hand),
+                can_skip: false,
+            }],
+            ByrdonisEgg | LanternKey | SpoilsMap | Debris | Void => vec![],
+            // Shiv.cs: Fan of Knives (Silent) would make it hit everyone.
+            Shiv => vec![attack(1)],
+            Soul => vec![draw(v.cards)],
+            Fuel => vec![Effect::GainEnergy { amount: v.energy }, draw(v.cards)],
+            // SovereignBlade.cs: Seeking Edge and Parry are Regent powers the
+            // Ironclad never has, so it is one plain hit.
+            SovereignBlade => vec![attack(v.hits)],
+            MinionSacrifice => vec![block()],
+            MinionStrike => vec![attack(1), draw(v.cards)],
+            // SweepingGaze.cs: Osty swings it, and the Ironclad has no Osty.
+            SweepingGaze => vec![],
             Aggression => vec![self_power(PowerId::Aggression, 1)],
             // Anger.cs: `CreateClone()` into the discard, so an enchanted
             // Anger breeds enchanted Angers.
@@ -910,6 +1061,29 @@ impl Card {
             // Rampage: the growth into `extra_damage` is applied by the
             // combat loop as this step starts.
             (Rampage, 1) => vec![],
+            // NeowsFury.cs: up to Cards from the discard pile, as many as the
+            // hand has room for once the hit is done.
+            (NeowsFury, 1) => {
+                let room = crate::combat::MAX_HAND.saturating_sub(c.player.hand.len()) as u32;
+                let n = v.cards.min(room);
+                if n > 0 {
+                    vec![Effect::Choose {
+                        from: Pile::Discard,
+                        filter: CardFilter::Any,
+                        then: Then::ToHandMany { left: n },
+                        can_skip: true,
+                    }]
+                } else {
+                    vec![]
+                }
+            }
+            // ToricToughnessPower.SetBlock with what GainBlock returned.
+            (ToricToughness, 1) => vec![Effect::ApplyInstanced {
+                target: me,
+                id: PowerId::ToricToughness,
+                amount: v.magic as i32,
+                data: c.stats.last_block_gained as i32,
+            }],
             _ => vec![],
         }
     }

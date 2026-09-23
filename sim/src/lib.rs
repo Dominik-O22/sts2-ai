@@ -865,4 +865,66 @@ mod tests {
         }
         assert!(wins > 0, "a random Ironclad should beat a lone Nibbit sometimes");
     }
+
+    /// A Nibbit fight with `cards` as the whole hand and energy to spare.
+    fn holding(cards: &[ids::CardId]) -> Combat {
+        use crate::card::Card;
+        let mut c = fight(&[one(MonsterId::Nibbit)], 5);
+        c.player.energy = 99;
+        c.player.hand = cards.iter().enumerate().map(|(i, &id)| Card::new(900 + i as u32, id, false)).collect();
+        c
+    }
+
+    /// ReboundPower picks the result pile as a play begins, so the Rebound
+    /// that grants it is discarded and the next card goes on the draw pile.
+    #[test]
+    fn rebound_moves_the_next_card_not_itself() {
+        use ids::CardId::{DefendIronclad, Rebound};
+        let mut c = holding(&[Rebound, DefendIronclad]);
+        c.step(Action::PlayCard { hand_idx: 0, target: Some(0) });
+        assert!(c.player.discard.iter().any(|k| k.id == Rebound));
+        assert_eq!(c.player.creature.power_amount(PowerId::Rebound), 1);
+        c.step(Action::PlayCard { hand_idx: 0, target: None });
+        assert_eq!(c.player.draw[0].id, DefendIronclad);
+        assert!(c.player.creature.power(PowerId::Rebound).is_none());
+    }
+
+    /// ToricToughnessPower is Instanced: each play counts down its own turns.
+    #[test]
+    fn toric_toughness_instances_count_down_apart() {
+        use ids::CardId::ToricToughness;
+        let mut c = holding(&[ToricToughness, ToricToughness]);
+        c.step(Action::PlayCard { hand_idx: 0, target: None });
+        let keep = c.player.hand.pop().unwrap();
+        c.step(Action::EndTurn);
+        assert_eq!(c.player.creature.block, 5);
+        c.player.energy = 99;
+        c.player.hand.push(keep);
+        let i = c.player.hand.len() - 1;
+        c.step(Action::PlayCard { hand_idx: i, target: None });
+        c.step(Action::EndTurn);
+        // Both fire; the first is spent, the second has a turn left.
+        assert_eq!(c.player.creature.block, 10);
+        let left: Vec<i32> =
+            c.player.creature.powers.iter().filter(|p| p.id == PowerId::ToricToughness).map(|p| p.amount).collect();
+        assert_eq!(left, vec![1]);
+    }
+
+    /// Enlightenment+ is a reduce-only cost for the combat: a card free this
+    /// turn stays free, and costs 1 once the turn is over.
+    #[test]
+    fn enlightenment_only_ever_lowers_a_cost() {
+        use ids::CardId::{Bludgeon, Enlightenment, StrikeIronclad};
+        let mut c = holding(&[Enlightenment, Bludgeon, StrikeIronclad]);
+        c.player.hand[0].upgraded = true;
+        c.player.hand[1].cost_this_turn = Some(0);
+        c.step(Action::PlayCard { hand_idx: 0, target: None });
+        let costs: Vec<i32> = c.player.hand.iter().map(|k| c.cost(k)).collect();
+        assert_eq!(costs, vec![0, 1]);
+        for k in &mut c.player.hand {
+            k.end_of_turn_cleanup();
+        }
+        let costs: Vec<i32> = c.player.hand.iter().map(|k| c.cost(k)).collect();
+        assert_eq!(costs, vec![1, 1]);
+    }
 }
