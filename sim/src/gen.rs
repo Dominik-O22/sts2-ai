@@ -117,7 +117,17 @@ impl FightSetup {
 
     /// The parsing shared with the replay harness.
     pub fn from_start(start: &Value, first_snap: &Value, ids: &Ids) -> Result<Self, String> {
-        let RunParts { deck, relics, potions, gold, max_energy, asc } = RunParts::of(start, ids)?;
+        let RunParts { deck, relics, mut potions, gold, max_energy, asc } = RunParts::of(start, ids)?;
+        // The belt is logged after Petrified Toad added its rock, which the
+        // sim adds again. Taking out the first rock and letting the Toad fill
+        // the first free slot gives back the logged belt, whichever rock was
+        // the Toad's.
+        let held = |id: RelicId| relics.iter().any(|r| r.id == id);
+        if held(RelicId::PetrifiedToad) && !held(RelicId::Sozu) {
+            if let Some(slot) = potions.iter().position(|&p| p == Some(PotionId::PotionShapedRock)) {
+                potions[slot] = None;
+            }
+        }
         let enc_name = start["encounter"].as_str().unwrap_or("");
         let encounter = *ids.encounters.get(enc_name).ok_or_else(|| format!("unknown encounter {enc_name}"))?;
         let monsters: Vec<MonsterId> = start["enemies"]

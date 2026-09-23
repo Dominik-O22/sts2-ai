@@ -261,6 +261,14 @@ impl Combat {
                 _ => {}
             }
         }
+        // PetrifiedToad.BeforeCombatStartLate: `PotionCmd.TryToProcure` of a
+        // Potion-Shaped Rock, which Sozu refuses and a full belt has no room for.
+        if self.has_relic(PetrifiedToad) && !self.has_relic(Sozu) {
+            if let Some(slot) = self.potions.iter().position(Option::is_none) {
+                self.potions[slot] = Some(crate::potion::PotionId::PotionShapedRock);
+                out.extend(self.relic_after_potion_procured());
+            }
+        }
         if self.has_relic(GhostSeed) {
             for c in self.player.draw.iter_mut() {
                 ghost_seed_mark(c);
