@@ -16,9 +16,12 @@ learned once rather than once per slot. Choice options are scored from
 their embedding and the MLP state.
 
 `SlotAttention`: the same slots as tokens (one global token for the rest
-of the observation, then hand cards, enemies, potions and choice options)
-through a small transformer, so a card's encoding has seen the enemies and
-the rest of the hand before the heads score it. Empty slots are masked.
+of the observation, then hand cards, enemies and potions) through a small
+transformer, so a card's encoding has seen the enemies and the rest of the
+hand before the heads score it. Empty slots are masked. Choice options stay
+out of the sequence: there are 20 slots, almost always empty, and they
+would double its length; their pooled encoding joins the global token and
+each is scored against the encoded global token.
 """
 
 from __future__ import annotations
@@ -253,6 +256,7 @@ class SlotAttention(Policy):
         )
         self.glob = nn.Linear(L.n_floats - L.max_enemies * L.enemy_feats, d)
         # One projection per token kind; their biases tell the kinds apart.
+        # Choices are not tokens (module docstring).
         self.hand_in = nn.Linear(card_dim + enchant_dim + L.hand_feats, d)
         self.enemy_in = nn.Linear(enemy_dim, d)
         self.potion_in = nn.Linear(potion_dim + 1, d)
@@ -285,28 +289,31 @@ class SlotAttention(Policy):
                 dim=2,
             )
         )
+        choices = self.choice_in(torch.cat([self.card(choice_ids), choice_feats], dim=2))
+        offered = (choice_ids != 0).unsqueeze(2)
+        glob = self.glob(torch.cat([floats[:, : L.f_enemies], floats[:, L.f_relics :]], dim=1))
+        glob = glob + (choices * offered).sum(1) / offered.sum(1).clamp(min=1)
         tokens = torch.cat(
             [
-                self.glob(torch.cat([floats[:, : L.f_enemies], floats[:, L.f_relics :]], dim=1)).unsqueeze(1),
+                glob.unsqueeze(1),
                 self.hand_in(torch.cat([self.card(hand_ids), self.enchant(ids[:, L.i_enchants : L.i_enchants + H]), hand_feats], dim=2)),
                 self.enemy_in(enemies),
                 self.potion_in(torch.cat([self.potion(potion_ids), potion_feats], dim=2)),
-                self.choice_in(torch.cat([self.card(choice_ids), choice_feats], dim=2)),
             ],
             dim=1,
         )
         # True where a slot is empty. The global token never is, so every
         # row attends to something.
         empty = torch.cat(
-            [torch.zeros_like(hand_ids[:, :1], dtype=torch.bool), hand_ids == 0, enemy_floats[:, :, 0] == 0, potion_ids == 0, choice_ids == 0],
+            [torch.zeros_like(hand_ids[:, :1], dtype=torch.bool), hand_ids == 0, enemy_floats[:, :, 0] == 0, potion_ids == 0],
             dim=1,
         )
         x = self.encoder(tokens, src_key_padding_mask=empty)
-        g, hand, enemy, potion, choice = x.split([1, H, E, P, C], dim=1)
+        g, hand, enemy, potion = x.split([1, H, E, P], dim=1)
         g = g.squeeze(1)
         play = self.play(g, hand, enemy).flatten(1)
         use = self.use_potion(g, potion, enemy).flatten(1)
-        choose = self.choose(g, choice).squeeze(2)
+        choose = self.choose(g, choices).squeeze(2)
         end_skip = self.end_or_skip(g)
         logits = torch.cat([play, use, end_skip[:, :1], choose, end_skip[:, 1:]], dim=1)
         return logits, self.v(g).squeeze(-1)

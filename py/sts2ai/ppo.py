@@ -8,6 +8,7 @@ step t cuts the value bootstrap for step t+1.
 from __future__ import annotations
 
 import copy
+import shutil
 import threading
 import time
 from collections import deque
@@ -96,6 +97,9 @@ class Config:
     # per iteration, at the search's speed.
     search_sync: bool = False
     eval_every: int = 50
+    # Also keep a checkpoint every this many iterations (`it<N>.pt`), to
+    # set runs side by side at equal steps. 0 keeps only `latest.pt`.
+    keep_every: int = 0
     # Fights per held-out setup at each eval.
     eval_repeats: int = 2
     recordings: Path = DEFAULT_RECORDINGS
@@ -487,6 +491,8 @@ def train(cfg: Config) -> Policy:
             )
         if it % cfg.eval_every == 0 or it == start_iter + cfg.iters - 1:
             save_checkpoint(cfg.run_dir / "latest.pt", policy, opt, it, global_step)
+            if cfg.keep_every and it % cfg.keep_every == 0:
+                shutil.copy(cfg.run_dir / "latest.pt", cfg.run_dir / f"it{it}.pt")
             policy.eval()
             win, _, by_kind = evaluate(policy, device, cfg.eval_repeats, acts=cfg.acts)
             writer.add_scalar("eval/holdout_win_rate", win, global_step)
