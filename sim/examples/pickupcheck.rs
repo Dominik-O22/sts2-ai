@@ -3,7 +3,8 @@
 //!
 //! `pickupcheck lines N` prints N `SEED ASCENSION ACT RELIC...` lines: every
 //! pickup the port has, alone and after others, some beside the relics
-//! that change what a pickup does; `tools/oracle obtain` turns those into
+//! that change what a pickup does, some with Fishing Rod or War Hammer and
+//! fights won after (`!M`, `!E`); `tools/oracle obtain` turns those into
 //! the player each leaves; `pickupcheck` with no arguments reads that and
 //! compares.
 //!
@@ -59,6 +60,13 @@ fn main() {
                 let relic = *rng.pick(pool).unwrap();
                 if !relics.contains(&relic) {
                     relics.push(relic);
+                }
+            }
+            // Fishing Rod or War Hammer now and then, and fights won after.
+            if rng.next_int(4) == 0 {
+                relics.push(*rng.pick(&["FISHING_ROD", "WAR_HAMMER"]).unwrap());
+                for _ in 0..rng.next_int_in(1, 7) {
+                    relics.push(*rng.pick(&["!M", "!M", "!E"]).unwrap());
                 }
             }
             println!("{seed} {} {} {}", [0, 10][i % 2], rng.next_int(3), relics.join(" "));

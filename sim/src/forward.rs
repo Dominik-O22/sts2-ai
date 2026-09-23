@@ -143,6 +143,7 @@ impl Run {
             if !fought.won || self.state.hp <= 0 {
                 return Next::End(End::Died);
             }
+            self.state.fight_won(kind);
             let mut log = Vec::new();
             let rewards = self.state.combat_rewards(kind, fought.gold_proportion);
             self.state.take_rewards(rewards, &mut chooser, &mut log);
@@ -182,7 +183,9 @@ impl Run {
     }
 
     /// Steps to the next map point: one of the current point's children,
-    /// or the next act's start. False past the last act.
+    /// or the next act's start. False past the last act. Winged Boots let
+    /// the player go to any point of the next row, three times
+    /// (`MapTravel.GetTravelablePointsFrom`, `WingedBoots.AfterRoomEntered`).
     fn move_on(&mut self, chooser: &mut impl Chooser) -> bool {
         let children: Vec<PointId> = self.map[self.point].children.iter().collect();
         if children.is_empty() {
@@ -193,8 +196,16 @@ impl Run {
             self.point = self.map.start;
             return true;
         }
-        let i = chooser.choose(&self.state, Decision::Path(&children));
-        self.point = children[i.min(children.len() - 1)];
+        let boots = self.state.relics.iter().any(|r| r.id == "WINGED_BOOTS" && r.counter < 3);
+        let row = self.map[self.point].row + 1;
+        let row: Vec<PointId> = self.map.grid_points().filter(|&p| self.map[p].row == row).collect();
+        let options = if boots && !row.is_empty() { row } else { children };
+        let i = chooser.choose(&self.state, Decision::Path(&options));
+        let next = options[i.min(options.len() - 1)];
+        if !self.map[self.point].children.contains(next) {
+            self.state.relic_mut("WINGED_BOOTS").expect("Winged Boots").counter += 1;
+        }
+        self.point = next;
         true
     }
 

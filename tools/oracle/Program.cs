@@ -209,7 +209,9 @@ switch (args[0])
     }
     // obtain: one new singleplayer Ironclad run per stdin line `SEED
     // ASCENSION ACT RELIC...`, fully unlocked, in act ACT (0-based), each
-    // relic obtained in turn through `RelicCmd.Obtain`, its pickup and all.
+    // relic obtained in turn through `RelicCmd.Obtain`, its pickup and all;
+    // `!M` or `!E` in place of a relic is a monster or elite fight won,
+    // after which Fishing Rod and War Hammer act.
     // Every choice takes from the front: a deck pick the first cards it may
     // (as many as it may), a card screen its first card. Prints the line as
     // a `run` header, then per relic the player after it: HP, max HP, gold,
@@ -235,10 +237,29 @@ switch (args[0])
             Console.WriteLine($"run {line}");
             foreach (var id in parts.Skip(3))
             {
-                var relic = ModelDb.AllRelics.First(r => r.Id.Entry == id).ToMutable();
+                if (id.StartsWith('!'))
+                {
+                    // A fight won: what Fishing Rod and War Hammer do after it.
+                    EncounterModel won = id == "!E"
+                        ? ModelDb.Encounter<MegaCrit.Sts2.Core.Models.Encounters.BygoneEffigyElite>()
+                        : ModelDb.Encounter<MegaCrit.Sts2.Core.Models.Encounters.NibbitsWeak>();
+                    var room = new CombatRoom(won.ToMutable(), state);
+                    foreach (var held in player.Relics.ToList())
+                    {
+                        if (held is MegaCrit.Sts2.Core.Models.Relics.FishingRod or MegaCrit.Sts2.Core.Models.Relics.WarHammer)
+                        {
+                            held.AfterCombatEnd(room).GetAwaiter().GetResult();
+                            held.AfterCombatVictory(room).GetAwaiter().GetResult();
+                        }
+                    }
+                }
+                var relic = id.StartsWith('!') ? null : ModelDb.AllRelics.First(r => r.Id.Entry == id).ToMutable();
                 try
                 {
-                    RelicCmd.Obtain(relic, player).GetAwaiter().GetResult();
+                    if (relic != null)
+                    {
+                        RelicCmd.Obtain(relic, player).GetAwaiter().GetResult();
+                    }
                 }
                 catch (InvalidOperationException e)
                 {

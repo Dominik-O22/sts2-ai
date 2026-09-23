@@ -21,7 +21,8 @@ use crate::shop::{Item, Shop, Slot, Ware};
 /// One decision, with what it chooses among.
 #[derive(Clone, Copy, Debug)]
 pub enum Decision<'a> {
-    /// The next map point, among the current one's children.
+    /// The next map point, among those the current one leads to: its
+    /// children, or the whole next row with Winged Boots.
     Path(&'a [PointId]),
     /// The next relic reward to take; past the end leaves the rest.
     Relic(&'a [String]),

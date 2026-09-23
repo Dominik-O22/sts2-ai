@@ -400,7 +400,7 @@ impl RunState {
 
     /// `StableShuffle` on the run's Niche stream of the deck cards `keep`
     /// takes, then the first `count` upgraded (Whetstone, War Paint, Sand
-    /// Castle). The sort is by id then upgrade level, as `CardModel`
+    /// Castle, War Hammer). The sort is by id then upgrade level, as `CardModel`
     /// compares.
     fn upgrade_random(&mut self, count: usize, keep: impl Fn(&DeckCard) -> bool) {
         let mut cards: Vec<usize> = (0..self.deck.len()).filter(|&i| keep(&self.deck[i]) && self.deck[i].upgradable()).collect();
@@ -695,6 +695,28 @@ impl RunState {
         bundles
     }
 
+    /// What the relics do once a fight in a `kind` room is won, out of the
+    /// fight (`AfterCombatEnd`, `AfterCombatVictory`): Fishing Rod upgrades
+    /// a random card every third monster fight, War Hammer four after an
+    /// elite, both on the Niche stream.
+    pub fn fight_won(&mut self, kind: RoomType) {
+        for i in 0..self.relics.len() {
+            match (self.relics[i].id.as_str(), kind) {
+                ("FISHING_ROD", RoomType::Monster) => {
+                    self.relics[i].counter += 1;
+                    if self.relics[i].counter % 3 == 0 {
+                        let upgradable: Vec<usize> = (0..self.deck.len()).filter(|&c| self.deck[c].upgradable()).collect();
+                        if let Some(&card) = self.rngs.run(RunStream::Niche).pick(&upgradable) {
+                            self.upgrade_card(card);
+                        }
+                    }
+                }
+                ("WAR_HAMMER", RoomType::Elite) => self.upgrade_random(4, |_| true),
+                _ => {}
+            }
+        }
+    }
+
     /// `CombatState.CreateCreature` for a fight's `enemies`: each draws its
     /// max HP on the run's Niche stream. Summons and Tough Egg's hatchlings
     /// draw there too; the run layer does not see them, so a fight's play
@@ -813,7 +835,8 @@ impl RunState {
 
 /// A `tools/oracle obtain` input line replayed on the port, printed as the
 /// oracle prints it: each relic obtained and what it offers settled by
-/// `rooms::First`, as the oracle's selector takes from the front.
+/// `rooms::First`, as the oracle's selector takes from the front, or a
+/// fight won.
 fn obtain_text(header: &str) -> String {
     use crate::encounter::Act;
     let parts: Vec<&str> = header.split_whitespace().collect();
@@ -822,8 +845,14 @@ fn obtain_text(header: &str) -> String {
     run.act = parts[2].parse().unwrap();
     let mut out = String::new();
     for id in &parts[3..] {
-        let offered = run.obtain(id);
-        run.settle(offered, &mut crate::rooms::First, &mut Vec::new());
+        match *id {
+            "!M" => run.fight_won(RoomType::Monster),
+            "!E" => run.fight_won(RoomType::Elite),
+            _ => {
+                let offered = run.obtain(id);
+                run.settle(offered, &mut crate::rooms::First, &mut Vec::new());
+            }
+        }
         let card = |c: &DeckCard| {
             let ench = c.enchantment.as_ref().map_or(String::new(), |e| format!(":{}:{}", e.id, e.amount));
             format!("{}{}{ench}", c.id, if c.upgraded { "+" } else { "" })
@@ -889,8 +918,9 @@ mod tests {
 
     /// `tools/oracle obtain` over every pickup the port has, alone and a few
     /// at a time beside the relics that change what a pickup does (the
-    /// eggs, Fresnel Lens, Lucky Fysh, Bowler Hat, Sozu, Silver Crucible):
-    /// the player each leaves and the streams it drew on
+    /// eggs, Fresnel Lens, Lucky Fysh, Bowler Hat, Sozu, Silver Crucible),
+    /// and Fishing Rod and War Hammer over fights won: the player each
+    /// leaves and the streams it drew on
     /// (`examples/pickupcheck.rs` makes more).
     #[test]
     fn pickups_match_the_game() {

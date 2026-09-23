@@ -676,6 +676,7 @@ fn follow(state: &mut RunState, room: Room, rooms: &[Value], stats: &Value) -> W
             // gold stolen and none gained.
             let stolen = stats["gold_stolen"].as_i64().unwrap_or(0) > 0 && stats["gold_gained"].as_i64() == Some(0);
             let proportion = if encounter == Encounter::GremlinMercNormal && stolen { 0.0 } else { 1.0 };
+            state.fight_won(kind);
             let rewards = state.combat_rewards(kind, proportion);
             gold = (!rewards.gold.is_empty()).then(|| rewards.gold.iter().sum());
             state.take_rewards(rewards, &mut chooser, &mut log);
@@ -735,6 +736,7 @@ fn follow(state: &mut RunState, room: Room, rooms: &[Value], stats: &Value) -> W
                         stream.get_or_insert(format!("event {name} led to {}", fight["room_type"]));
                     }
                     Some(kind) => {
+                        state.fight_won(kind);
                         let rewards = state.combat_rewards(kind, 1.0);
                         gold = (!rewards.gold.is_empty()).then(|| rewards.gold.iter().sum());
                         state.take_rewards(rewards, &mut chooser, &mut log);
