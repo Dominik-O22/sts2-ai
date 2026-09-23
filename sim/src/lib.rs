@@ -10,6 +10,7 @@ pub mod encode;
 pub mod encounter;
 pub mod env;
 pub mod events;
+pub mod forward;
 pub mod gen;
 pub mod history;
 pub mod map;

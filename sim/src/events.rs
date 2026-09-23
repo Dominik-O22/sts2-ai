@@ -27,14 +27,44 @@ const QUIET: &[&str] = &[
     "TabletOfTruth", "TeaMaster", "TinkerTime", "TrashHeap", "WaterloggedScriptorium", "WoodCarvings", "ZenWeaver",
 ];
 
+/// What an event drew as its options were laid out, which the chosen
+/// option then uses: the relics on offer.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct EventLayout {
+    pub relics: Vec<String>,
+}
+
 impl RunState {
-    /// The Rewards stream draws of an event's chosen options, with what they
-    /// offered. `choices` are the options in the order they were taken, each
-    /// as its page and name in the record (`INITIAL` and `GORGE` in
+    /// What an event draws as it starts and lays its options out
+    /// (`BeforeEventStarted`, `GenerateInitialOptions` and the text it
+    /// fills in): Welcome to Wongo's featured item, a rare a shop could
+    /// sell; the Relic Trader's three relics off the front of the bag
+    /// (`NewRelics`), one per trade; the Fake Merchant's six prices on the
+    /// Shops stream (`MerchantRelicEntry.CalcCost`; which six is the
+    /// event's own roll).
+    pub fn event_offer(&mut self, event: &str) -> EventLayout {
+        let relics = match event {
+            "WelcomeToWongos" => vec![self.pull_for_shop(RelicRarity::Rare).game_id()],
+            "RelicTrader" => (0..3).map(|_| self.relic_reward().game_id()).collect(),
+            "FakeMerchant" => {
+                for _ in 0..6 {
+                    self.rngs.player(PlayerStream::Shops).next_float_in(0.85, 1.15);
+                }
+                Vec::new()
+            }
+            _ => Vec::new(),
+        };
+        EventLayout { relics }
+    }
+
+    /// The Rewards stream draws of an event's chosen options, laid out as
+    /// `layout`, with what they offered. `choices` are the options in the
+    /// order they were taken, each as its page and name in the record
+    /// (`INITIAL` and `GORGE` in
     /// `ROOM_FULL_OF_CHEESE.pages.INITIAL.options.GORGE.title`). A relic the
     /// event gives off a bag is obtained here, pickup and all
     /// (`Offered::Took`). An error names what is not ported.
-    pub fn event_option(&mut self, event: &str, choices: &[(String, String)]) -> Result<Vec<Offered>, String> {
+    pub fn event_option(&mut self, event: &str, layout: &EventLayout, choices: &[(String, String)]) -> Result<Vec<Offered>, String> {
         if QUIET.contains(&event) {
             return Ok(Vec::new());
         }
@@ -78,41 +108,26 @@ impl RunState {
                 vec![Offered::Potions(vec![potion.to_string()])]
             }
             ("PotionCourier", "GRAB_POTIONS") => Vec::new(),
-            // `WelcomeToWongos`: its featured item, a rare a shop could
-            // sell, comes off the bag as the options are laid out; the
-            // bargain bin sells the next such common. The mystery box sells
+            // `WelcomeToWongos`: the featured item as laid out; the bargain
+            // bin sells the next common a shop could. The mystery box sells
             // Wongo's Mystery Ticket, which is not ported.
-            ("WelcomeToWongos", "BARGAIN_BIN" | "FEATURED_ITEM" | "LEAVE") => {
-                let featured = self.pull_for_shop(RelicRarity::Rare).game_id();
-                match first {
-                    "BARGAIN_BIN" => {
-                        let relic = self.pull_for_shop(RelicRarity::Common).game_id();
-                        self.take(relic)
-                    }
-                    "FEATURED_ITEM" => self.take(featured),
-                    _ => Vec::new(),
-                }
+            ("WelcomeToWongos", "BARGAIN_BIN") => {
+                let relic = self.pull_for_shop(RelicRarity::Common).game_id();
+                self.take(relic)
             }
-            // `FakeMerchant`: six of its fake relics on the shelf, each
-            // priced on the Shops stream (`MerchantRelicEntry.CalcCost`);
-            // which six is the event's own roll. The fight a thrown Foul
-            // Potion starts is not ported.
-            ("FakeMerchant", _) => {
-                for _ in 0..6 {
-                    self.rngs.player(PlayerStream::Shops).next_float_in(0.85, 1.15);
-                }
-                Vec::new()
-            }
+            ("WelcomeToWongos", "FEATURED_ITEM") => self.take(layout.relics[0].clone()),
+            ("WelcomeToWongos", "LEAVE") => Vec::new(),
+            // `FakeMerchant`: what is bought is not drawn. The fight a
+            // thrown Foul Potion starts is not ported.
+            ("FakeMerchant", _) => Vec::new(),
             // `DenseVegetation`: resting (`MimicRestSiteHeal`) leads to a
             // fight, whose rewards are a monster room's.
             ("DenseVegetation", "REST") => self.rest_heal(),
             ("DenseVegetation", "TRUDGE_ON") => Vec::new(),
-            // `RelicTrader`: three relics off the front of the bag, one per
-            // trade offered (`NewRelics`), the chosen one taken.
+            // `RelicTrader`: the relic laid out for the chosen trade, taken.
             ("RelicTrader", "TOP" | "MIDDLE" | "BOTTOM") => {
-                let relics: Vec<String> = (0..3).map(|_| self.relic_reward().game_id()).collect();
                 let i = ["TOP", "MIDDLE", "BOTTOM"].iter().position(|&o| o == first).expect("a trade");
-                self.take(relics[i].clone())
+                self.take(layout.relics[i].clone())
             }
             // `Trial`: the defendant is the event's roll; the verdict decides.
             ("Trial", "ACCEPT") => match last {

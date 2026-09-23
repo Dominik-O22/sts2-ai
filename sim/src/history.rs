@@ -611,7 +611,8 @@ fn follow(state: &mut RunState, room: Room, rooms: &[Value], stats: &Value) -> W
                     (key.len() == 6).then(|| (key[2].to_string(), key[4].to_string()))
                 })
                 .collect();
-            match state.event_option(name, &taken) {
+            let layout = state.event_offer(name);
+            match state.event_option(name, &layout, &taken) {
                 Err(why) => {
                     stream.get_or_insert(why);
                 }
