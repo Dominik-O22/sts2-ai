@@ -15,9 +15,9 @@
 use crate::card::{def, Card};
 use crate::enchant::Enchantment;
 use crate::game_rng::{PlayerStream, RunStream};
-use crate::pools::{sim_card, sim_enchantment, PoolCard, Rarity, IRONCLAD_CARDS};
+use crate::pools::{sim_card, sim_enchantment, PoolCard, Rarity, COLORLESS_CARDS, IRONCLAD_CARDS};
 use crate::rewards::{create_cards, create_potion, create_potions, CardOptions, Offer, UNPORTED_RELICS};
-use crate::run::{DeckCard, Enchant, Room, RunState};
+use crate::run::{DeckCard, Enchant, Room, RoomType, RunState};
 use crate::types::{AscensionLevel, CardType};
 
 /// What an effect put in front of the player, or did for them.
@@ -62,6 +62,18 @@ pub enum DeckAction {
     Duplicate,
     /// An enchantment by game id, with its amount.
     Enchant(&'static str, i32),
+    /// New Leaf, Astrolabe: each to a random card on the run's Niche
+    /// stream, upgraded with `upgrade` (`transform`).
+    Transform { upgrade: bool },
+}
+
+/// The stream a transform draws its new card on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TransformRng {
+    /// The player's Transformations stream (Leafy Poultice).
+    Transformations,
+    /// The run's Niche stream (New Leaf, Astrolabe, Pandora's Box).
+    Niche,
 }
 
 /// `Entities/RestSite/*RestSiteOption.cs` by `OptionId`, the ones a
@@ -131,9 +143,26 @@ const MODIFIER_CURSES: &[&str] = &["CLUMSY", "DEBT", "DECAY", "DOUBT", "GUILTY",
 /// Cards with `CardKeyword.Eternal`, which no screen removes.
 const ETERNAL: &[&str] = &["ASCENDERS_BANE", "BAD_LUCK", "CURSE_OF_THE_BELL", "ENTHRALLED", "FOLLY", "FORBIDDEN_GRIMOIRE", "GREED"];
 
+/// `CardFactory.GetDefaultTransformationOptions` out of combat: the card's
+/// pool, its common, uncommon and rare cards less the card itself and the
+/// multiplayer-only ones. An ancient card, or one outside the pools (event
+/// and token cards), draws from the colorless pool. `None` for a curse or a
+/// status, whose pools the port does not have.
+fn transform_options(card: &DeckCard) -> Option<Vec<&'static str>> {
+    let own = IRONCLAD_CARDS.iter().find(|c| c.id == card.id);
+    let pool = match own {
+        Some(c) if c.rarity != Rarity::Ancient => IRONCLAD_CARDS,
+        _ if matches!(card.kind(), Some(CardType::Curse | CardType::Status) | None) => return None,
+        _ => COLORLESS_CARDS,
+    };
+    let kept = |c: &&PoolCard| matches!(c.rarity, Rarity::Common | Rarity::Uncommon | Rarity::Rare) && c.id != card.id && !c.multiplayer_only;
+    Some(pool.iter().filter(kept).map(|c| c.id).collect())
+}
+
 impl From<Offer> for DeckCard {
     fn from(offer: Offer) -> Self {
-        DeckCard { id: offer.id.to_string(), upgraded: offer.upgraded, enchantment: None }
+        let enchantment = offer.enchantment.map(|(id, amount)| Enchant { id: id.to_string(), amount });
+        DeckCard { id: offer.id.to_string(), upgraded: offer.upgraded, enchantment }
     }
 }
 
@@ -282,6 +311,31 @@ impl RunState {
                     self.deck[i].enchantment = Some(Enchant { id: id.to_string(), amount });
                 }
             }
+            DeckAction::Transform { upgrade } => self.transform(&chosen, upgrade, TransformRng::Niche),
+        }
+    }
+
+    /// `CardCmd.Transform` out of combat of the deck cards `cards`: for
+    /// each in turn its new card drawn on `stream`
+    /// (`CardFactory.CreateRandomCardForTransform`, `transform_options`) and
+    /// `upgrade`d if asked; then the originals leave and the new cards join
+    /// the deck through `add_card`, in the originals' deck order.
+    pub fn transform(&mut self, cards: &[usize], upgrade: bool, stream: TransformRng) {
+        let mut replaced: Vec<(usize, &'static str)> = Vec::new();
+        for &i in cards {
+            let Some(options) = transform_options(&self.deck[i]) else { continue };
+            let rng = match stream {
+                TransformRng::Transformations => self.rngs.player(PlayerStream::Transformations),
+                TransformRng::Niche => self.rngs.run(RunStream::Niche),
+            };
+            replaced.push((i, *rng.pick(&options).expect("a card to transform into")));
+        }
+        replaced.sort_unstable();
+        for &(i, _) in replaced.iter().rev() {
+            self.deck.remove(i);
+        }
+        for (_, id) in replaced {
+            self.add_card(DeckCard { upgraded: upgrade, ..DeckCard::new(id) });
         }
     }
 
@@ -293,6 +347,7 @@ impl RunState {
             // Dolly's Mirror leaves out quest cards, which the Ironclad never holds.
             DeckAction::Duplicate => true,
             DeckAction::Enchant(id, _) => c.can_enchant(id),
+            DeckAction::Transform { .. } => c.removable() && transform_options(c).is_some(),
         };
         (0..self.deck.len()).filter(|&i| ok(&self.deck[i])).collect()
     }
@@ -366,6 +421,40 @@ impl RunState {
                 }
             }
             "NEOWS_TORMENT" => self.add_card(DeckCard::new("NEOWS_FURY")),
+            // `LeafyPoultice`: 12 max HP, then the first basic Strike and
+            // Defend transformed on the Transformations stream.
+            "LEAFY_POULTICE" => {
+                self.lose_max_hp(12);
+                let basics = ["STRIKE_IRONCLAD", "DEFEND_IRONCLAD"];
+                let cards: Vec<usize> = basics.iter().filter_map(|b| self.deck.iter().position(|c| c.id == *b)).collect();
+                self.transform(&cards, false, TransformRng::Transformations);
+            }
+            "NEW_LEAF" => offered.push(self.pick(DeckAction::Transform { upgrade: false }, 1, 1)),
+            // `LostCoffer`: a card reward of the character's with a
+            // combat's odds but no source, then a potion reward.
+            "LOST_COFFER" => {
+                let options = CardOptions { encounter: false, ..CardOptions::for_room(RoomType::Monster) };
+                let cards = self.card_reward(&options);
+                offered.push(Offered::Cards(cards));
+                offered.push(Offered::Potions(vec![create_potion(self.rewards()).to_string()]));
+            }
+            // `LeadPaperweight`: two colorless cards, not a card reward, to
+            // take one of.
+            "LEAD_PAPERWEIGHT" => {
+                let options = CardOptions {
+                    cards: COLORLESS_CARDS.iter().collect(),
+                    encounter: false,
+                    card_reward: false,
+                    ..CardOptions::for_room(RoomType::Monster)
+                };
+                let mut odds = self.card_odds;
+                let mut cards = create_cards(2, &options, &mut odds, &mut self.roll_ctx());
+                self.upgrade_by_eggs(&mut cards);
+                offered.push(Offered::Cards(cards));
+            }
+            // `SilkenTress`: all the gold; its Glam is a card reward hook
+            // (`modify_card_reward`).
+            "SILKEN_TRESS" => self.lose_gold(self.gold),
             "BLOOD_SOAKED_ROSE" => self.add_card(DeckCard::new("ENTHRALLED")),
             // `SereTalon`: two different curses off the Niche stream, then
             // three Wishes.
@@ -489,12 +578,12 @@ impl RunState {
                 let i = rng.next_int_in(0, left.len() as i32) as usize;
                 let card = left.remove(i);
                 used.push(card.id);
-                bundle.push(Offer { id: card.id, upgraded: false });
+                bundle.push(Offer::new(card.id));
             }
             let items: Vec<&PoolCard> = uncommons.iter().copied().filter(|c| !used.contains(&c.id)).collect();
             let card = *rng.pick(&items).expect("an uncommon");
             used.push(card.id);
-            bundle.push(Offer { id: card.id, upgraded: false });
+            bundle.push(Offer::new(card.id));
             bundles.push(bundle);
         }
         bundles

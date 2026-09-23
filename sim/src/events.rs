@@ -170,7 +170,7 @@ impl RunState {
     /// upgrades it too.
     fn event_card_reward(&mut self, pool: &'static [PoolCard]) -> Vec<Offer> {
         let mut cards = self.event_cards(3, pool, OddsType::Regular, |_| true);
-        self.upgrade_by_crucible(&mut cards);
+        self.modify_card_reward(&mut cards);
         cards
     }
 

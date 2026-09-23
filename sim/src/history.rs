@@ -60,6 +60,10 @@ pub struct Report {
     pub room_problem: Option<String>,
     /// The effects check, when asked for.
     pub effects: Effects,
+    /// The ancients walked whose options the port laid out as the record
+    /// has them, and each one that differs.
+    pub ancients: usize,
+    pub ancient_mismatches: Vec<String>,
 }
 
 /// The effects check of one run.
@@ -75,7 +79,7 @@ pub struct Effects {
 
 impl Report {
     /// A run built through the dev console fights what its plan does not
-    /// hold.
+    /// hold; the walk stops at the first such fight.
     pub fn off_plan(&self) -> bool {
         self.room_problem.as_deref().is_some_and(|p| p.contains("ENCOUNTER."))
     }
@@ -139,7 +143,15 @@ pub fn check(run: &Value, live: bool) -> Report {
     let acts: [Act; 3] = acts.try_into().expect("three acts");
     let mut state = RunState::new(seed, acts, ascension, &Unlocks::default());
     let mut player = Player::of(&state);
-    let mut report = Report { floors: 0, matched: 0, stop: "the run ended".into(), room_problem: None, effects: Effects::default() };
+    let mut report = Report {
+        floors: 0,
+        matched: 0,
+        stop: "the run ended".into(),
+        room_problem: None,
+        effects: Effects::default(),
+        ancients: 0,
+        ancient_mismatches: Vec::new(),
+    };
     let mut rewards_live = true;
     let mut previous_had_shop = false;
     let history = run["map_point_history"].as_array().unwrap();
@@ -171,6 +183,12 @@ pub fn check(run: &Value, live: bool) -> Report {
             if want != got && report.room_problem.is_none() {
                 report.room_problem = Some(format!("{label}: {got:?}, the run met {want:?}"));
             }
+            if report.off_plan() {
+                // Built through the dev console from here: nothing after is
+                // the plan's.
+                report.floors -= 1;
+                return report;
+            }
 
             let ended = last && run["win"] != true && stats["card_choices"].is_null() && matches!(room, Room::Combat(..));
             if rewards_live && ended {
@@ -180,6 +198,11 @@ pub fn check(run: &Value, live: bool) -> Report {
             let streamed = rewards_live;
             let counter = state.rewards().counter;
             let walked = (!ended).then(|| follow(&mut state, room, rooms, stats));
+            match walked.as_ref().and_then(|w| w.ancient.as_ref()) {
+                Some(Ok(())) => report.ancients += 1,
+                Some(Err(why)) => report.ancient_mismatches.push(format!("{label}: {why}")),
+                None => {}
+            }
             if let (true, Some(walked)) = (streamed, &walked) {
                 match &walked.stream {
                     Ok(()) => report.matched += 1,
@@ -417,6 +440,8 @@ struct Recorded {
     rest: Vec<String>,
     upgraded: Vec<String>,
     removed: Vec<DeckCard>,
+    /// `cards_transformed`, the originals.
+    transformed: Vec<String>,
     enchanted: Vec<String>,
     ancient: Option<String>,
     /// Where the port did not offer what the record shows: a choice the
@@ -435,6 +460,7 @@ impl Recorded {
             rest: list("rest_site_choices").iter().map(|v| v.as_str().unwrap().to_string()).collect(),
             upgraded: ids("upgraded_cards"),
             removed: list("cards_removed").iter().map(recorded_card).collect(),
+            transformed: list("cards_transformed").iter().map(|t| recorded_card(&t["original_card"]).id).collect(),
             enchanted: list("cards_enchanted").iter().map(|e| recorded_card(&e["card"]).id).collect(),
             ancient: list("ancient_choice").iter().find(|o| o["was_chosen"] == true).map(ancient_option),
             missing: Vec::new(),
@@ -511,6 +537,7 @@ impl Chooser for Recorded {
                     }
                     DeckAction::Enchant(..) => Self::take(&mut self.enchanted, cards, |id, i| deck(i).id == *id),
                     DeckAction::Duplicate => Self::take(&mut self.cards, cards, |c, i| deck(i).id == c.id),
+                    DeckAction::Transform { .. } => Self::take(&mut self.transformed, cards, |id, i| deck(i).id == *id),
                 }
             }
         }
@@ -527,6 +554,8 @@ struct Walked {
     unported: Option<String>,
     /// Where the port did not offer what the record shows.
     missing: Vec<String>,
+    /// An ancient's options against the record's, if the floor had one.
+    ancient: Option<Result<(), String>>,
 }
 
 /// One floor through the room flows with the player's recorded choices:
@@ -542,7 +571,7 @@ fn follow(state: &mut RunState, room: Room, rooms: &[Value], stats: &Value) -> W
     }
     if rooms.len() > 1 && !matches!(room, Room::Event(_)) {
         let why = format!("a second room ({}) in the floor", rooms[1]["model_id"]);
-        return Walked { stream: Err(stream.unwrap_or(why.clone())), unported: Some(why), missing: Vec::new() };
+        return Walked { stream: Err(stream.unwrap_or(why.clone())), unported: Some(why), missing: Vec::new(), ancient: None };
     }
 
     let fight = matches!(room, Room::Combat(..)) || rooms.len() > 1;
@@ -587,6 +616,7 @@ fn follow(state: &mut RunState, room: Room, rooms: &[Value], stats: &Value) -> W
 
     let mut gold: Option<i32> = None;
     let mut event_cards: Vec<String> = Vec::new();
+    let mut ancient = None;
     match room {
         Room::Combat(kind, encounter) => {
             // `GremlinMercNormal.CalculateGoldProportion`: the Fat Gremlin
@@ -601,9 +631,11 @@ fn follow(state: &mut RunState, room: Room, rooms: &[Value], stats: &Value) -> W
         Room::Ancient(name) => {
             let offer = state.ancient(name, &mut chooser, &mut log);
             let recorded: Vec<String> = stats["ancient_choice"].as_array().into_iter().flatten().map(ancient_option).collect();
+            let why = format!("options {:?}, the run had {recorded:?}", offer.relics);
             if offer.relics != recorded {
-                chooser.missing.push(format!("options {:?}, the run had {recorded:?}", offer.relics));
+                chooser.missing.push(why.clone());
             }
+            ancient = Some(if offer.relics == recorded { Ok(()) } else { Err(why) });
         }
         Room::Event(name) => {
             unported = Some(format!("event {name}"));
@@ -719,7 +751,7 @@ fn follow(state: &mut RunState, room: Room, rooms: &[Value], stats: &Value) -> W
         Some(why) => Err(why),
         None => drawn_as_recorded(state, room, stats, &log, gold, rooms.len() > 1, &event_cards),
     };
-    Walked { stream, unported, missing: chooser.missing }
+    Walked { stream, unported, missing: chooser.missing, ancient }
 }
 
 /// What a floor drew against what its record offered: the cards, relics,

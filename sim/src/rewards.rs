@@ -20,7 +20,7 @@ use crate::encounter::Act;
 use crate::game_rng::{GameRng, PlayerStream};
 use crate::plan::{BagRelic, RelicBag, Unlocks};
 use crate::pools::{PoolCard, PoolPotion, PotionRarity, Rarity, COLORLESS_CARDS, IRONCLAD_CARDS, IRONCLAD_POTIONS, SHARED_POTIONS};
-use crate::run::{RoomType, RunState};
+use crate::run::{DeckCard, RoomType, RunState};
 use crate::types::AscensionLevel::{Poverty, Scarcity};
 use crate::types::{Ascension, CardType, RelicRarity};
 
@@ -154,11 +154,19 @@ pub struct RollCtx<'a> {
     pub act: usize,
 }
 
-/// A card as a reward offers it: its game id, upgraded or not.
+/// A card as a reward offers it: its game id, upgraded or not, and the
+/// enchantment a hook put on it (Silken Tress' Glam), with its amount.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Offer {
     pub id: &'static str,
     pub upgraded: bool,
+    pub enchantment: Option<(&'static str, i32)>,
+}
+
+impl Offer {
+    pub fn new(id: &'static str) -> Self {
+        Offer { id, upgraded: false, enchantment: None }
+    }
 }
 
 /// `CardCreationOptions` as the factories read it.
@@ -225,7 +233,7 @@ pub fn create_cards(count: usize, options: &CardOptions, odds: &mut CardOdds, ru
             cards.into_iter().filter(|c| c.rarity == rarity).collect()
         };
         let card = *run.rng.pick(&items).expect("a card to offer");
-        let mut offer = Offer { id: card.id, upgraded: false };
+        let mut offer = Offer::new(card.id);
         if options.upgrade_roll {
             offer.upgraded = roll_for_upgrade(card, 0.0, run);
         }
@@ -490,24 +498,27 @@ impl RunState {
             }
         }
         if options.card_reward {
-            self.upgrade_by_relics(&mut cards);
+            self.upgrade_by_eggs(&mut cards);
+            self.modify_card_reward(&mut cards);
         }
         cards
     }
 
-    /// `TryModifyCardRewardOptionsLate`: the eggs upgrade their type,
-    /// Silver Crucible its first three rewards whole. Fresnel Lens only
-    /// enchants, which the offer does not track.
-    fn upgrade_by_relics(&mut self, cards: &mut [Offer]) {
-        self.upgrade_by_eggs(cards);
-        self.upgrade_by_crucible(cards);
-    }
-
-    /// Silver Crucible on a card reward (`CardCreationFlags.IsCardReward`).
-    pub(crate) fn upgrade_by_crucible(&mut self, cards: &mut [Offer]) {
+    /// The `TryModifyCardRewardOptionsLate` hooks that only a card reward
+    /// (`CardCreationFlags.IsCardReward`) sees: Silver Crucible upgrades its
+    /// first three whole, Silken Tress enchants the first one's cards with
+    /// Glam. Fresnel Lens' Nimble lands as the card joins the deck
+    /// (`add_card`).
+    pub(crate) fn modify_card_reward(&mut self, cards: &mut [Offer]) {
         if let Some(crucible) = self.relic_mut("SILVER_CRUCIBLE").filter(|r| r.counter < 3) {
             crucible.counter += 1;
             cards.iter_mut().for_each(|o| o.upgraded = true);
+        }
+        if let Some(tress) = self.relic_mut("SILKEN_TRESS").filter(|r| !r.flag) {
+            tress.flag = true;
+            for card in cards.iter_mut().filter(|c| DeckCard::from(**c).can_enchant("GLAM")) {
+                card.enchantment = Some(("GLAM", 1));
+            }
         }
     }
 
@@ -529,8 +540,8 @@ impl RunState {
 /// port can follow.
 pub const UNPORTED_RELICS: &[&str] = &[
     "BIG_GAME_HUNTER", "BLACK_STAR", "CALLING_BELL", "CAULDRON", "DELICATE_FROND", "DINGY_RUG", "DREAM_CATCHER",
-    "DRIFTWOOD", "GLASS_EYE", "GLITTER", "KALEIDOSCOPE", "LAVA_LAMP", "LEAD_PAPERWEIGHT", "LOST_COFFER", "MASSIVE_SCROLL",
-    "ORRERY", "PAELS_TOOTH", "PAELS_WING", "PRISMATIC_GEM", "SEA_GLASS", "SILKEN_TRESS", "THE_COURIER", "TOY_BOX",
+    "DRIFTWOOD", "GLASS_EYE", "GLITTER", "KALEIDOSCOPE", "LAVA_LAMP", "MASSIVE_SCROLL",
+    "ORRERY", "PAELS_TOOTH", "PAELS_WING", "PRISMATIC_GEM", "SEA_GLASS", "THE_COURIER", "TOY_BOX",
     "VAKUU_CARD_SELECTOR", "WHITE_STAR", "WING_CHARM", "WONGOS_MYSTERY_TICKET",
 ];
 

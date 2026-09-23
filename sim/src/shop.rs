@@ -98,7 +98,7 @@ impl RunState {
         let card = *self.rngs.player(PlayerStream::Shops).pick(items).expect("a card to stock");
         self.rewards().next_float(1.0);
         stocked.push(card.id);
-        let mut offer = [Offer { id: card.id, upgraded: false }];
+        let mut offer = [Offer::new(card.id)];
         self.upgrade_by_eggs(&mut offer);
         self.price();
         offer[0]
