@@ -1387,6 +1387,8 @@ mod tests {
             })];
             // The initial shuffle is implied by the first snapshot.
             let mut logged_shuffles = 1;
+            // The recorder logs each monster that joins as it arrives.
+            let mut known_enemies = c.enemies.len();
             let mut steps = 0;
             loop {
                 if c.is_over() || steps > 400 {
@@ -1414,6 +1416,10 @@ mod tests {
                     lines.push(json!({ "t": "shuffle", "cards": cards }));
                 }
                 logged_shuffles = c.shuffle_log.len();
+                for e in &c.enemies[known_enemies..] {
+                    lines.push(json!({ "t": "spawn", "id": slug(&format!("{:?}", e.monster.id)) }));
+                }
+                known_enemies = c.enemies.len();
                 match a {
                     Action::PlayCard { hand_idx, target } => {
                         let (id, up) = played.unwrap();

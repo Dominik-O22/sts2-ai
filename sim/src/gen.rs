@@ -426,10 +426,10 @@ fn encounter_for(rng: &mut Rng, floor: u32) -> Encounter {
     encounter_of_kind(rng, act, kind)
 }
 
-/// The encounters of act `act` (0-based); act 1 is Overgrowth and
-/// Underdocks together.
+/// The map encounters of act `act` (0-based); act 1 is Overgrowth and
+/// Underdocks together. Event fights are left out: no room rolls them.
 fn act_encounters(act: u32) -> impl Iterator<Item = Encounter> {
-    crate::encounter::ALL.iter().copied().filter(move |e| e.act().index() as u32 == act)
+    crate::encounter::ALL.iter().copied().filter(move |e| !e.is_event() && e.act().index() as u32 == act)
 }
 
 pub fn encounter_of_kind(rng: &mut Rng, act: u32, kind: Kind) -> Encounter {
@@ -572,7 +572,8 @@ mod tests {
     fn holdout_is_deterministic_and_covers_every_encounter() {
         let a = holdout(7, 3, Ascension(10), ACTS);
         let b = holdout(7, 3, Ascension(10), ACTS);
-        assert_eq!(a.len(), 3 * crate::encounter::ALL.len());
+        assert_eq!(a.len(), 3 * crate::encounter::ALL.iter().filter(|e| !e.is_event()).count());
+        assert!(a.iter().all(|s| !s.encounter.is_event()));
         assert!(a.iter().zip(&b).all(|(x, y)| x.encounter == y.encounter && x.deck.len() == y.deck.len() && x.hp == y.hp));
         assert!(a.iter().all(|s| act_floor(s.floor).0 == s.encounter.act().index() as u32));
     }
@@ -624,7 +625,7 @@ pub fn load_recordings(dir: &std::path::Path) -> Result<(Vec<FightSetup>, Vec<St
 }
 
 /// A fixed held-out set: `per_encounter` generated fights against every
-/// encounter of `acts`, on floors that encounter can appear on. Seeded, so
+/// map encounter of `acts`, on floors that encounter can appear on. Seeded, so
 /// every evaluation sees the same decks.
 pub fn holdout(seed: u64, per_encounter: usize, asc: Ascension, acts: u32) -> Vec<FightSetup> {
     let mut rng = Rng::new(seed);

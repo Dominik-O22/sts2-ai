@@ -126,6 +126,8 @@ pub enum Encounter {
     AeonglassBoss,
     QueenBoss,
     TestSubjectBoss,
+    // Event fights: an event's option starts them, never the map.
+    DenseVegetationEventEncounter,
 }
 
 pub const ALL: &[Encounter] = &[
@@ -209,6 +211,7 @@ pub const ALL: &[Encounter] = &[
     Encounter::AeonglassBoss,
     Encounter::QueenBoss,
     Encounter::TestSubjectBoss,
+    Encounter::DenseVegetationEventEncounter,
 ];
 
 fn one(id: MonsterId) -> EnemySpec {
@@ -231,6 +234,13 @@ fn scroll_with_move(idx: u8) -> EnemySpec {
 }
 
 impl Encounter {
+    /// Started by an event's option (`EventModel.EnterCombatWithoutExitingEvent`),
+    /// never rolled for a map room. `kind` still follows the encounter's
+    /// `RoomType`, which is `Monster` for all of them.
+    pub fn is_event(self) -> bool {
+        matches!(self, Encounter::DenseVegetationEventEncounter)
+    }
+
     pub fn kind(self) -> Kind {
         use Encounter::*;
         match self {
@@ -266,6 +276,7 @@ impl Encounter {
             | FossilStalkerNormal | GremlinMercNormal | HauntedShipNormal | LivingFogNormal | PunchConstructNormal
             | SeapunkNormal | SewerClamNormal | TwoTailedRatsNormal | PhantasmalGardenersElite | SkulkingColonyElite
             | TerrorEelElite | LagavulinMatriarchBoss | SoulFyshBoss | WaterfallGiantBoss => Act::Underdocks,
+            // `Acts/Overgrowth.cs` lists the `DenseVegetation` event.
             _ => Act::Overgrowth,
         }
     }
@@ -455,6 +466,10 @@ impl Encounter {
             // Slots are amalgam, queen.
             QueenBoss => vec![one(TorchHeadAmalgam), one(Queen)],
             TestSubjectBoss => vec![one(TestSubject)],
+
+            // `DenseVegetationEventEncounter`: a Wriggler in each of
+            // wriggler1..4, none of them stunned, so each opens on its slot's move.
+            DenseVegetationEventEncounter => (1..=4).map(|slot| in_slot(Wriggler, slot)).collect(),
         }
     }
 }

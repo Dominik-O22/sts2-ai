@@ -364,9 +364,11 @@ def card_jobs() -> list[Job]:
 
 
 def encounter_jobs() -> list[Job]:
-    """One job per encounter the sim models, tagged with act and kind."""
+    """One job per encounter the sim models, tagged with act and kind, and
+    `event` for the fights an event starts."""
     return [
-        Job(enc.lower(), {act.lower(), kind.lower(), "encounters"}, [Fight(enc)], advice=ADVICE.get(enc))
+        Job(enc.lower(), {act.lower(), kind.lower(), "encounters"} | ({"event"} if enc.endswith("_EVENT_ENCOUNTER") else set()),
+            [Fight(enc)], advice=ADVICE.get(enc))
         for enc, act, kind in encounters()
     ]
 
