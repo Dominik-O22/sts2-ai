@@ -345,13 +345,25 @@ impl VecEnv {
     }
 }
 
-/// FxHash-style mix of every word of an encoding, then murmur3's finalizer.
+/// A thread's scratch row, for encodings only hashed.
+fn scratch() -> (Vec<f32>, Vec<i64>, Vec<bool>) {
+    (vec![0.0; N_FLOATS], vec![0; N_IDS], vec![false; N_ACTIONS])
+}
+
+/// FxHash-style mix of an encoding's words in four independent lanes (a
+/// single chain waits on each multiply), then murmur3's finalizer.
 fn row_hash(floats: &[f32], ids: &[i64], mask: &[bool]) -> u64 {
-    let mut h = 0u64;
-    let mut mix = |w: u64| h = (h.rotate_left(5) ^ w).wrapping_mul(0x51_7C_C1_B7_27_22_0A_95);
-    floats.chunks(2).for_each(|p| mix(p.iter().fold(0, |a, x| a << 32 | x.to_bits() as u64)));
-    ids.iter().for_each(|&x| mix(x as u64));
-    mask.chunks(8).for_each(|p| mix(p.iter().fold(0, |a, &x| a << 8 | x as u64)));
+    const K: u64 = 0x51_7C_C1_B7_27_22_0A_95;
+    let mut lanes = [1u64, 2, 3, 4];
+    let mut mix = |lane: usize, w: u64| lanes[lane] = (lanes[lane].rotate_left(5) ^ w).wrapping_mul(K);
+    for q in floats.chunks(8) {
+        for (lane, p) in q.chunks(2).enumerate() {
+            mix(lane, p.iter().fold(0, |a, x| a << 32 | x.to_bits() as u64));
+        }
+    }
+    ids.iter().for_each(|&x| mix(0, x as u64));
+    mask.chunks(8).for_each(|p| mix(1, p.iter().fold(0, |a, &x| a << 8 | x as u64)));
+    let mut h = lanes.iter().fold(0u64, |h, &l| (h.rotate_left(5) ^ l).wrapping_mul(K));
     h ^= h >> 33;
     h = h.wrapping_mul(0xFF51_AFD7_ED55_8CCD);
     h ^= h >> 33;
@@ -371,6 +383,10 @@ pub struct Forks {
     /// Per copy: the last player turn it plays, and the root's baseline.
     turns: Vec<u32>,
     bases: Vec<Baseline>,
+    /// Per copy: the hash of its encoding, taken in `step` while its state
+    /// is still in cache (`observe_unique` would fetch it all again). None
+    /// until it first moves.
+    hashes: Vec<Option<u64>>,
 }
 
 impl Forks {
@@ -399,7 +415,8 @@ impl Forks {
             .collect();
         let turns = roots.iter().flat_map(|root| std::iter::repeat_n(root.player.turn + depth.max(1) - 1, n)).collect();
         let bases = roots.iter().flat_map(|root| std::iter::repeat_n(Baseline::of(root), n)).collect();
-        Self { combats, turns, bases }
+        let hashes = vec![None; roots.len() * n];
+        Self { combats, turns, bases, hashes }
     }
 
     pub fn len(&self) -> usize {
@@ -436,12 +453,13 @@ impl Forks {
     pub fn observe_unique(&self, rows: &[usize], floats: &mut [f32], ids: &mut [i64], mask: &mut [bool], inverse: &mut [usize]) -> usize {
         // Hash each encoding in a scratch row that stays in cache, then
         // write only the distinct ones to the (large) buffers.
-        let scratch = || (vec![0.0; N_FLOATS], vec![0; N_IDS], vec![false; N_ACTIONS]);
         let hashes: Vec<u64> = rows
             .par_iter()
             .map_init(scratch, |(f, i, m), &r| {
-                encode::encode(&self.combats[r], f, i, m);
-                row_hash(f, i, m)
+                self.hashes[r].unwrap_or_else(|| {
+                    encode::encode(&self.combats[r], f, i, m);
+                    row_hash(f, i, m)
+                })
             })
             .collect();
         let mut distinct = std::collections::HashMap::with_capacity(rows.len());
@@ -471,13 +489,18 @@ impl Forks {
             .zip(self.bases.par_iter())
             .zip(actions.par_iter())
             .zip(rewards.par_iter_mut())
-            .for_each(|((((c, &turn), &base), &a), r)| {
+            .zip(self.hashes.par_iter_mut())
+            .for_each_init(scratch, |(f, i, m), (((((c, &turn), &base), &a), r), h)| {
                 *r = 0.0;
                 if !(c.is_over() || c.player.turn > turn) {
                     if let Some(action) = encode::decode(c, a as usize) {
                         let before = potential(c, base);
                         c.step(action);
                         *r = step_reward(before, c, base, c.is_over());
+                        *h = (!c.is_over()).then(|| {
+                            encode::encode(c, f, i, m);
+                            row_hash(f, i, m)
+                        });
                     }
                 }
             });
