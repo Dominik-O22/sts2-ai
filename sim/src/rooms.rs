@@ -10,6 +10,7 @@
 //! history check compares it with the record, the forward run counts what
 //! was not ported.
 
+use crate::ancients::AncientOffer;
 use crate::effects::{DeckAction, DeckPick, Offered, RestOption};
 use crate::map::PointId;
 use crate::rewards::{Offer, Rewards};
@@ -181,14 +182,15 @@ impl RunState {
         }
     }
 
-    /// An ancient given the relics it offers (drawn on its own stream, not
-    /// ported): what laying them out draws (`ancient_options`), then the
-    /// one taken, picked up.
-    pub fn ancient(&mut self, name: &str, options: &[String], chooser: &mut impl Chooser, log: &mut Vec<Offered>) {
-        self.ancient_options(name, options);
-        if let Some(relic) = options.get(chooser.choose(self, Decision::Ancient(options))) {
-            let pickup = self.obtain(relic);
+    /// An ancient (`AncientEventModel`): its options laid out on its own
+    /// stream (`ancient_offer`), then the one taken, picked up. Returns what
+    /// it laid out.
+    pub fn ancient(&mut self, name: &str, chooser: &mut impl Chooser, log: &mut Vec<Offered>) -> AncientOffer {
+        let offer = self.ancient_offer(name);
+        if let Some(relic) = offer.relics.get(chooser.choose(self, Decision::Ancient(&offer.relics))) {
+            let pickup = self.take_ancient(&offer, relic);
             self.settle(pickup, chooser, log);
         }
+        offer
     }
 }

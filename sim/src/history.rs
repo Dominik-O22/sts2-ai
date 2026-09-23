@@ -130,10 +130,6 @@ fn model_id(room: Room) -> Option<String> {
 /// The curses events add to the deck, which a grid check leaves out.
 const CURSES: &[&str] = &["CLUMSY", "DOUBT", "REGRET", "SHAME", "INJURY", "POOR_SLEEP", "DECAY", "WRITHE", "NORMALITY"];
 
-/// The ancients whose options are drawn on the event's own stream; what
-/// the chosen relic does is `RunState::obtain`'s.
-const ANCIENTS: &[&str] = &["NEOW", "DARV", "OROBAS", "PAEL", "TEZCATARA", "NONUPEIPE", "TANX", "VAKUU"];
-
 /// Walks `run`, which must be `eligible`; with `live`, checks the effects
 /// too.
 pub fn check(run: &Value, live: bool) -> Report {
@@ -330,9 +326,9 @@ impl Player {
     }
 
     /// How the port's player differs from this one, if it does. `missing`
-    /// are choices the record made that the port did not offer.
+    /// are where the port did not offer what the record shows.
     fn differs(&self, state: &RunState, missing: &[String]) -> Option<String> {
-        let mut diffs: Vec<String> = missing.iter().map(|m| format!("not offered {m}")).collect();
+        let mut diffs: Vec<String> = missing.to_vec();
         for (what, port, game) in [("hp", state.hp, self.hp), ("max hp", state.max_hp, self.max_hp), ("gold", state.gold, self.gold)] {
             if port != game {
                 diffs.push(format!("{what} {port}, the run had {game}"));
@@ -394,6 +390,15 @@ fn remove_card(deck: &mut Vec<DeckCard>, card: &DeckCard) {
     }
 }
 
+/// An ancient's option as the record keys it: the relic's id, but the
+/// character for Orobas' Sea Glass.
+fn ancient_option(option: &Value) -> String {
+    match option["TextKey"].as_str().unwrap() {
+        "IRONCLAD" | "SILENT" | "DEFECT" | "NECROBINDER" | "REGENT" => "SEA_GLASS".to_string(),
+        relic => relic.to_string(),
+    }
+}
+
 /// The potions a floor used or threw away.
 fn used_potions(stats: &Value) -> Vec<String> {
     let list = |key: &str| stats[key].as_array().cloned().unwrap_or_default();
@@ -414,7 +419,8 @@ struct Recorded {
     removed: Vec<DeckCard>,
     enchanted: Vec<String>,
     ancient: Option<String>,
-    /// Choices the record made that the port did not offer.
+    /// Where the port did not offer what the record shows: a choice the
+    /// record made, or an ancient's options.
     missing: Vec<String>,
 }
 
@@ -430,7 +436,7 @@ impl Recorded {
             upgraded: ids("upgraded_cards"),
             removed: list("cards_removed").iter().map(recorded_card).collect(),
             enchanted: list("cards_enchanted").iter().map(|e| recorded_card(&e["card"]).id).collect(),
-            ancient: list("ancient_choice").iter().find(|o| o["was_chosen"] == true).map(|o| o["TextKey"].as_str().unwrap().to_string()),
+            ancient: list("ancient_choice").iter().find(|o| o["was_chosen"] == true).map(ancient_option),
             missing: Vec::new(),
         }
     }
@@ -486,7 +492,7 @@ impl Chooser for Recorded {
                 match options.iter().position(|&o| RestOption::from_id(&id) == Some(o)) {
                     Some(i) => i,
                     None => {
-                        self.missing.push(format!("rest option {id}"));
+                        self.missing.push(format!("not offered rest option {id}"));
                         options.len()
                     }
                 }
@@ -519,7 +525,7 @@ struct Walked {
     stream: Result<(), String>,
     /// Why the floor's effects are not the port's, if they are not.
     unported: Option<String>,
-    /// Choices the record made that the port did not offer.
+    /// Where the port did not offer what the record shows.
     missing: Vec<String>,
 }
 
@@ -593,13 +599,10 @@ fn follow(state: &mut RunState, room: Room, rooms: &[Value], stats: &Value) -> W
             state.take_rewards(rewards, &mut chooser, &mut log);
         }
         Room::Ancient(name) => {
-            if ANCIENTS.contains(&slug(name).as_str()) {
-                let options = stats["ancient_choice"].as_array().into_iter().flatten();
-                let options: Vec<String> = options.map(|o| o["TextKey"].as_str().unwrap().to_string()).collect();
-                state.ancient(name, &options, &mut chooser, &mut log);
-            } else {
-                stream.get_or_insert(format!("ancient {name} is not ported"));
-                unported = Some(format!("ancient {name}"));
+            let offer = state.ancient(name, &mut chooser, &mut log);
+            let recorded: Vec<String> = stats["ancient_choice"].as_array().into_iter().flatten().map(ancient_option).collect();
+            if offer.relics != recorded {
+                chooser.missing.push(format!("options {:?}, the run had {recorded:?}", offer.relics));
             }
         }
         Room::Event(name) => {

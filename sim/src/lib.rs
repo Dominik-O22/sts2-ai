@@ -1,6 +1,7 @@
 //! Slay the Spire 2 combat simulator, ported from the decompiled v0.107.1
 //! assembly. See DESIGN.md and docs/survey/README.md for the decisions.
 
+pub mod ancients;
 pub mod card;
 pub mod combat;
 pub mod effect;

@@ -217,7 +217,9 @@ impl Run {
                 self.state.event_offer(name);
                 self.count(format!("event {name}"));
             }
-            Room::Ancient(name) => self.count(format!("ancient {name}'s options")),
+            Room::Ancient(name) => {
+                self.state.ancient(name, chooser, &mut log);
+            }
         }
         self.left(log)
     }

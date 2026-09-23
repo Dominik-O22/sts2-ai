@@ -452,6 +452,9 @@ impl RunState {
                 let bundles = self.scroll_boxes();
                 offered.push(Offered::Bundles(bundles));
             }
+            // The card it readies is added by the ancient that laid it out
+            // (`RunState::take_ancient`).
+            "DUSTY_TOME" => {}
             // Charged on creation (`RunRelic::new`), which is `Rekindle`.
             "PUMPKIN_CANDLE" => {}
             // Only in combat.

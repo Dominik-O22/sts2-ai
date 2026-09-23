@@ -152,17 +152,6 @@ impl RunState {
         Ok(offered)
     }
 
-    /// What an ancient's options draw on the Rewards stream as they are
-    /// laid out (`GenerateInitialOptions`), given the options it showed:
-    /// Darv readies a Dusty Tome it offers (`DustyTome.SetupForPlayer`),
-    /// picking the ancient card it will give among the character's, less
-    /// the transcendence ones (Break, for the Ironclad).
-    pub fn ancient_options(&mut self, ancient: &str, options: &[String]) {
-        if ancient == "Darv" && options.iter().any(|o| o == "DUSTY_TOME") {
-            let cards: Vec<&PoolCard> = IRONCLAD_CARDS.iter().filter(|c| c.rarity == Rarity::Ancient && c.id != "BREAK").collect();
-            self.rewards().pick(&cards);
-        }
-    }
 
     /// `RelicFactory.PullNextRelicFromFront` for a rarity, of the relics a
     /// shop may sell.

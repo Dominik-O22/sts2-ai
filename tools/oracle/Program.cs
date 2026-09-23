@@ -119,6 +119,59 @@ switch (args[0])
         }
         break;
     }
+    // ancients: one new singleplayer Ironclad run per stdin line `SEED
+    // ASCENSION ACT ANCIENT [+CARD|-CARD]...`, fully unlocked, in act ACT
+    // (0-based), its deck changed by the card ops (`+` adds a card, `-`
+    // removes the first of its id), then the ancient's options as
+    // `GenerateInitialOptions` lays them out on the event's own stream
+    // (`EventModel.BeginEvent` seeds it). Prints the line as a `run` header,
+    // then the options' relics (Sea Glass as `SEA_GLASS`, Dusty Tome with the
+    // card it readies) and the player's Rewards counter.
+    case "ancients":
+    {
+        LoadModelDb();
+        RunOutsideTheGame();
+        var flags = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public;
+        string? line;
+        while ((line = Console.ReadLine()) != null)
+        {
+            var parts = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length == 0)
+            {
+                continue;
+            }
+            var (state, player) = NewRun(parts[0], int.Parse(parts[1]));
+            state.CurrentActIndex = int.Parse(parts[2]);
+            foreach (var op in parts.Skip(4))
+            {
+                var id = op[1..];
+                if (op[0] == '+')
+                {
+                    var canonical = ModelDb.AllCards.First(c => c.Id.Entry == id);
+                    player.Deck.AddInternal(state.CreateCard(canonical, player));
+                }
+                else
+                {
+                    player.Deck.RemoveInternal(player.Deck.Cards.First(c => c.Id.Entry == id));
+                }
+            }
+            var ancient = (AncientEventModel)ModelDb.AllAncients.First(a => a.Id.Entry == parts[3]).ToMutable();
+            typeof(EventModel).GetProperty("Owner")!.SetValue(ancient, player);
+            var seed = (uint)((uint)(int)state.Rng.Seed + (uint)StringHelper.GetDeterministicHashCode(ancient.Id.Entry));
+            typeof(EventModel).GetProperty("Rng")!.SetValue(ancient, new Rng(seed));
+            var options = (IReadOnlyList<MegaCrit.Sts2.Core.Events.EventOption>)typeof(AncientEventModel)
+                .GetMethod("GenerateInitialOptions", flags)!.Invoke(ancient, null)!;
+            string Option(MegaCrit.Sts2.Core.Events.EventOption o) => o.Relic switch
+            {
+                null => o.TextKey,
+                MegaCrit.Sts2.Core.Models.Relics.DustyTome tome => $"DUSTY_TOME:{tome.AncientCard!.Entry}",
+                var relic => relic.Id.Entry,
+            };
+            Console.WriteLine($"run {line}");
+            Console.WriteLine($"{parts[3]} {string.Join(" ", options.Select(Option))} counter {player.PlayerRng.Rewards.Counter}");
+        }
+        break;
+    }
     // map SEED ACT N ASCENSION: act N's map (1-based) as `StandardActMap.CreateFor`
     // builds it for a single player, one point per line: col row type
     // children, children as col,row.
@@ -355,6 +408,13 @@ static void RunOutsideTheGame()
     // A few relics format localized text into their variables, and there is
     // no localization loaded.
     Stub(typeof(MegaCrit.Sts2.Core.Localization.LocString).GetMethod("GetFormattedText", Type.EmptyTypes), "NoText");
+    // An event option looks its text up in the tables, which are not loaded:
+    // a relic's option is its key and relic alone.
+    Stub(typeof(MegaCrit.Sts2.Core.Events.EventOption).GetMethod("FromRelic"), "RelicOnly");
+    // Archaic Tooth's setup names its cards in its text, which crashes with
+    // none loaded; its answer is whether the deck holds a card it
+    // transcends, which draws nothing.
+    Stub(typeof(MegaCrit.Sts2.Core.Models.Relics.ArchaicTooth).GetMethod("SetupForPlayer"), "ToothFits");
 }
 
 // A new singleplayer Ironclad run for a fully unlocked profile, set on
@@ -401,6 +461,21 @@ static class GodotStubs
     public static bool NoText(ref string __result)
     {
         __result = "";
+        return false;
+    }
+
+    public static bool ToothFits(Player player, ref bool __result)
+    {
+        var starters = new[] { "BASH", "NEUTRALIZE", "UNLEASH", "FALLING_STAR", "DUALCAST" };
+        __result = player.Deck.Cards.Any(c => starters.Contains(c.Id.Entry));
+        return false;
+    }
+
+    public static bool RelicOnly(RelicModel relic, string textKey, ref MegaCrit.Sts2.Core.Events.EventOption __result)
+    {
+        var option = (MegaCrit.Sts2.Core.Events.EventOption)System.Runtime.CompilerServices.RuntimeHelpers.GetUninitializedObject(typeof(MegaCrit.Sts2.Core.Events.EventOption));
+        typeof(MegaCrit.Sts2.Core.Events.EventOption).GetProperty("TextKey")!.SetValue(option, textKey);
+        __result = option.WithRelic(relic);
         return false;
     }
 
