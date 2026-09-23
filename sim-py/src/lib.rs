@@ -468,6 +468,27 @@ fn card_ids() -> Vec<String> {
     ALL_CARDS.iter().map(|c| sim::replay::slug(&format!("{c:?}"))).collect()
 }
 
+/// Every card, relic, potion and enchantment's game id (`BODY_SLAM`), each
+/// in the sim's order: index i here is id i + 1 in the policy's embeddings.
+#[pyfunction]
+fn game_ids() -> std::collections::HashMap<&'static str, Vec<String>> {
+    let slugs = |names: Vec<String>| names.iter().map(|n| sim::replay::slug(n)).collect::<Vec<_>>();
+    std::collections::HashMap::from([
+        ("card", slugs(ALL_CARDS.iter().map(|c| format!("{c:?}")).collect())),
+        ("relic", slugs(sim::relic::ALL.iter().map(|c| format!("{c:?}")).collect())),
+        ("potion", slugs(sim::potion::ALL.iter().map(|c| format!("{c:?}")).collect())),
+        ("enchant", slugs(sim::enchant::ALL.iter().map(|c| format!("{c:?}")).collect())),
+    ])
+}
+
+/// A generated run state for a fight on `floor`, in the recorder's `start`
+/// format as JSON (`FightSetup::run_json`); the same seed and floor give
+/// the same run.
+#[pyfunction]
+fn generate_run(seed: u64, floor: u32) -> String {
+    sim::gen::generate(&mut sim::rng::Rng::new(seed), floor, sim::types::Ascension(10)).run_json().to_string()
+}
+
 /// Game ids of the cards the sim refuses to play (`card::UNSUPPORTED_CARDS`).
 #[pyfunction]
 fn unsupported_cards() -> Vec<String> {
@@ -542,6 +563,8 @@ fn _sim(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(layout, m)?)?;
     m.add_function(wrap_pyfunction!(card_names, m)?)?;
     m.add_function(wrap_pyfunction!(card_ids, m)?)?;
+    m.add_function(wrap_pyfunction!(game_ids, m)?)?;
+    m.add_function(wrap_pyfunction!(generate_run, m)?)?;
     m.add_function(wrap_pyfunction!(unsupported_cards, m)?)?;
     m.add_function(wrap_pyfunction!(monster_names, m)?)?;
     m.add_function(wrap_pyfunction!(encounters, m)?)?;

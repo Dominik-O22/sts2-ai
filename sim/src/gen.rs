@@ -186,6 +186,38 @@ impl FightSetup {
             ..rolled
         })
     }
+
+    /// This fight in the recorder's `start` format (deck, relics, potions,
+    /// HP, the encounter and room), so tools that read recordings read
+    /// generated fights too (`examples/gendump.rs`, the deck-value labels).
+    pub fn run_json(&self) -> Value {
+        let slug = |name: String| crate::replay::slug(&name);
+        let deck: Vec<Value> = self
+            .deck
+            .iter()
+            .map(|k| {
+                let mut c = serde_json::json!({"id": slug(format!("{:?}", k.id)), "up": k.upgraded});
+                if let Some(e) = k.enchantment {
+                    c["ench"] = serde_json::json!([slug(format!("{:?}", e.id)), e.amount, false]);
+                }
+                c
+            })
+            .collect();
+        serde_json::json!({
+            "t": "start",
+            "encounter": slug(format!("{:?}", self.encounter)),
+            "room": format!("{:?}", self.room),
+            "floor": self.floor,
+            "ascension": self.asc.0,
+            "max_energy": self.max_energy,
+            "gold": self.gold,
+            "deck": deck,
+            "relics": self.relics.iter().map(|r| slug(format!("{:?}", r.id))).collect::<Vec<_>>(),
+            "potions": self.potions.iter().map(|p| p.map(|id| slug(format!("{id:?}")))).collect::<Vec<_>>(),
+            "hp": self.hp,
+            "max_hp": self.max_hp,
+        })
+    }
 }
 
 /// `repeats` fights of the run in `start` against each of `encounters`
