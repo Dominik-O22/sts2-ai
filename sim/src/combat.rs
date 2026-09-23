@@ -243,6 +243,11 @@ pub struct Stats {
     pub wounds_pending: u32,
     /// A Bound card has been played this turn (`ChainsOfBindingPower`).
     pub bound_played: bool,
+    /// What the last `CreatureCmd.GainBlock` returned (Toric Toughness).
+    pub last_block_gained: f64,
+    /// Cards in play whose result pile Rebound moved to the top of the draw
+    /// pile, decided as their play began.
+    pub rebound: Vec<u32>,
 }
 
 #[derive(Clone, Debug)]
@@ -703,6 +708,10 @@ impl Combat {
         if card.has(Keyword::Unplayable) || !self.hook_allows_play(card) {
             return false;
         }
+        // Clash.IsPlayable: only with nothing but attacks in hand.
+        if card.id == CardId::Clash && self.player.hand.iter().any(|k| k.ty() != CardType::Attack) {
+            return false;
+        }
         if card.def().x_cost {
             return true;
         }
@@ -1013,42 +1022,69 @@ impl Combat {
                 }
             }
             Effect::GenerateRandom { pool, count, to, free_this_turn, distinct } => {
-                let options = pool_cards(pool);
-                let mut chosen = Vec::new();
-                if distinct {
-                    let mut opts = options.clone();
-                    self.rngs.card_generation.shuffle(&mut opts);
-                    for _ in 0..count {
-                        let scripted = self.script.generated.pop_front().filter(|id| opts.contains(id));
-                        let id = match scripted {
-                            Some(id) => id,
-                            None => match opts.first() {
-                                Some(&id) => {
-                                    self.script.unforced.push(id);
-                                    id
-                                }
-                                None => break,
-                            },
-                        };
-                        opts.retain(|&o| o != id);
-                        chosen.push(id);
-                    }
-                } else {
-                    for _ in 0..count {
-                        let scripted = self.script.generated.pop_front().filter(|id| options.contains(id));
-                        if scripted.is_none() {
-                            self.script.unforced.extend(self.rngs.card_generation.pick(&options).copied());
-                        }
-                        if let Some(id) = scripted.or_else(|| self.script.unforced.last().copied()) {
-                            chosen.push(id);
-                        }
-                    }
-                }
-                let subs = chosen
+                let subs = self
+                    .roll_cards(pool, count, distinct)
                     .into_iter()
                     .map(|id| Effect::GenerateCard { id, upgraded: false, to, free_this_turn })
                     .collect();
                 self.push_front_all(subs);
+            }
+            Effect::GenerateRandomFreeThisCombat { pool, count, to, distinct } => {
+                for id in self.roll_cards(pool, count, distinct) {
+                    let mut card = Card::new(self.new_uid(), id, false);
+                    card.cost_this_combat = Some(0);
+                    self.card_entered_combat(&mut card);
+                    self.put_card(card, to);
+                }
+            }
+            Effect::UpgradeAll { except } => self.for_each_card(|c| {
+                if c.uid != except && c.upgradable() {
+                    c.upgraded = true;
+                }
+            }),
+            // LocalCostModifier with IsReduceOnly: it only counts where it
+            // lowers the cost the earlier modifiers left.
+            Effect::CapHandCost { cost, this_combat } => {
+                for c in &mut self.player.hand {
+                    if c.def().x_cost || c.base_cost() < 0 {
+                        continue;
+                    }
+                    if this_combat {
+                        c.cost_this_combat = Some(c.cost_this_combat.unwrap_or(c.base_cost()).min(cost));
+                        if let Some(t) = c.cost_this_turn {
+                            c.cost_this_turn = Some(t.min(cost));
+                        }
+                    } else {
+                        c.cost_this_turn = Some(c.local_cost().min(cost));
+                    }
+                }
+            }
+            Effect::GrowDamage { id, amount } => self.for_each_card(|c| {
+                if c.id == id {
+                    c.extra_damage += amount;
+                }
+            }),
+            Effect::LoseMaxHp { target, amount, from_card } => {
+                let c = self.creature(target);
+                let new_max = c.max_hp - amount;
+                let mut subs = vec![];
+                if new_max < c.hp {
+                    let mut props = ValueProp::UNBLOCKABLE.or(ValueProp::UNPOWERED);
+                    if from_card {
+                        props = props.or(ValueProp::MOVE);
+                    }
+                    subs.push(Effect::Damage { target, amount: (c.hp - new_max) as f64, props, dealer: None, card: None });
+                }
+                subs.push(Effect::SetMaxHp { target, max_hp: new_max.max(1) });
+                self.push_front_all(subs);
+            }
+            Effect::ApplyInstanced { target, id, amount, data } => {
+                if amount != 0 && self.creature(target).alive() {
+                    let mut p = Power::new(id, amount);
+                    p.data = data;
+                    p.applier = Some(target);
+                    self.creature_mut(target).powers.push(p);
+                }
             }
             Effect::Choose { from, filter, then, can_skip } => {
                 let pile = match from {
@@ -1217,6 +1253,7 @@ impl Combat {
                 self.push_front_all(subs);
             }
             Effect::PlayCard { uid, target, paid } => {
+                self.decide_result_pile(uid);
                 let Some(card) = self.find_card(uid) else { return };
                 // GeneratePlayCount: replays, then Hook.ModifyCardPlayCount, then
                 // each modifying power is told (OneTwoPunch, Duplication decrement).
@@ -1306,10 +1343,13 @@ impl Combat {
                         self.player.exhaust.push(card);
                         let subs = self.after_card_exhausted(uid, false);
                         self.push_front_all(subs);
+                    } else if self.stats.rebound.contains(&uid) {
+                        self.player.draw.insert(0, card);
                     } else {
                         self.player.discard.push(card);
                     }
                 }
+                self.stats.rebound.retain(|&u| u != uid);
                 let subs = self.relic_after_hand_emptied();
                 self.push_front_all(subs);
             }
@@ -1547,6 +1587,10 @@ impl Combat {
     /// `CombatManager.StartTurn`.
     fn start_turn(&mut self, side: Side) {
         self.side = side;
+        // Creature.BeforeTurnStart for the side starting its turn.
+        if side == Side::Player {
+            self.player.creature.powers.iter_mut().for_each(Power::before_turn_start);
+        }
         // MonsterModel.OnSideSwitch.
         for e in &mut self.enemies {
             e.monster.spawned_this_turn = false;
@@ -1581,6 +1625,7 @@ impl Combat {
                 for p in &self.player.creature.powers {
                     subs.extend(p.after_block_cleared(CreatureRef::Player));
                 }
+                self.tick_toric();
                 subs.extend(self.relic_after_block_cleared());
                 // SetupPlayerTurn: energy, then draw (innate on top on turn 1).
                 if self.relic_should_reset_energy() {
@@ -1593,6 +1638,10 @@ impl Combat {
                     subs.extend(p.after_energy_reset(CreatureRef::Player));
                 }
                 subs.extend(self.relic_after_energy_reset());
+                // Hook.BeforeHandDraw: player powers, then relics.
+                for p in &self.player.creature.powers {
+                    subs.extend(p.before_hand_draw());
+                }
                 subs.extend(self.relic_before_hand_draw());
                 subs.push(Effect::TurnDraw);
                 // Imbued.AfterAutoPrePlayPhaseEntered: on turn one it plays
@@ -2065,6 +2114,10 @@ impl Combat {
         self.bind_drawn(uid);
         if strike && self.player.creature.power(PowerId::Hellraiser).is_some() {
             out.push(Effect::AutoPlay { uid, force_exhaust: false });
+        }
+        // Void.AfterCardDrawn: drawing it costs energy.
+        if self.find_card(uid).is_some_and(|k| k.id == CardId::Void) {
+            out.push(Effect::LoseEnergy { amount: 1 });
         }
         if count > 1 {
             out.push(Effect::Draw { count: count - 1, from_hand_draw });
@@ -2682,6 +2735,7 @@ impl Combat {
         if target == CreatureRef::Player {
             modified *= self.relic_block_multiplicative(card, props);
         }
+        self.stats.last_block_gained = modified;
         let mut out = vec![];
         if modified > 0.0 {
             let c = self.creature_mut(target);
@@ -2877,6 +2931,84 @@ impl Combat {
         vec![Effect::ApplyPower { target: me, id: PowerId::Swipe, amount: 1, applier: Some(me) }]
     }
 
+    /// The cards a random generation makes, `CardFactory.GetForCombat` or
+    /// `GetDistinctForCombat`. A recorded `gen` forces the pick; with none,
+    /// the roll is kept in `unforced` for a later record to rewrite.
+    fn roll_cards(&mut self, pool: GenPool, count: u32, distinct: bool) -> Vec<CardId> {
+        let options = pool_cards(pool);
+        let mut chosen = Vec::new();
+        if distinct {
+            let mut opts = options.clone();
+            self.rngs.card_generation.shuffle(&mut opts);
+            for _ in 0..count {
+                let scripted = self.script.generated.pop_front().filter(|id| opts.contains(id));
+                let id = match scripted {
+                    Some(id) => id,
+                    None => match opts.first() {
+                        Some(&id) => {
+                            self.script.unforced.push(id);
+                            id
+                        }
+                        None => break,
+                    },
+                };
+                opts.retain(|&o| o != id);
+                chosen.push(id);
+            }
+        } else {
+            for _ in 0..count {
+                let scripted = self.script.generated.pop_front().filter(|id| options.contains(id));
+                if scripted.is_none() {
+                    self.script.unforced.extend(self.rngs.card_generation.pick(&options).copied());
+                }
+                if let Some(id) = scripted.or_else(|| self.script.unforced.last().copied()) {
+                    chosen.push(id);
+                }
+            }
+        }
+        chosen
+    }
+
+    /// `Hook.ModifyCardPlayResultPileTypeAndPosition`, which the game asks
+    /// once as the play begins, before `OnPlay`, so the card that grants
+    /// Rebound is not moved by it. Player powers in order: Corruption sends
+    /// a Skill to the exhaust pile, Rebound a card bound for the discard
+    /// pile to the top of the draw pile and spends a charge. Where the card
+    /// finally goes is still decided in `FinishCardPlay`; this only records
+    /// Rebound's claim.
+    fn decide_result_pile(&mut self, uid: u32) {
+        let Some(card) = self.find_card(uid) else { return };
+        if card.ty() == CardType::Power || card.dupe {
+            return;
+        }
+        let ty = card.ty();
+        let mut discard = !(card.has(Keyword::Exhaust) || card.exhaust_on_next_play);
+        let mut rebound = false;
+        for p in &self.player.creature.powers {
+            match p.id {
+                PowerId::Corruption if ty == CardType::Skill => discard = false,
+                PowerId::Rebound if discard => rebound = true,
+                _ => {}
+            }
+        }
+        if rebound {
+            self.stats.rebound.push(uid);
+            // ReboundPower.AfterModifyingCardPlayResultPileOrPosition.
+            self.modify_power(CreatureRef::Player, PowerId::Rebound, -1);
+        }
+    }
+
+    /// `ToricToughnessPower.AfterBlockCleared`'s decrement, instance by
+    /// instance: each counts down its own turns. The block each gains is
+    /// already queued, and nothing between the two reads the count.
+    fn tick_toric(&mut self) {
+        let powers = &mut self.player.creature.powers;
+        for p in powers.iter_mut().filter(|p| p.id == PowerId::ToricToughness) {
+            p.amount -= 1;
+        }
+        powers.retain(|p| p.id != PowerId::ToricToughness || p.amount > 0);
+    }
+
     /// What to do with a chosen card.
     fn choose(&mut self, then: Then, uid: u32) -> Vec<Effect> {
         let again = |then: Then| Effect::Choose { from: Pile::Hand, filter: CardFilter::Any, then, can_skip: true };
@@ -2901,6 +3033,19 @@ impl Combat {
             Then::DiscardThenDraw { picked } => {
                 vec![Effect::MoveCard { uid, to: Pile::Discard }, again(Then::DiscardThenDraw { picked: picked + 1 })]
             }
+            Then::CloneToHand { copies } => (0..copies).map(|_| Effect::CloneCard { uid, to: Pile::Hand }).collect(),
+            Then::ToHandMany { left } => {
+                let mut e = vec![Effect::MoveCard { uid, to: Pile::Hand }];
+                if left > 1 {
+                    e.push(Effect::Choose {
+                        from: Pile::Discard,
+                        filter: CardFilter::Any,
+                        then: Then::ToHandMany { left: left - 1 },
+                        can_skip: true,
+                    });
+                }
+                e
+            }
         }
     }
 }
@@ -2912,6 +3057,7 @@ fn filter_ok(f: CardFilter, c: &Card) -> bool {
         CardFilter::NotType(t) => c.ty() != t,
         CardFilter::PlayableAttack => c.ty() == CardType::Attack && !c.has(Keyword::Unplayable),
         CardFilter::CostsEnergy => c.local_cost() > 0 || c.def().x_cost,
+        CardFilter::AttackOrPower => matches!(c.ty(), CardType::Attack | CardType::Power),
     }
 }
 
@@ -2979,6 +3125,7 @@ fn pool_cards(pool: GenPool) -> Vec<CardId> {
                     GenPool::IroncladAttacks => d.ty == CardType::Attack,
                     GenPool::IroncladSkills => d.ty == CardType::Skill,
                     GenPool::IroncladPowers => d.ty == CardType::Power,
+                    GenPool::IroncladCommon => d.rarity == crate::types::CardRarity::Common,
                 }
         })
         .collect()

@@ -497,6 +497,20 @@ pub enum PowerId {
     Nemesis,
     /// A Wither into your hand every sixth card you play (Aeonglass).
     WitheringPresence,
+    // Event and token cards the Ironclad can meet outside its pool.
+    /// `TemporaryStrengthPower`, positive (Feeding Frenzy).
+    FeedingFrenzy,
+    /// Random distinct Commons into your hand before each hand draw.
+    HelloWorld,
+    /// The next card played that would be discarded goes on top of the
+    /// draw pile instead; gone at the end of your turn.
+    Rebound,
+    /// Energy once your next turn's energy is reset.
+    EnergyNextTurn,
+    /// More cards in your next hand draw.
+    DrawCardsNextTurn,
+    /// Instanced: `amount` turns of block, `data` of it each turn.
+    ToricToughness,
 }
 
 /// `Models/Monsters/<Name>.cs`.
@@ -950,6 +964,12 @@ pub const ALL_POWERS: &[PowerId] = &[
     PowerId::PainfulStabs,
     PowerId::Nemesis,
     PowerId::WitheringPresence,
+    PowerId::FeedingFrenzy,
+    PowerId::HelloWorld,
+    PowerId::Rebound,
+    PowerId::EnergyNextTurn,
+    PowerId::DrawCardsNextTurn,
+    PowerId::ToricToughness,
 ];
 
 pub const ALL_MONSTERS: &[MonsterId] = &[

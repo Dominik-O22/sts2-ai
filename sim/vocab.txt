@@ -334,6 +334,12 @@ power Enrage
 power PainfulStabs
 power Nemesis
 power WitheringPresence
+power FeedingFrenzy
+power HelloWorld
+power Rebound
+power EnergyNextTurn
+power DrawCardsNextTurn
+power ToricToughness
 monster Nibbit
 monster FuzzyWurmCrawler
 monster ShrinkerBeetle

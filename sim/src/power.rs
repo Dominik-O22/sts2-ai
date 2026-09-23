@@ -86,7 +86,7 @@ pub fn is_debuff_for_amount(id: PowerId, amount: i32) -> bool {
 /// real power they apply and the sign.
 pub fn temp_power(id: PowerId) -> Option<(PowerId, i32)> {
     match id {
-        PowerId::SetupStrike | PowerId::FlexPotion => Some((PowerId::Strength, 1)),
+        PowerId::SetupStrike | PowerId::FlexPotion | PowerId::FeedingFrenzy => Some((PowerId::Strength, 1)),
         PowerId::Mangle | PowerId::ShacklingPotion => Some((PowerId::Strength, -1)),
         PowerId::SpeedPotion => Some((PowerId::Dexterity, 1)),
         _ => None,
@@ -216,6 +216,8 @@ impl Power {
         match self.id {
             PowerId::Clarity => count + 1,
             PowerId::MindRot => count.saturating_sub(self.amount.max(0) as u32),
+            // DrawCardsNextTurnPower.cs: only once a turn has started with it.
+            PowerId::DrawCardsNextTurn if self.data != 0 => count + self.amount.max(0) as u32,
             _ => count,
         }
     }
@@ -224,6 +226,8 @@ impl Power {
     pub fn after_energy_reset(&self, owner: CreatureRef) -> Vec<Effect> {
         match self.id {
             PowerId::Radiance => vec![Effect::GainEnergy { amount: 1 }, Effect::DecrementPower { target: owner, id: self.id }],
+            // EnergyNextTurnPower.cs
+            PowerId::EnergyNextTurn => vec![Effect::GainEnergy { amount: self.amount }, Effect::RemovePower { target: owner, id: self.id }],
             _ => vec![],
         }
     }
@@ -235,6 +239,11 @@ impl Power {
                 Effect::GainBlock { target: owner, amount: self.amount as f64, props: ValueProp::UNPOWERED, card: None },
                 Effect::RemovePower { target: owner, id: self.id },
             ],
+            // ToricToughnessPower.cs: this instance's block. Its decrement is
+            // per instance, so `Combat::tick_toric` does it.
+            PowerId::ToricToughness => {
+                vec![Effect::GainBlock { target: owner, amount: self.data as f64, props: ValueProp::UNPOWERED, card: None }]
+            }
             _ => vec![],
         }
     }
@@ -280,6 +289,29 @@ impl Power {
         }
     }
 
+    /// `Creature.BeforeTurnStart` records `AmountOnTurnStart`; `data` holds
+    /// it for the two powers that read it.
+    pub fn before_turn_start(&mut self) {
+        if matches!(self.id, PowerId::DrawCardsNextTurn | PowerId::HelloWorld) {
+            self.data = self.amount;
+        }
+    }
+
+    /// `BeforeHandDraw`, player powers.
+    pub fn before_hand_draw(&self) -> Vec<Effect> {
+        match self.id {
+            // HelloWorldPower.cs: `AmountOnTurnStart` distinct Commons.
+            PowerId::HelloWorld if self.data >= 1 => vec![Effect::GenerateRandom {
+                pool: crate::effect::GenPool::IroncladCommon,
+                count: self.data as u32,
+                to: Pile::Hand,
+                free_this_turn: false,
+                distinct: true,
+            }],
+            _ => vec![],
+        }
+    }
+
     /// `BeforeSideTurnStart`.
     pub fn before_side_turn_start(&self, owner: CreatureRef, side: Side, round: u32) -> Vec<Effect> {
         match self.id {
@@ -313,6 +345,8 @@ impl Power {
             }],
             // ClarityPower.cs
             PowerId::Clarity => vec![Effect::DecrementPower { target: owner, id: self.id }],
+            // DrawCardsNextTurnPower.cs: spent by the hand draw it grew.
+            PowerId::DrawCardsNextTurn if self.data != 0 => vec![Effect::RemovePower { target: owner, id: self.id }],
             // PlatingPower.cs: decrement each turn after the first.
             // SandpitPower.AfterSideTurnStartLate: one turn closer to being
             // eaten; its AfterRemoved kills the player outright.
@@ -439,7 +473,13 @@ impl Power {
                 applier: Some(owner),
             }],
             // Self-removing at the end of the owner's turn.
-            PowerId::NoDraw | PowerId::NoEnergyGain | PowerId::OneTwoPunch | PowerId::Rage | PowerId::Tangled | PowerId::Ringing
+            PowerId::NoDraw
+            | PowerId::NoEnergyGain
+            | PowerId::OneTwoPunch
+            | PowerId::Rage
+            | PowerId::Tangled
+            | PowerId::Ringing
+            | PowerId::Rebound
                 if own_side =>
             {
                 remove()
@@ -488,7 +528,12 @@ impl Power {
             PowerId::DiamondDiadem if side == Side::Enemy => remove(),
             // TemporaryStrengthPower / TemporaryDexterityPower: remove self
             // and undo the real power.
-            PowerId::SetupStrike | PowerId::Mangle | PowerId::FlexPotion | PowerId::ShacklingPotion | PowerId::SpeedPotion
+            PowerId::SetupStrike
+            | PowerId::Mangle
+            | PowerId::FlexPotion
+            | PowerId::ShacklingPotion
+            | PowerId::SpeedPotion
+            | PowerId::FeedingFrenzy
                 if own_side =>
             {
                 let (real, sign) = temp_power(self.id).unwrap();

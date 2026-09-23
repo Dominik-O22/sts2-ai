@@ -111,6 +111,9 @@ fn then_kind(then: Then) -> usize {
         Then::TakeOffer => 7,
         Then::ExhaustMany => 8,
         Then::DiscardThenDraw { .. } => 9,
+        // Both end with the pick (or copies of it) in hand. A kind of their
+        // own would grow `THEN_KINDS` and with it the observation layout.
+        Then::ToHandMany { .. } | Then::CloneToHand { .. } => 2,
     }
 }
 
@@ -401,6 +404,8 @@ fn choice_verb(then: Then) -> &'static str {
         Then::FreeThisCombat => "make free",
         Then::TakeOffer => "take",
         Then::DiscardThenDraw { .. } => "discard",
+        Then::ToHandMany { .. } => "take",
+        Then::CloneToHand { .. } => "copy",
     }
 }
 

@@ -44,6 +44,8 @@ pub enum CardFilter {
     PlayableAttack,
     /// Cards whose cost is above zero (Touch of Insanity).
     CostsEnergy,
+    /// Attacks and Powers (Dual Wield).
+    AttackOrPower,
 }
 
 /// What to do with the card the player picks.
@@ -64,6 +66,11 @@ pub enum Then {
     /// Discard it and ask again; on skip, draw one per discarded card
     /// (Gambler's Brew).
     DiscardThenDraw { picked: u32 },
+    /// Put `copies` clones of it into the hand (Dual Wield).
+    CloneToHand { copies: u32 },
+    /// Move it to the hand and ask again while `left` picks remain (Neow's
+    /// Fury). Skipping ends the selection.
+    ToHandMany { left: u32 },
 }
 
 /// What a random generator draws from.
@@ -75,6 +82,8 @@ pub enum GenPool {
     IroncladAttacks,
     IroncladSkills,
     IroncladPowers,
+    /// Ironclad Commons (Hello World).
+    IroncladCommon,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -151,6 +160,22 @@ pub enum Effect {
     CloneCard { uid: u32, to: Pile },
     /// Random cards from a pool (`CardFactory.GetForCombat` / `GetDistinctForCombat`).
     GenerateRandom { pool: GenPool, count: u32, to: Pile, free_this_turn: bool, distinct: bool },
+    /// `GenerateRandom` whose cards are `SetToFreeThisCombat` before they go
+    /// in (Metamorphosis).
+    GenerateRandomFreeThisCombat { pool: GenPool, count: u32, to: Pile, distinct: bool },
+    /// `CardCmd.Upgrade` on every card in combat but one (Apotheosis).
+    UpgradeAll { except: u32 },
+    /// A reduce-only cost of `cost` on every hand card, this turn or until
+    /// played, or for the rest of the combat (Enlightenment).
+    CapHandCost { cost: i32, this_combat: bool },
+    /// Every copy of a card in combat deals `amount` more (Maul).
+    GrowDamage { id: CardId, amount: f64 },
+    /// `CreatureCmd.LoseMaxHp`: a hit for the HP that no longer fits, then
+    /// the new max (Brightest Flame).
+    LoseMaxHp { target: CreatureRef, amount: i32, from_card: bool },
+    /// `PowerCmd.Apply` of a `PowerInstanceType.Instanced` power: always a
+    /// fresh instance, `data` its own number (Toric Toughness's block).
+    ApplyInstanced { target: CreatureRef, id: PowerId, amount: i32, data: i32 },
     /// Ask the player to pick one card from those matching the filter in the
     /// given pile, then do `then` with it. Empty option lists are skipped.
     /// `can_skip` adds `Action::Skip` to the choice.
