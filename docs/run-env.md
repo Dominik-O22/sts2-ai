@@ -1,11 +1,12 @@
 # The run environment
 
 Status: steps 1 and 2 built (the effect layer, direct fights, a forward
-run; runs as a `VecEnv` fight source with random run decisions); steps 3
-to 5 are design. The run layer under it (`game_rng.rs`, `map.rs`,
-`plan.rs`, `run.rs`, `rewards.rs`, `shop.rs`, `pools.rs`, `events.rs`)
-replays real runs floor for floor; `effects.rs`, `rooms.rs` and
-`forward.rs` make it something a policy plays.
+run; runs as a `VecEnv` fight source with random run decisions); of step
+4, Neow, the act ancients and shops are built and events are not; steps
+3 and 5 are design. The run layer under it (`game_rng.rs`, `map.rs`,
+`plan.rs`, `run.rs`, `rewards.rs`, `shop.rs`, `pools.rs`, `events.rs`,
+`ancients.rs`) replays real runs floor for floor; `effects.rs`,
+`rooms.rs` and `forward.rs` make it something a policy plays.
 
 ## What it is for
 
@@ -28,8 +29,8 @@ comes back as `Offered::Unported`, with the relic held and its effect
 skipped.
 
 `rooms.rs` lays each room out and puts every choice to a `Chooser`: the
-rewards screen, a treasure chest, a rest site, an ancient's relic, and
-what pickups offer on the way. `RunState` holds what a fight needs as the
+rewards screen, a treasure chest, a rest site, an ancient's options, a
+shop, and what pickups offer on the way. `RunState` holds what a fight needs as the
 fight needs it: relics as `RunRelic` with the sim's `counter` and `flag`
 (Lasting Candy, Silver Crucible and Lava Rock keep their run counts there
 too), potion slots, enchantments with their amount, and the map point, so
@@ -38,23 +39,64 @@ too), potion slots, enchantments with their amount, and the map point, so
 Rooms whose options draw while they are laid out split into the draws and
 the choice: `event_offer` then `event_option` (Wongo's featured item, the
 Relic Trader's relics, the Fake Merchant's prices), `rest_options` then
-`rest`, `ancient_options` then the relic taken in `rooms::ancient`.
+`rest`, `ancient_offer` then the relic taken in `rooms::ancient`, `shop`
+then what `rooms::shop_room` buys.
+
+Ancients (`ancients.rs`) lay their options out on the event's own stream,
+seeded from the run's seed and the ancient's id, with the conditions each
+reads off the deck and relics (Pael's Claw needs three cards Goopy takes,
+Tri-Boomerang three Instinct takes, and so on). Every option is a relic,
+so taking one is `obtain`. Darv's Dusty Tome readies its card on the
+Rewards stream as it is laid out, and taking the tome adds it.
+
+A shop (`shop.rs`) keeps each entry's price as rolled on the Shops
+stream. The chooser buys one ware at a time (`Decision::Shop`, only what
+it can pay for and take) and leaves past the end. The card removal asks
+which card and costs 75, 25 more per removal bought this run (100 and 50
+at Inflation); `RunState.shop_removals` counts them. The Courier restocks
+an entry bought and takes a fifth off, Membership Card halves, Lord's
+Parasol buys everything on entry, Maw Bank stops paying on a purchase, and
+an egg bought upgrades the cards left on the shelf.
+
+Transforms draw the new card from the original's pool, on the stream the
+relic names: Leafy Poultice on Transformations, New Leaf, Astrolabe and
+Pandora's Box on Niche. A curse or status is never offered for a
+transform, since the port lacks their pools. A transform can still roll a
+card the sim cannot play (`UNSUPPORTED_CARDS`), and the forward run then
+ends stuck at its next fight.
 
 Every pool relic's pickup is ported, apart from those whose pickup or
 hooks draw on the Rewards stream in ways not ported (`UNPORTED_RELICS`:
 Cauldron, Orrery, Calling Bell, Toy Box and others). Of Neow's and the
-ancients' relics these are not: Leafy Poultice and New Leaf (transforms),
-Nutritious Soup, Pandora's Box, Beautiful Bracelet, Touch of Orobas,
-Pael's Claw, Growth, Horn and Legion, Archaic Tooth, Astrolabe, Tanx's
-Whistle, Tri-Boomerang, Storybook, Signet Ring, Preserved Fog, Jewelry
-Box, Alchemical Coffer, Claws, Fur Coat, Fragrant Mushroom, Golden
-Compass, Byrdpip, Dusty Tome.
+ancients' relics, these are not: Kaleidoscope (it offers other
+characters' cards, and the port has only the Ironclad's and colorless
+pools), Golden Compass and Fur Coat (they change the act's map), Glass
+Eye, Driftwood, Sea Glass, Prismatic Gem, Pael's Wing and Tooth, Toy Box,
+Black Star, Calling Bell, Delicate Frond and Glitter (`UNPORTED_RELICS`).
+The events' Byrdpip and Fragrant Mushroom are not either.
 
-Still not here, and step 4: shops' prices, buying and card removal (a
-forward run stocks the shop, which draws, and leaves); event effects (a
-forward run lays the options out, which draws, and leaves); Neow's and
-the ancients' options, drawn on the event's own stream (a forward run
-takes the heal and leaves).
+Still not here, and the rest of step 4: event effects (a forward run lays
+the options out, which draws, and leaves).
+
+### Checked against the game's code
+
+`tools/oracle` runs the game's own code outside the game, and an example
+per command diffs it with the port over many seeds:
+
+- `ancients` (`examples/ancientcheck.rs`): every ancient's options, in
+  the acts it can meet, with decks that turn each condition on and off.
+  3000 of 3000 match.
+- `obtain` (`examples/pickupcheck.rs`): `RelicCmd.Obtain` for every
+  ported pickup but Sere Talon and Neow's Bones (their pickups crash the
+  oracle outside the game), alone and mixed with the relics that change
+  them (the eggs, Fresnel Lens, Lucky Fysh, Bowler Hat, Sozu, Silver
+  Crucible), and Fishing Rod and War Hammer over fights won. The oracle's
+  selector takes from the front, as `rooms::First` does; the player left
+  and the Rewards, Niche, Transformations and CombatPotionGeneration
+  counters match in 1999 of 1999 (one more the game itself refuses).
+- `rewards` (`examples/rewardcheck.rs`): walks through three acts of
+  fights, shops and unknown rooms, now with each shop's prices, removals
+  bought and The Courier's restocks. 1000 of 1000 match.
 
 ### Checked against real runs
 
@@ -69,16 +111,27 @@ compare. Fights are not simulated there: what a fight did (gold stolen,
 potions used, Petrified Toad's rock, a card a thief took and gave back)
 comes from the record, and so do HP and max HP after a fight, since the
 record does not split the fight's healing from the rewards'.
-`runcheck --effects` prints it. On the modded profile: 348 floors
-compared (207 fights, 63 rest sites, 27 ancients, 27 treasure rooms, 24
-shops with their purchases read off the record), none differ. Not
-compared: 21 fights that ended a run, 55 events, 10 floors that picked
-up a relic whose pickup is not ported (Leafy Poultice, New Leaf,
-Nutritious Soup, Beautiful Bracelet, Pandora's Box, Dingy Rug), and 28
-floors of one run whose draws follow a Rewards stream already lost.
+`runcheck --effects` prints it. On the modded profile as of 2026-09-23
+(24 runs, 486 floors): 373 floors compared, none differ. The 25 shops
+among them buy what the record bought at the port's prices and must
+leave the recorded gold; 37 of the 38 ancients take their relic from the
+options the port laid out. Not compared: 22 fights that ended a run, 58
+events, Dingy Rug's pickup, 31 floors whose draws follow a Rewards stream
+already lost, and a Pandora's Box whose transforms follow a Niche stream
+already lost. Before Neow, the ancients and shops were ported, the same
+files gave 364 compared with one differing (a Whetstone upgrade on the
+Niche stream) and 11 floors of unported pickups.
 
-What no compared floor exercises yet: Whetstone, War Paint and Sand
-Castle's upgrades, which shuffle on the Niche stream.
+runcheck also compares every ancient's options with the record's apart
+from the effects, the dev console's runs included up to their first
+console fight: 51 of 51 match.
+
+Fights draw on the run's Niche stream: `CombatState.CreateCreature`
+rolls each enemy's max HP there. The run draws once per enemy a fight
+starts with (`RunState::enemies_created`), which is what makes Whetstone
+and Pandora's Box match after fights. Summons and Tough Egg's hatchlings
+draw too, and the run layer does not see them, so the history check
+stops comparing Niche draws after a fight whose monsters can summon.
 
 ## Numbers that shape it
 
@@ -195,8 +248,9 @@ other id, so run checkpoints stay remappable.
 - The forward run rolls a fight's enemies from the run's seed and the
   floor, and hands the setup to a `forward::Fights`: `stub_fight` (won at
   70% HP) or a closure; step 2 plugs the combat sim in there.
-- Combat uses the combat sim's own RNG. The run streams the game also draws
-  in combat are not advanced.
+- Combat uses the combat sim's own RNG. Of the run streams the game also
+  draws in combat, only the Niche stream moves, by one draw per enemy the
+  fight starts with, whatever happens in it.
 
 ### Hidden information
 
@@ -211,7 +265,8 @@ skilled human could know.
 - Not allowed: the seed, stream positions, the run plan (upcoming
   encounters, events, the relic bags' order), the true draw order, or any
   lookahead that clones the exact streams.
-- Fights never advance the game's run streams, so combat play cannot steer
+- How a fight goes never moves the game's run streams (the Niche draws a
+  fight makes depend on its encounter alone), so combat play cannot steer
   a run's rolls. Training seeds are fresh every run.
 - Any search (combat's turn search, a future run-level one) resamples: the
   combat `Forks` already reshuffle the draw pile and roll their own dice.
@@ -231,14 +286,14 @@ from the game's for the rest of that run (as `history.rs` models with
 
 An event whose effects are not ported is entered and left with no effect
 (after what laying its options out draws, `event_offer`), counted per
-event; so are shops and the ancients' options. A relic whose pickup is not
-ported returns an `Unported` marker, not an error, and is counted. The
-counts, weighted by how often a thing comes up and whether it draws on the
-Rewards stream, say what to port next. `examples/forward.rs` prints them:
-over 200 seeds taking the first option, every run reaches floor 49 in
-about 41 ms (the three maps are most of it), and what it meets unported is
-shops, the ancients' options and events, and The Courier and White Star
-among the relics.
+event. A relic whose pickup is not ported returns an `Unported` marker,
+not an error, and is counted. The counts, weighted by how often a thing
+comes up and whether it draws on the Rewards stream, say what to port
+next. `examples/forward.rs` prints them: over 200 seeds taking the first
+option (which now buys the first ware it can in every shop), every run
+reaches floor 49 in about 41 ms (the three maps are most of it). What it
+meets unported is events (56 kinds, 1186 times), then Kaleidoscope (18),
+Glass Eye and Sea Glass (13 each), and a handful of other ancient relics.
 
 ### Rewards and value
 
@@ -303,8 +358,8 @@ the second they are worth nothing.
      fight.
 3. Run decisions exposed to Python (`step_run`, token rows), the run policy
    with afterstate scoring, PPO over run decisions.
-4. Shops (prices, removal), Neow and the act ancients' options, events by
-   frequency.
+4. Shops (prices, removal), Neow and the act ancients' options: done.
+   Events by frequency: next.
 5. The run value as the combat reward; combat fine-tuned inside runs.
 
 ## Open questions
