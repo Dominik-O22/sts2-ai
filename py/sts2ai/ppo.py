@@ -199,12 +199,13 @@ class SearchTargets:
 
 @torch.no_grad()
 @torch.no_grad()
-def start_search(policy: Policy, device: torch.device, envs: Envs, cfg: Config, seed: int):
+def start_search(policy: Policy, device: torch.device, envs: Envs, cfg: Config, seed: int, stream: torch.cuda.Stream | None):
     """Turn search on `cfg.search_states` random envs with a choice to make.
     Forks them now, while `envs` holds their states, and returns the rest
     of the work as a function: it plays the copies out and returns the
     roots' observations, masks, and the search's distribution over first
-    actions, so it can run in a thread while `envs` moves on."""
+    actions, so it can run in a thread while `envs` moves on. Its GPU work
+    goes on `stream`, so it does not queue behind the update's."""
     choice = np.flatnonzero(envs.mask.sum(axis=1) > 1)
     roots = np.random.choice(choice, min(cfg.search_states, len(choice)), replace=False)
     n = cfg.search_copies
@@ -214,11 +215,15 @@ def start_search(policy: Policy, device: torch.device, envs: Envs, cfg: Config, 
     forks = envs.sim.fork([int(i) for i in roots], n, seed=seed)
     first = np.concatenate([spread(top, n) for top in tops])
     floats, ids, mask = envs.floats[roots], envs.ids[roots], envs.mask[roots]
+    if stream is not None:
+        # The weights were just copied in on this thread's stream.
+        stream.wait_stream(torch.cuda.current_stream(device))
 
     def finish():
         # Autocast is per thread (and keeps state on the object), so the
         # searcher's thread enters its own.
-        with torch.autocast(device.type, dtype=torch.bfloat16, enabled=cfg.bf16 and device.type == "cuda"):
+        autocast = torch.autocast(device.type, dtype=torch.bfloat16, enabled=cfg.bf16 and device.type == "cuda")
+        with torch.cuda.stream(stream), autocast:
             score = rollout(policy, device, forks, first)
         target = np.zeros((len(roots), mask.shape[1]), np.float32)
         for r in range(len(roots)):
@@ -270,6 +275,7 @@ def train(cfg: Config) -> Policy:
     # an iteration late.
     searcher = ThreadPoolExecutor(1) if searched is not None else None
     search_policy = copy.deepcopy(policy).eval() if searched is not None else None
+    search_stream = torch.cuda.Stream(device) if searched is not None and device.type == "cuda" else None
     pending: Future | None = None
     stats = Stats()
     start_iter, global_step = 1, 0
@@ -326,7 +332,7 @@ def train(cfg: Config) -> Policy:
             if pending is not None:
                 searched.add(*pending.result())
             search_policy.load_state_dict(policy.state_dict())
-            pending = searcher.submit(start_search(search_policy, device, envs, cfg, seed=cfg.seed * 1_000_003 + it))
+            pending = searcher.submit(start_search(search_policy, device, envs, cfg, seed=cfg.seed * 1_000_003 + it, stream=search_stream))
 
         # Update.
         policy.train()
