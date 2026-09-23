@@ -6,10 +6,12 @@ playing the act's elites and boss with the trained policy.
 
 Watching, it polls the mod's `run.json` and prints a ranking for each new
 card reward (`card_reward`), deck pick outside combat (`deck_choice`: rest
-site and event upgrades, shop and event removals, and event offers of new
-cards, where each card is priced alone, so "pick 2" means the top two) and
-shop (`shop`, the cards for sale with their prices). Picks from the deck
-it cannot price (a transform is random) are named and left alone. With `--recording`, the run is a
+site and event upgrades, shop and event removals and transforms, and event
+offers of new cards, where each card is priced alone, so "pick 2" means the
+top two) and
+shop (`shop`, the cards for sale with their prices). A transform is priced
+as the removal plus the average of a sample of the cards it can become.
+Picks from the deck it cannot price are named and left alone. With `--recording`, the run is a
 recorded fight's start and the options are cards to add.
 
 For each option the changed deck plays `repeats` fights against every
@@ -49,10 +51,11 @@ ELITE_FLOOR = 10
 @dataclass(frozen=True)
 class Change:
     """One way the deck can change. `card` is as the recorder writes it
-    (`id`, `up`, maybe `ench`); for `upgrade` and `remove` it is a card in
-    the deck, and the first copy of it changes."""
+    (`id`, `up`, maybe `ench`); for `upgrade`, `remove` and `transform` it
+    is a card in the deck, and the first copy of it changes. A transform
+    applies as a removal: the random card it brings is priced apart."""
 
-    kind: Literal["add", "upgrade", "remove"]
+    kind: Literal["add", "upgrade", "remove", "transform"]
     card: dict
     note: str = ""
 
@@ -61,7 +64,7 @@ class Change:
             return deck + [self.card]
         i = deck.index(self.card)
         rest = deck[:i] + deck[i + 1 :]
-        return rest if self.kind == "remove" else rest[:i] + [{**self.card, "up": True}] + rest[i:]
+        return rest[:i] + [{**self.card, "up": True}] + rest[i:] if self.kind == "upgrade" else rest
 
     def label(self) -> str:
         name = self.card["id"] + ("+" if self.card.get("up") else "")
@@ -93,6 +96,8 @@ NEXT_ACT = {"Overgrowth": "Hive", "Underdocks": "Hive", "Hive": "Glory"}
 # A deck that wins this share of its act's fights leaves every option tied
 # there, so the next act's fights are added.
 SATURATED = 0.95
+# Random cards a transform's pool is sampled with.
+TRANSFORM_SAMPLES = 12
 
 
 def horizon(act: str, bosses: list[str] | None, hp: int, max_hp: int, next_act: bool) -> list[tuple[str, int, int]]:
@@ -135,11 +140,14 @@ def verdict(change: Change | None, ends: list[End]) -> Verdict:
 
 def rank(
     policy: Policy, device: torch.device, start: dict, hp: int, max_hp: int, act: str, changes: list[Change], repeats: int = 512, seed: int = 1
-) -> tuple[list[Verdict], list[str]]:
-    """Every change, and keeping the deck, best first, and the acts they
-    were judged on. Changes that do the same thing (upgrading one of five
-    Strikes) are tried once. When the deck as it is wins `SATURATED` of its
-    act's fights, the next act's fights are added."""
+) -> tuple[list[Verdict], list[str], list[str]]:
+    """Every change, and keeping the deck, best first; the acts they were
+    judged on; and notes on how. Changes that do the same thing (upgrading
+    one of five Strikes) are tried once. When the deck as it is wins
+    `SATURATED` of its act's fights, the next act's fights are added. A
+    transform is priced as its removal plus what a random card of its pool
+    adds on average (`TRANSFORM_SAMPLES` of them, a quarter of `repeats`
+    fights each)."""
     unique = list({json.dumps([c.kind, c.card], sort_keys=True): c for c in changes}.values())
     bosses = start.get("bosses")
     encounters = horizon(act, bosses, hp, max_hp, next_act=False)
@@ -149,11 +157,31 @@ def rank(
         encounters = horizon(act, bosses, hp, max_hp, next_act=True)
         keep = verdict(None, fights(policy, device, start, max_hp, encounters, repeats, seed))
         acts.append(NEXT_ACT[act])
+    gains: dict[str, float] = {}
+    notes = []
+
+    def random_card_gain(card: dict) -> float:
+        pool, options = _sim.transform_options(card["id"])
+        if pool not in gains:
+            # Cards the sim refuses (other characters' pools) are left out.
+            playable = sorted(set(options) - set(_sim.unsupported_cards()))
+            picks = np.random.default_rng(seed).choice(playable, size=min(TRANSFORM_SAMPLES, len(playable)), replace=False)
+            added = [
+                verdict(None, fights(policy, device, {**start, "deck": start["deck"] + [{"id": c, "up": False}]}, max_hp, encounters, repeats // 4, seed)).value
+                for c in picks
+            ]
+            gains[pool] = float(np.mean(added)) - keep.value
+            notes.append(f"transform = remove + a random {pool} card, worth {gains[pool]:+.2f} on average")
+        return gains[pool]
+
     verdicts = [keep]
     for change in unique:
         run = {**start, "deck": change.apply(start["deck"])}
-        verdicts.append(verdict(change, fights(policy, device, run, max_hp, encounters, repeats, seed)))
-    return sorted(verdicts, key=lambda v: -v.value), acts
+        v = verdict(change, fights(policy, device, run, max_hp, encounters, repeats, seed))
+        if change.kind == "transform":
+            v = Verdict(change, v.value + random_card_gain(change.card), v.win)
+        verdicts.append(v)
+    return sorted(verdicts, key=lambda v: -v.value), acts, notes
 
 
 # How far a rerun with another seed moves an option's value at 512 fights
@@ -192,12 +220,16 @@ def choices(run: dict) -> dict[str, list[Change] | str]:
     if run.get("card_reward"):
         out["card reward"] = [Change("add", c) for c in run["card_reward"]]
     if pick := run.get("deck_choice"):
-        kind = {"TO_UPGRADE": "upgrade", "TO_REMOVE": "remove"}.get(pick.get("prompt"))
+        kind = {"TO_UPGRADE": "upgrade", "TO_REMOVE": "remove", "TO_TRANSFORM": "transform"}.get(pick.get("prompt"))
         if kind is None and not in_deck(pick["options"], run["deck"]):
             # Cards from outside the deck (an event's offer, like Room Full
             # of Cheese): whatever is picked joins the deck.
             kind = "add"
-        out[f"deck pick {pick.get('prompt')}"] = [Change(kind, c) for c in pick["options"]] if kind else "not priced"
+        options = pick["options"]
+        if kind == "transform":
+            # A curse or status turns into another of its kind: no change to price.
+            options = [c for c in options if _sim.transform_options(c["id"]) is not None]
+        out[f"deck pick {pick.get('prompt')}"] = [Change(kind, c) for c in options] if kind and options else "not priced"
     if shop := run.get("shop"):
         if shop["cards"]:
             out["shop"] = [Change("add", e["card"], f" ({e['cost']}g)") for e in shop["cards"]]
@@ -224,9 +256,11 @@ def watch(policy: Policy, device: torch.device, repeats: int, poll: float = 0.5)
                 print(changes, flush=True)
                 continue
             n = repeats if len(changes) <= 4 else repeats // 2
-            verdicts, acts = rank(policy, device, run, run["hp"], run["max_hp"], run["act"], changes, n)
+            verdicts, acts, notes = rank(policy, device, run, run["hp"], run["max_hp"], run["act"], changes, n)
             if len(acts) > 1:
                 print(f"{acts[0]} is won {SATURATED:.0%}+ as it stands: {acts[1]} added")
+            for note in notes:
+                print(note)
             print(describe(verdicts), flush=True)
         for what in set(seen) - set(now):
             del seen[what]
@@ -252,7 +286,7 @@ def main() -> None:
     act = next(a for name, a, _ in _sim.encounters() if name == start["encounter"])
     changes = [Change("add", {"id": c.rstrip("+"), "up": c.endswith("+")}) for c in args.offer.split(",")]
     print(f"{act}, {snap['hp']}/{snap['max_hp']} HP, {len(start['deck'])} cards")
-    verdicts, acts = rank(policy, device, start, snap["hp"], snap["max_hp"], act, changes, args.repeats)
+    verdicts, acts, _ = rank(policy, device, start, snap["hp"], snap["max_hp"], act, changes, args.repeats)
     print(f"judged on {' + '.join(acts)}")
     print(describe(verdicts))
 

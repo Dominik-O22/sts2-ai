@@ -5,7 +5,7 @@
 
 use serde_json::Value;
 
-use crate::card::{def, Card, IRONCLAD_POOL, UNSUPPORTED_CARDS};
+use crate::card::{def, Card, COLORLESS_POOL, IRONCLAD_POOL, UNSUPPORTED_CARDS};
 use crate::enchant::{self, Enchantment};
 use crate::combat::{Combat, EnemySpec, RoomKind, Setup};
 use crate::encounter::{Encounter, Kind};
@@ -185,6 +185,27 @@ pub fn run_fights(start: &Value, ids: &Ids, hp: i32, max_hp: i32, encounters: &[
         }
     }
     Ok(setups)
+}
+
+/// What a card can become when transformed, by game name
+/// (`CardFactory.GetDefaultTransformationOptions`): a Common, Uncommon or
+/// Rare card of its pool other than itself, drawn uniformly. The pool is
+/// the Ironclad's for its cards and the colorless one for the rest (quest,
+/// event, ancient and token cards), named with the options. None for a
+/// curse or status, which the game turns into another of its kind. Err for
+/// a name the sim lacks.
+pub fn transform_options(name: &str, ids: &Ids) -> Result<Option<(&'static str, Vec<String>)>, String> {
+    let &id = ids.cards.get(name).ok_or_else(|| format!("unknown card {name}"))?;
+    if matches!(def(id).ty, CardType::Curse | CardType::Status) {
+        return Ok(None);
+    }
+    let (pool_name, pool) = if IRONCLAD_POOL.contains(&id) { ("Ironclad", IRONCLAD_POOL) } else { ("colorless", COLORLESS_POOL) };
+    let options = pool
+        .iter()
+        .filter(|&&c| c != id && matches!(def(c).rarity, CardRarity::Common | CardRarity::Uncommon | CardRarity::Rare))
+        .map(|c| crate::replay::slug(&format!("{c:?}")))
+        .collect();
+    Ok(Some((pool_name, options)))
 }
 
 /// What a fight takes from the run, read off a recorder `start` record.

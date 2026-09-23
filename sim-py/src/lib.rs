@@ -469,6 +469,13 @@ fn monster_names() -> Vec<String> {
 
 /// Every act 1 encounter as (id, act, kind), in the sim's own order. The
 /// recording wizard walks this so it cannot drift from `encounter.rs`.
+/// The pool a card (game name) transforms within and what it can become,
+/// or None for a curse or status (`sim::gen::transform_options`).
+#[pyfunction]
+fn transform_options(name: &str) -> PyResult<Option<(&'static str, Vec<String>)>> {
+    sim::gen::transform_options(name, &Ids::new()).map_err(pyo3::exceptions::PyValueError::new_err)
+}
+
 #[pyfunction]
 fn encounters() -> Vec<(String, String, String)> {
     sim::encounter::ALL
@@ -527,6 +534,7 @@ fn _sim(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(unsupported_cards, m)?)?;
     m.add_function(wrap_pyfunction!(monster_names, m)?)?;
     m.add_function(wrap_pyfunction!(encounters, m)?)?;
+    m.add_function(wrap_pyfunction!(transform_options, m)?)?;
     m.add_function(wrap_pyfunction!(start_blocker, m)?)?;
     m.add_function(wrap_pyfunction!(encounter_brief, m)?)?;
     Ok(())

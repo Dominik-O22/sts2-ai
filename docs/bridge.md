@@ -39,8 +39,10 @@ option (256 when there are more than four). A deck that already wins 95%
 of those leaves every option tied, so then the next act's elites and
 bosses join, at full HP. It prints the options best first, each with its
 value against keeping the deck and its win rate, and marks a tie when an
-option is within 0.03 of keeping the deck, as many upgrades are. Picks
-it cannot price, a transform or an enchant, it names and
+option is within 0.03 of keeping the deck, as many upgrades are. A
+transform is priced as removing the card plus what a random card it can
+become adds on average (a dozen sampled from its pool, the game's
+`CardFactory.GetDefaultTransformationOptions`). Picks it cannot price, a transform or an enchant, it names and
 leaves alone. It judges the deck as it stands, not the picks ahead, and
 the policy plays cards it was trained on: a card the generator rarely
 hands out may be undervalued.
