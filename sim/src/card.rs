@@ -521,7 +521,12 @@ impl Card {
     /// `OnEnchant` makes. Enchanting happens outside combat, so this is called
     /// while the deck is being built, not mid-fight.
     pub fn enchant(&mut self, id: EnchantmentId, amount: i32) {
-        let e = Enchantment::new(id, amount);
+        self.attach(Enchantment::new(id, amount));
+    }
+
+    /// Attach an enchantment as it stands (a recorded one keeps its amount
+    /// and spent flag), with the changes its `OnEnchant` made.
+    pub fn attach(&mut self, e: Enchantment) {
         if e.makes_free() {
             self.cost_this_combat = Some(0);
         }

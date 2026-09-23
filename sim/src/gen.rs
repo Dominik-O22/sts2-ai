@@ -276,7 +276,9 @@ impl RunParts {
             .map(|v| {
                 let (id, up) = card_ref(ids, v)?;
                 let mut k = Card::new(0, id, up);
-                k.enchantment = card_ench(ids, v)?;
+                if let Some(e) = card_ench(ids, v)? {
+                    k.attach(e);
+                }
                 Ok::<_, String>(k)
             })
             .collect::<Result<_, _>>()?;
