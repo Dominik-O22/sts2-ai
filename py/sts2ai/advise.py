@@ -169,23 +169,24 @@ class Session:
                     lines[i].append(what)
 
         score = rollout(self.policy, self.device, forks, first, record)
-        # Best fork per first play, grouped by what the play is: two Strikes
-        # in hand are one opening to you.
-        by_first: dict[str, int] = {}
+        # Openings ranked by the mean score of their copies (the best copy is
+        # a lucky draw as often as a good line; `searcheval` measured the
+        # mean ahead), grouped by what the play is: two Strikes in hand are
+        # one opening to you. Each prints its best copy as the example line.
+        copies: dict[str, list[int]] = {}
         for i in range(n):
-            if not lines[i]:
-                continue
-            j = by_first.get(lines[i][0])
-            if j is None or score[i] > score[j]:
-                by_first[lines[i][0]] = i
-        ranked = sorted(by_first.values(), key=lambda i: -score[i])
-        if (own := by_first.get(policy_pick)) is not None and score[ranked[0]] - score[own] < PLAN_MARGIN:
-            ranked.remove(own)
-            ranked.insert(0, own)
-        for rank, i in enumerate(ranked[: 1 + ALTERNATIVES]):
+            if lines[i]:
+                copies.setdefault(lines[i][0], []).append(i)
+        mean = {what: float(score[idx].mean()) for what, idx in copies.items()}
+        ranked = sorted(copies, key=lambda what: -mean[what])
+        if policy_pick in mean and mean[ranked[0]] - mean[policy_pick] < PLAN_MARGIN:
+            ranked.remove(policy_pick)
+            ranked.insert(0, policy_pick)
+        for rank, what in enumerate(ranked[: 1 + ALTERNATIVES]):
             arrow = "=>" if rank == 0 else "  "
-            print(f"  {arrow} plan {score[i]:+.2f}: " + " | ".join(lines[i]))
-        return int(first[ranked[0]])
+            best = max(copies[what], key=lambda i: score[i])
+            print(f"  {arrow} plan {mean[what]:+.2f}: " + " | ".join(lines[best]))
+        return int(first[copies[ranked[0]][0]])
 
 
 def newest(directory: Path) -> Path | None:
