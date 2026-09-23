@@ -349,6 +349,12 @@ pub(crate) fn card_ref(ids: &Ids, v: &Value) -> Result<(CardId, bool), String> {
     Ok((card, v["up"].as_bool().unwrap_or(false)))
 }
 
+/// A recorded card as an entry of a forced draw order.
+pub(crate) fn shuffle_ref(ids: &Ids, v: &Value) -> Result<crate::combat::ShuffleCard, String> {
+    let (id, up) = card_ref(ids, v)?;
+    Ok((id, up, card_ench(ids, v)?.map(|e| (e.id, e.disabled))))
+}
+
 /// The `ench` triple a recorded card carries, if it is enchanted.
 pub(crate) fn card_ench(ids: &Ids, v: &Value) -> Result<Option<Enchantment>, String> {
     let Some(e) = v["ench"].as_array() else { return Ok(None) };

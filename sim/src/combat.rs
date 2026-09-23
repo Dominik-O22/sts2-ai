@@ -160,13 +160,18 @@ pub struct Setup<'a> {
     pub gold: i32,
 }
 
+/// A card in a recorded draw order: id, upgraded, and its enchantment with
+/// whether it is spent. The enchantment tells otherwise equal copies apart:
+/// Anger's clone carries a fresh Vigorous, the played original a spent one.
+pub type ShuffleCard = (CardId, bool, Option<(crate::enchant::EnchantmentId, bool)>);
+
 /// Recorded outcomes the replay harness forces instead of rolling:
 /// shuffle results and starting enemy HP. Each shuffle consumes one entry;
 /// once the queue is empty the RNG takes over again.
 #[derive(Clone, Debug, Default)]
 pub struct Script {
-    /// Draw pile orders, top first, as (id, upgraded).
-    pub shuffles: VecDeque<Vec<(CardId, bool)>>,
+    /// Draw pile orders, top first.
+    pub shuffles: VecDeque<Vec<ShuffleCard>>,
     /// Shuffles rolled with no order queued, since the last snapshot. The
     /// replayer rewinds when the game's order arrives after the sim needed
     /// it (a choice card played early, or a reshuffle an after-play hook
@@ -3586,8 +3591,10 @@ fn shuffle_cards(cards: &mut Vec<Card>, script: &mut Script, rng: &mut crate::rn
             let mut scratch: Vec<usize> = (0..cards.len()).collect();
             rng.shuffle(&mut scratch);
             let mut rest = std::mem::take(cards);
-            for (id, up) in order {
-                if let Some(i) = rest.iter().position(|c| c.id == id && c.upgraded == up) {
+            for (id, up, ench) in order {
+                let same = |c: &Card| c.id == id && c.upgraded == up;
+                let exact = rest.iter().position(|c| same(c) && c.enchantment.map(|e| (e.id, e.disabled)) == ench);
+                if let Some(i) = exact.or_else(|| rest.iter().position(same)) {
                     cards.push(rest.remove(i));
                 }
             }

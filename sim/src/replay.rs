@@ -17,8 +17,8 @@ use serde_json::{json, Value};
 
 use crate::card::{Card, IRONCLAD_POOL};
 use crate::enchant::{EnchantmentId, ALL as ALL_ENCHANTMENTS};
-use crate::combat::{Action, Combat, Outcome, Script};
-use crate::gen::{card_ref, FightSetup};
+use crate::combat::{Action, Combat, Outcome, Script, ShuffleCard};
+use crate::gen::{card_ref, shuffle_ref, FightSetup};
 use crate::effect::Then;
 use crate::encounter::Encounter;
 use crate::ids::{CardId, MonsterId, PowerId, ALL_CARDS, ALL_MONSTERS};
@@ -847,18 +847,18 @@ impl Replayer {
         // opening hand in draw order, then the rest of the draw pile, is the
         // same thing unless a card was played before the player could act
         // (Whispering Earring).
-        let mut opening: Vec<(CardId, bool)> = vec![];
+        let mut opening: Vec<ShuffleCard> = vec![];
         match start["opening"].as_array() {
             Some(cards) => {
                 for v in cards {
-                    opening.push(card_ref(&ids, v)?);
+                    opening.push(shuffle_ref(&ids, v)?);
                 }
             }
             None => {
                 let snap = first_snap.ok_or("start without an opening draw order and no snapshot to read it from")?;
                 for key in ["hand", "draw"] {
                     for v in snap[key].as_array().ok_or("snapshot without piles")? {
-                        opening.push(card_ref(&ids, v)?);
+                        opening.push(shuffle_ref(&ids, v)?);
                     }
                 }
             }
@@ -1173,7 +1173,7 @@ impl Replayer {
                     .as_array()
                     .ok_or("shuffle without cards")?
                     .iter()
-                    .map(|v| card_ref(&self.ids, v))
+                    .map(|v| shuffle_ref(&self.ids, v))
                     .collect::<Result<Vec<_>, _>>()?;
                 self.c.script.shuffles.push_back(order);
                 // The sim already shuffled without this order: go back to
