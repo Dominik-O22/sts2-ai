@@ -25,13 +25,34 @@ MAX_PLAN_STEPS = 40
 CHUNK = 16384
 
 
-def forward(policy: Policy, device: torch.device, floats: np.ndarray, ids: np.ndarray) -> tuple[torch.Tensor, torch.Tensor]:
+def forward(policy: Policy, device: torch.device, floats: torch.Tensor, ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """The policy over a batch of any size, in `CHUNK`-sized pieces."""
     parts = [
-        policy(torch.from_numpy(floats[i : i + CHUNK]).to(device), torch.from_numpy(ids[i : i + CHUNK]).to(device))
+        policy(floats[i : i + CHUNK].to(device, non_blocking=True), ids[i : i + CHUNK].to(device, non_blocking=True))
         for i in range(0, len(floats), CHUNK)
     ]
     return torch.cat([p[0] for p in parts]), torch.cat([p[1] for p in parts])
+
+
+_buffers: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
+
+
+def buffers(n: int, L: Layout) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Observation buffers for at least `n` copies: pinned, so they copy to
+    the GPU fast, and kept between searches, since pinning is slow and a
+    distillation search's buffers are close to a gigabyte. Only one search
+    runs at a time. The rows copied to the GPU must be done before the
+    next observe overwrites them; every step waits on its sampled actions,
+    which is later."""
+    global _buffers
+    if _buffers is None or len(_buffers[0]) < n:
+        pin = torch.cuda.is_available()
+        _buffers = (
+            torch.empty((n, L.n_floats), pin_memory=pin),
+            torch.empty((n, L.n_ids), dtype=torch.int64, pin_memory=pin),
+            torch.empty((n, L.n_actions), dtype=torch.bool, pin_memory=pin),
+        )
+    return _buffers
 
 
 @torch.no_grad()
@@ -47,10 +68,8 @@ def rollout(
     i's first action. `on_step(actions, live)` sees each step's actions and
     the copies they apply to before it is applied. Returns each copy's
     score."""
-    L, n = Layout.load(), len(forks)
-    floats = np.empty((n, L.n_floats), np.float32)
-    ids = np.empty((n, L.n_ids), np.int64)
-    mask = np.empty((n, L.n_actions), np.bool_)
+    n = len(forks)
+    floats, ids, mask = buffers(n, Layout.load())
     rewards = np.zeros(n, np.float32)
     score = np.zeros(n, np.float32)
     actions = np.ascontiguousarray(first, dtype=np.int64)
@@ -63,9 +82,9 @@ def rollout(
             if len(live) == 0:
                 break
             k = len(live)
-            forks.observe_rows(live.tolist(), floats, ids, mask)
+            forks.observe_rows(live.tolist(), floats.numpy(), ids.numpy(), mask.numpy())
             logits, _ = forward(policy, device, floats[:k], ids[:k])
-            masked = masked_logits(logits.float(), torch.from_numpy(mask[:k]).to(device))
+            masked = masked_logits(logits.float(), mask[:k].to(device, non_blocking=True))
             actions = np.zeros(n, np.int64)
             actions[live] = torch.distributions.Categorical(logits=masked).sample().cpu().numpy()
         if on_step is not None:
@@ -76,7 +95,7 @@ def rollout(
     # already paid its terminal reward.
     rows = np.flatnonzero(~np.array(forks.is_over()))
     if len(rows):
-        forks.observe_rows(rows.tolist(), floats, ids, mask)
+        forks.observe_rows(rows.tolist(), floats.numpy(), ids.numpy(), mask.numpy())
         _, value = forward(policy, device, floats[: len(rows)], ids[: len(rows)])
         score[rows] += value.float().cpu().numpy()
     return score
