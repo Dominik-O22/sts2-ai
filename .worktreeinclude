@@ -1,0 +1,4 @@
+# Gitignored files Claude Code copies into every new worktree (subagents
+# with isolation "worktree", `claude --worktree`). Checkpoints in runs/ are
+# left out: 20 of them come to 377 MB; read them from the main tree.
+decompiled/

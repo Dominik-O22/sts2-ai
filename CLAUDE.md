@@ -61,6 +61,12 @@ holds the console line for an event fight `fight` cannot build.
 `docs/replay.md` has the detail: what the recording holds, what the replay
 forces versus checks, and the dev console commands.
 
+## Worktrees
+
+A new worktree gets `decompiled/` copied in (`.worktreeinclude`). It does
+not get `runs/`: read checkpoints from the main tree by absolute path. Its
+`.venv` and `target/` are its own, so the first build there takes a while.
+
 ## Commands
 
 ```
