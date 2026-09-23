@@ -336,6 +336,7 @@ RELIC_FIGHTS = [
               "Two draw pile cards start the fight upgraded. Go a few turns so both get played."),
     relic_job("petrified_toad", ["PETRIFIED_TOAD"],
               "The Toad puts a Potion-Shaped Rock in the belt. Throw it at the clam."),
+    relic_job("bellows", ["BELLOWS"], "Nothing to steer: the opening hand starts upgraded."),
     relic_job("elite", ["BOOMING_CONCH", "BLACK_BLOOD"],
               "Elites only for the conch. Win it: Black Blood heals 12 afterwards.",
               encounter="TERROR_EEL_ELITE"),

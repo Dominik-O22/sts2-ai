@@ -514,6 +514,7 @@ impl Combat {
                 ChoicesParadox if turn == 1 => {
                     out.push(Effect::OfferRandom { pool: GenPool::Ironclad, count: 5, free: false, retain: true })
                 }
+                Bellows if turn <= 1 => out.push(Effect::UpgradeHand),
                 _ => {}
             }
         }
