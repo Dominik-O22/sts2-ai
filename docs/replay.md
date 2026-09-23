@@ -34,14 +34,18 @@ field, or `ERR` for an id the sim does not know yet.
 One JSON object per line:
 
 - `start`: encounter, room kind, ascension, deck, relics, potion slots,
-  enemies with their rolled HP. `relic_state` holds the charge or count of
-  the relics that carry one between fights (Ember Tea's combats, Iron Club's
-  plays, whether Fur Coat marked this room), read at combat setup before
-  any of them fires. `opening` is the draw pile the opening shuffle made,
-  and `early` holds the records written between setup and the first
-  decision point (Crossbow's turn 1 card, Whispering Earring's plays and
-  what they exhaust, Gambling Chip's choice and what was picked), which
-  the file would otherwise miss.
+  the player's HP as the combat was set up (`hp`, `max_hp`; files from
+  before 2026-09-23 show it only from the first snapshot), enemies with
+  their rolled HP. `relic_state` holds the charge or count of the relics
+  that carry one between fights (Ember Tea's combats, Iron Club's plays,
+  whether Fur Coat marked this room), read at combat setup before any of
+  them fires. `opening` is the draw pile the opening shuffle made, and
+  `early` holds the records written between setup and the file opening
+  (Crossbow's turn 1 card, Whispering Earring's plays and what they
+  exhaust), which the file would otherwise miss. The file opens at the
+  first decision point, or at a card selection a relic opens before it
+  (Gambling Chip's mulligan), so that choice and its picks are records of
+  their own and a bridge client has the fight before it is asked to pick.
 - `snapshot`: the full state at each point the player could act, written by
   a per-frame poll while it is the play phase and nothing is resolving.
   Includes hand with costs, draw pile in order, discard, exhaust, powers,

@@ -62,11 +62,14 @@ public static class Recorder
     /// logged once per selection.
     private static bool _choiceOpen;
     /// Charged and counting relics as the combat was set up, before any of
-    /// them fired: the start record is only written at the first decision
-    /// point, by which time Ember Tea has already spent a charge.
+    /// them fired: the start record is only written once turn 1 is under
+    /// way, by which time Ember Tea has already spent a charge.
     private static Dictionary<string, int> _relicState = new();
+    /// The player's HP as the combat was set up, before any relic healed or
+    /// hurt at its start: what the sim starts the fight from.
+    private static (int hp, int maxHp) _setupHp;
     /// The draw pile the opening shuffle made, top first. The file opens
-    /// only at the first decision point, and by then Whispering Earring may
+    /// only once turn 1 is under way, and by then Whispering Earring may
     /// have played part of the opening hand out of both hand and draw pile.
     private static List<Dictionary<string, object?>>? _opening;
     /// Events between combat setup and the file opening (Crossbow's turn 1
@@ -119,9 +122,10 @@ public static class Recorder
             bool selecting = hand != null && (hand.CurrentMode == NPlayerHand.Mode.SimpleSelect || hand.CurrentMode == NPlayerHand.Mode.UpgradeSelect);
             if (selecting)
             {
-                if (!_choiceOpen && _file != null)
+                if (!_choiceOpen)
                 {
                     _choiceOpen = true;
+                    if (_file == null) Open(state, me);
                     Choice(me, me.PlayerCombatState?.Hand.Cards ?? new List<CardModel>(), null);
                 }
                 return;
@@ -203,6 +207,11 @@ public static class Recorder
         File.Move(path + ".tmp", path, overwrite: true);
     }
 
+    /// Opens the recording and writes its start record, at the first point
+    /// the player can act: the first decision point, or a card selection a
+    /// relic opens before it (Gambling Chip at turn 1's start). The start
+    /// record carries what the sim needs to build the fight there, so a
+    /// bridge client has it before it is asked to pick.
     private static void Open(CombatState state, Player me)
     {
         var run = RunManager.Instance.DebugOnlyGetState();
@@ -224,6 +233,8 @@ public static class Recorder
             ["scripted"] = Commands.IsScripted(run?.Rng.StringSeed),
             ["room"] = state.Encounter.RoomType.ToString(),
             ["ascension"] = run?.AscensionLevel ?? 0,
+            ["hp"] = _setupHp.hp,
+            ["max_hp"] = _setupHp.maxHp,
             ["max_energy"] = me.MaxEnergy,
             // Gremlin Merc steals it and hands what it took to the Fat
             // Gremlin as Heist, which shows up in the enemy powers.
@@ -256,6 +267,7 @@ public static class Recorder
         }
         _early = new();
         var me = LocalContext.GetMe(state);
+        _setupHp = me == null ? default : (me.Creature.CurrentHp, me.Creature.MaxHp);
         _relicState = me == null
             ? new()
             : me.Relics.Select(r => (r, n: RelicState(r))).Where(x => x.n != null).ToDictionary(x => x.r.Id.Entry, x => x.n!.Value);
@@ -348,11 +360,16 @@ public static class Recorder
         Event(e);
     }
 
-    /// The bridge is answering a card selection.
+    /// The bridge is answering a card selection. One that opens before the
+    /// first decision point (Gambling Chip's mulligan) opens the recording,
+    /// so the client gets the start record ahead of the choice.
     internal static void OnSelection(IReadOnlyList<CardModel> options, int min, int max)
     {
-        var me = LocalContext.GetMe(CombatManager.Instance.DebugOnlyGetState());
-        if (me != null) Choice(me, options, (min, max));
+        var state = CombatManager.Instance.DebugOnlyGetState();
+        var me = LocalContext.GetMe(state);
+        if (state == null || me == null) return;
+        if (_file == null) Open(state, me);
+        Choice(me, options, (min, max));
     }
 
     /// One card the bridge took from the open selection; null when it closed.

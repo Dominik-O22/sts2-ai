@@ -75,6 +75,12 @@ the game's card selector (`CardSelectCmd.PushSelector`). Every in-combat
 selection then calls the mod instead of opening a screen. The mod writes a
 `choice` record and sends `select`.
 
+A choice a relic opens at turn 1's start (Gambling Chip's mulligan) comes
+before the fight's first snapshot. The recorder opens the recording at
+that selection, and the start record carries the player's HP and the
+opening draw order, so the client builds its sim on `start`, the sim stops
+at the same choice, and the picks go back like any other.
+
 The sim makes choices one card at a time, and the game asks for the whole
 set at once. So the player sends one `pick` per sim choice. The mod logs
 each as a `picked` record, which the replayer applies, and the sim's next

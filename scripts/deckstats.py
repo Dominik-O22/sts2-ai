@@ -45,8 +45,9 @@ def runs_by_time(rows: list[dict]) -> None:
 
 
 def start_record(path: Path) -> dict | None:
-    """The `start` record with the player's HP from the first snapshot
-    folded in, which is how `FightSetup::from_recording` reads it too."""
+    """The `start` record, with the player's HP from the first snapshot
+    folded in when the record predates carrying it, which is how
+    `FightSetup::from_recording` reads it too."""
     start = None
     for line in path.read_text().splitlines():
         if not line.strip():
@@ -55,7 +56,8 @@ def start_record(path: Path) -> dict | None:
         if v.get("t") == "start" and start is None:
             start = v
         elif v.get("t") == "snapshot" and start is not None:
-            start["hp"], start["max_hp"] = v["hp"], v["max_hp"]
+            start.setdefault("hp", v["hp"])
+            start.setdefault("max_hp", v["max_hp"])
             return start
     return None
 
