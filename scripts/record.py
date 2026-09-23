@@ -487,6 +487,11 @@ def replay_once(path: Path) -> tuple[bool, str]:
     return _replays[path]
 
 
+# Cards that target a teammate: single player has none, so the game and the
+# sim both refuse them, and holding one is all a solo fight can show.
+SOLO_UNPLAYABLE = {"BELIEVE_IN_YOU", "COORDINATE", "INTERCEPT", "LIFT", "MIMIC"}
+
+
 def card_coverage() -> dict[str, bool]:
     """Every card seen in a recording, True if some clean recording shows it
     played (or, for a card that cannot be played, held in hand)."""
@@ -503,7 +508,7 @@ def card_coverage() -> dict[str, bool]:
                 clean = replay_once(path)[0]
             unplayable = card in held and all(c.get("cost", 0) < 0 for r in records if r.get("t") == "snapshot"
                                               for c in r.get("hand", []) if c["id"] == card)
-            seen[card] = clean and (card in played or unplayable)
+            seen[card] = clean and (card in played or unplayable or card in SOLO_UNPLAYABLE)
     return seen
 
 

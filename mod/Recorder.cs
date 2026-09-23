@@ -531,7 +531,10 @@ public sealed class RecorderModel : AbstractModel
         return Task.CompletedTask;
     }
 
-    public override Task AfterDamageReceived(PlayerChoiceContext choiceContext, Creature target, DamageResult result, ValueProp props, Creature? dealer, CardModel? cardSource)
+    // AfterDamageGiven, not AfterDamageReceived: CreatureCmd.Damage skips
+    // the Received hooks when the hit kills, and a missing killing blow
+    // leaves the replay guessing which auto-played card did what.
+    public override Task AfterDamageGiven(PlayerChoiceContext choiceContext, Creature? dealer, DamageResult result, ValueProp props, Creature target, CardModel? cardSource)
     {
         Guard(() => Recorder.OnDamage(target, result, dealer, cardSource));
         return Task.CompletedTask;

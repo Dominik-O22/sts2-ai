@@ -885,10 +885,16 @@ impl Combat {
     fn resolve(&mut self, e: Effect) {
         match e {
             Effect::Attack { dealer, base, hits, targets, props, card } => {
-                // AttackCommand.Execute: per hit, recompute living targets.
-                let mut subs = Vec::new();
-                for _ in 0..hits {
-                    let ts: Vec<CreatureRef> = match &targets {
+                self.push_front_all(vec![Effect::AttackHits { dealer, base, left: hits, targets, props, card }]);
+            }
+            // AttackCommand.Execute's hit loop: before each hit, stop if the
+            // attacker died (Thorns can kill a monster mid-flurry) or no
+            // target is left, and recompute the living targets.
+            Effect::AttackHits { dealer, base, left, targets, props, card } => {
+                let ts: Vec<CreatureRef> = if left == 0 || !self.creature(dealer).alive() {
+                    vec![]
+                } else {
+                    match &targets {
                         AttackTargets::One(t) => vec![*t],
                         AttackTargets::AllOpponents => self.opponents_of(dealer),
                         AttackTargets::RandomOpponent => {
@@ -898,12 +904,15 @@ impl Combat {
                                 _ => self.rngs.targets.pick(&opts).copied().into_iter().collect(),
                             }
                         }
-                    };
-                    for t in ts {
-                        subs.push(Effect::Damage { target: t, amount: base, props, dealer: Some(dealer), card });
                     }
+                };
+                if ts.is_empty() {
+                    self.push_front_all(vec![Effect::EndAttack { dealer, card, props }]);
+                    return;
                 }
-                subs.push(Effect::EndAttack { dealer, card, props });
+                let mut subs: Vec<Effect> =
+                    ts.into_iter().map(|t| Effect::Damage { target: t, amount: base, props, dealer: Some(dealer), card }).collect();
+                subs.push(Effect::AttackHits { dealer, base, left: left - 1, targets, props, card });
                 self.push_front_all(subs);
             }
             Effect::EndAttack { dealer, card, props } => {

@@ -120,6 +120,16 @@ pub enum Effect {
         /// Uid of the card that dealt it, if any.
         card: Option<u32>,
     },
+    /// The next `left` hits of an `Attack`, one at a time: each checks that
+    /// the attacker lives and has a target before it lands.
+    AttackHits {
+        dealer: CreatureRef,
+        base: f64,
+        left: u32,
+        targets: AttackTargets,
+        props: ValueProp,
+        card: Option<u32>,
+    },
     /// `CreatureCmd.Damage` for a single target.
     Damage {
         target: CreatureRef,
