@@ -172,10 +172,22 @@ impl RunState {
     }
 
     /// A treasure room: the chest's gold, then its relic to take. Returns
-    /// the gold.
+    /// the gold. In the second act a Spoils Map pays out 600 gold and
+    /// leaves the deck (`OneOffSynchronizer.TryHandleSpoilsMap`,
+    /// `SpoilsMap.OnQuestComplete`): the game marks the treasure of that
+    /// act's map, which it generates as an hourglass through a single
+    /// treasure (`SpoilsActMap`); the port keeps the act's usual map and
+    /// pays at its first treasure room.
     pub fn treasure_room(&mut self, chooser: &mut impl Chooser, log: &mut Vec<Offered>) -> i32 {
-        let (gold, relic) = self.treasure();
+        let (mut gold, relic) = self.treasure();
         self.gain_gold(gold);
+        if self.act == 1 {
+            while let Some(i) = self.deck.iter().position(|c| c.id == "SPOILS_MAP") {
+                self.gain_gold(600);
+                gold += 600;
+                self.deck.remove(i);
+            }
+        }
         self.settle(vec![Offered::Relics(vec![relic.game_id()])], chooser, log);
         gold
     }
