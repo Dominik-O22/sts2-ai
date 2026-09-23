@@ -83,20 +83,50 @@ maturin from `sim-py/` into the package `sts2ai._sim`.
 `max_floor`, and `max_floor` grows from 4 to the last boss floor
 (16 x `--acts`, 48 by default) over the first 500 iterations. Weak fights stay in the mix so the policy keeps them. Once the
 ramp is done, `--hard-frac 0.4` forces that share of fights onto an elite or
-the boss, since normal fights are nearly always won by then.
+the boss, since normal fights are nearly always won by then. With `--focus`
+those forced fights are drawn by how often the policy recently lost each
+elite and boss instead of evenly. `--lr-final` anneals the learning rate
+linearly to that value over the run.
 
-## Advisor turn search
+## Turn search
 
-`advise.py --search 256` runs a search at every decision on top of the
-policy's pick. `Advisor.fork` makes N copies of the sim state
-(`env::Forks`), each with the recording's script dropped, its own dice,
-and a reshuffled draw pile (four shuffle groups by default, since the
-plan must not know the draw). Every legal first action gets an equal share
-of copies; the policy samples the rest of the turn; each copy is scored by
-the shaped reward it collected plus the value head where the next turn
-starts. The best copy per first action is printed as a whole line of
-plays. It runs in well under a second on the GPU. When every plan prints
--1.00, no line found survives the enemy's turn.
+`py/sts2ai/search.py` plays copies of a fight (`env::Forks`) to the end of
+the turn: each copy has its own dice and a reshuffled draw pile (shuffle
+groups share one, since a plan must not know the draw), starts with a
+given first action, and the policy samples the rest. A copy scores the
+shaped reward it collected plus the value head where the next turn starts.
+Copies of many fights go through the network in one batch, and only the
+ones still playing each step.
+
+`advise.py --search 256` (and `play.py`, and `record.py --pilot CKPT
+--search N`) runs it at every decision: every legal first action gets an
+equal share of copies, openings are ranked by their copies' mean score,
+and the best copy of each is printed as the whole line. When every plan
+prints -1.00, no line found survives the enemy's turn.
+
+`uv run python -m sts2ai.searcheval CKPT --copies 128 --mean` plays the
+held-out elite and boss fights greedy and again with the search from the
+same shuffles. On set-6: 66.7% greedy, 85.4% with the search. `--depth 2`
+plays copies one more player turn: 86.7%, at twice the cost.
+
+## Search distillation
+
+A plateaued PPO run gains nothing from more iterations; the search's
+choices are better than the policy's. `--search-states N` runs the search
+each iteration on N envs over the policy's `--search-top` favourite first
+actions, and a cross-entropy term pulls the policy toward the search's
+improved distribution: its own logits, each searched action moved by
+(its mean copy score - the policy's expected score) / `--search-temp`
+(Gumbel AlphaZero's completed-Q target). An action the search cannot tell
+apart from the rest keeps the policy's probability, which matters: a
+softmax over raw scores instead spread the policy over near-ties and
+wrecked it in 30 iterations. Targets go to a buffer and the loss waits for
+`--search-warmup` of them. From set-5, 2000 iterations at 10 repeats:
+plain PPO 89.1% held-out and 58% on act 2 bosses, distillation 90.2% and
+66%.
+
+`uv run python -m sts2ai.compare A.pt B.pt --repeats 10` puts checkpoints
+side by side by act and kind; two repeats swing a boss number six points.
 
 ## Real decks
 
