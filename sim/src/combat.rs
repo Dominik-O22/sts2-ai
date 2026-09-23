@@ -182,7 +182,8 @@ pub struct Script {
     pub first_snapshot_pending: bool,
     /// Targets for random-target hits, as indices into the living enemies.
     pub random_targets: VecDeque<usize>,
-    /// Cards random generation should produce, in order.
+    /// Cards the recording saw generated, in order. Random generation takes
+    /// its picks from here (`take_generated`).
     pub generated: VecDeque<CardId>,
     /// Cards a random exhaust may pick, by (id, upgraded); matched, not ordered.
     pub random_exhausts: Vec<(CardId, bool)>,
@@ -200,6 +201,19 @@ pub struct Script {
     /// Monsters the recording saw join since the last snapshot. A random
     /// spawn (the Fabricator's bot) takes the first one it can make.
     pub spawns: Vec<MonsterId>,
+}
+
+impl Script {
+    /// The first recorded card a random generation from `pool` could have
+    /// made. The game logs every `AddGeneratedCardToCombat`, so cards the
+    /// sim makes by name (Personal Hive's Dazed after Jackpot's hit) sit
+    /// ahead of the roll's own picks; they belong to earlier generations and
+    /// are dropped with it.
+    fn take_generated(&mut self, pool: &[CardId]) -> Option<CardId> {
+        let i = self.generated.iter().position(|id| pool.contains(id))?;
+        self.generated.drain(..i);
+        self.generated.pop_front()
+    }
 }
 
 /// The parts of `CombatManager.History` that cards and powers read.
@@ -1215,7 +1229,7 @@ impl Combat {
                 self.rngs.card_generation.shuffle(&mut opts);
                 // Scripted: the recording only shows the card taken, so make
                 // sure it is on offer.
-                if let Some(id) = self.script.generated.pop_front().filter(|id| opts.contains(id)) {
+                if let Some(id) = self.script.take_generated(&opts) {
                     opts.retain(|&o| o != id);
                     opts.insert(0, id);
                 }
@@ -3386,7 +3400,7 @@ impl Combat {
             let mut opts = options.clone();
             self.rngs.card_generation.shuffle(&mut opts);
             for _ in 0..count {
-                let scripted = self.script.generated.pop_front().filter(|id| opts.contains(id));
+                let scripted = self.script.take_generated(&opts);
                 let id = match scripted {
                     Some(id) => id,
                     None => match opts.first() {
@@ -3402,7 +3416,7 @@ impl Combat {
             }
         } else {
             for _ in 0..count {
-                let scripted = self.script.generated.pop_front().filter(|id| options.contains(id));
+                let scripted = self.script.take_generated(&options);
                 if scripted.is_none() {
                     self.script.unforced.extend(self.rngs.card_generation.pick(&options).copied());
                 }
