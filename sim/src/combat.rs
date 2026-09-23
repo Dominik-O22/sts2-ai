@@ -948,10 +948,18 @@ impl Combat {
                     self.push_front_all(vec![Effect::EndAttack { dealer, card, props }]);
                     return;
                 }
-                let mut subs: Vec<Effect> =
-                    ts.into_iter().map(|t| Effect::Damage { target: t, amount: base, props, dealer: Some(dealer), card }).collect();
-                subs.push(Effect::AttackHits { dealer, base, left: left - 1, targets, props, card });
-                self.push_front_all(subs);
+                let next = Effect::AttackHits { dealer, base, left: left - 1, targets, props, card };
+                if ts.len() > 1 {
+                    let mut subs = self.damage_many(&ts, base, props, Some(dealer), card);
+                    subs.push(next);
+                    self.push_front_all(subs);
+                    self.check_win();
+                } else {
+                    let mut subs: Vec<Effect> =
+                        ts.into_iter().map(|t| Effect::Damage { target: t, amount: base, props, dealer: Some(dealer), card }).collect();
+                    subs.push(next);
+                    self.push_front_all(subs);
+                }
             }
             Effect::EndAttack { dealer, card, props } => {
                 let mut subs = vec![Effect::AfterAttack];
@@ -983,11 +991,10 @@ impl Combat {
                 self.check_win();
             }
             Effect::DamageAllEnemies { amount, props, dealer } => {
-                let subs: Vec<Effect> = self
-                    .living_enemies()
-                    .map(|i| Effect::Damage { target: CreatureRef::Enemy(i), amount, props, dealer: Some(dealer), card: None })
-                    .collect();
+                let targets: Vec<CreatureRef> = self.living_enemies().map(CreatureRef::Enemy).collect();
+                let subs = self.damage_many(&targets, amount, props, Some(dealer), None);
                 self.push_front_all(subs);
+                self.check_win();
             }
             Effect::GainBlock { target, amount, props, card } => {
                 let subs = self.gain_block(target, amount, props, card);
@@ -2682,6 +2689,24 @@ impl Combat {
     // ---- commands ------------------------------------------------------------
 
     /// `CreatureCmd.Damage` core. Returns the effects of `AfterDamageReceived` hooks.
+    /// `CreatureCmd.Damage` on several targets: every target takes its hit
+    /// before the aftermath of any runs (a death and its `AfterDeath` hooks,
+    /// `AfterDamageReceived`). A Conflagration pass that kills The Lost hits
+    /// The Forgotten before Possess Strength hands the Strength back.
+    fn damage_many(&mut self, targets: &[CreatureRef], amount: f64, props: ValueProp, dealer: Option<CreatureRef>, card: Option<u32>) -> Vec<Effect> {
+        let mut out = vec![];
+        for &target in targets {
+            if !self.creature(target).alive() {
+                if card.is_some() {
+                    self.stats.last_card_hit = None;
+                }
+                continue;
+            }
+            out.extend(self.damage(target, amount, props, dealer, card));
+        }
+        out
+    }
+
     fn damage(&mut self, target: CreatureRef, amount: f64, props: ValueProp, dealer: Option<CreatureRef>, card: Option<u32>) -> Vec<Effect> {
         let mut modified = self.modify_damage_from(target, dealer, amount, props, card);
         // IntangiblePower.ModifyDamageCap: the whole hit is capped at 1, so
