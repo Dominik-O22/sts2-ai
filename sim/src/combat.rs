@@ -2359,7 +2359,15 @@ impl Combat {
         });
         match hit {
             Some((i, id, uid)) => {
-                let run = self.script.hit_cards[i..].iter().take_while(|&&h| h == id).count();
+                // One play's worth of hit records: its hits, once per enemy for
+                // an attack on all of them. Two copies of a card played in a row
+                // leave two runs of records, not one.
+                let card = self.find_card(uid).cloned();
+                let per_play = card.map_or(1, |k| {
+                    let targets = if k.def().target == TargetType::AllEnemies { self.living_enemies().count() } else { 1 };
+                    k.vars().hits.max(1) as usize * targets.max(1)
+                });
+                let run = self.script.hit_cards[i..].iter().take_while(|&&h| h == id).count().min(per_play);
                 self.script.hit_cards.drain(i..i + run);
                 Some(uid)
             }
