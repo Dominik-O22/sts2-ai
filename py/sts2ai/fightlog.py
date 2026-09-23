@@ -76,6 +76,7 @@ def main() -> None:
     ap.add_argument("checkpoint", type=Path)
     ap.add_argument("--old-vocab", type=Path, default=None, help="vocab.txt the checkpoint was trained with, if it predates the current sim")
     ap.add_argument("--kind", default="Boss")
+    ap.add_argument("--encounter", default=None, help="only this one, as the evaluation names it (WaterfallGiantBoss)")
     ap.add_argument("--max", type=int, default=3, help="lost fights to print")
     ap.add_argument("--seed", type=int, default=12345)
     args = ap.parse_args()
@@ -114,7 +115,8 @@ def main() -> None:
                 if done[e.env]:
                     continue
                 done[e.env] = True
-                if e.kind == args.kind and not e.won and printed < args.max:
+                wanted = e.encounter == args.encounter if args.encounter else e.kind == args.kind
+                if wanted and not e.won and printed < args.max:
                     printed += 1
                     print(f"===== LOST {e.encounter} floor {e.floor} after {e.steps} actions =====")
                     print("".join(logs[e.env]))
