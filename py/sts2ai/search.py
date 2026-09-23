@@ -151,7 +151,9 @@ def openings(first: np.ndarray, score: np.ndarray, second: tuple[np.ndarray, np.
         best, largest = None, 0
         for g in np.unique(groups[mine]):
             group = mine & (groups == g)
-            if g < 0:
+            # A group seen by too few of this opening's copies to split
+            # (it shares the group with another opening) counts its mean.
+            if g < 0 or np.bincount(actions[group]).max(initial=0) < 2:
                 value = float(score[group].mean())
             else:
                 # The best second action is picked on one half of its copies

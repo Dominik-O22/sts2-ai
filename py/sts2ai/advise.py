@@ -12,8 +12,12 @@ moves yourself; `sts2ai.play` is the same session sending its pick back.
 With `--search N`, each decision also runs a turn search: N copies of the
 sim play the rest of the turn under the policy, every legal first action
 gets its share of copies, and the copies are scored by the shaped reward
-they collect plus the value head at the end of the turn. The best plan is
-printed as the whole line of plays. Draw piles are reshuffled per group of
+they collect plus the value head at the end of the turn. Copies that see
+the same thing after their first play also try every second play, and an
+opening is ranked by its best second play (`search.openings`), since the
+next decision is searched again rather than played as the policy would.
+That needs a few copies per second play: 2048 is a good N. The best plan
+is printed as the whole line of plays. Draw piles are reshuffled per group of
 copies, since the plan must not know what you will draw.
 """
 
