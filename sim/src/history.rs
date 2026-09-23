@@ -548,7 +548,7 @@ impl Recorded {
 impl Chooser for Recorded {
     fn choose(&mut self, run: &RunState, decision: Decision<'_>) -> usize {
         match decision {
-            Decision::Path(_) => 0,
+            Decision::Path(..) => 0,
             Decision::Card(offers) => Self::take(&mut self.cards, offers, |c, o| c.id == o.id),
             Decision::Bundle(bundles) => {
                 let i = bundles.iter().position(|b| b.iter().all(|o| self.cards.iter().any(|c| c.id == o.id))).unwrap_or(bundles.len());

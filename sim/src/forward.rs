@@ -231,7 +231,7 @@ impl Run {
         let row = self.map[self.point].row + 1;
         let row: Vec<PointId> = self.map.grid_points().filter(|&p| self.map[p].row == row).collect();
         let options = if boots && !row.is_empty() { row } else { children };
-        let i = chooser.choose(&self.state, Decision::Path(&options));
+        let i = chooser.choose(&self.state, Decision::Path(&self.map, &options));
         let next = options[i.min(options.len() - 1)];
         if !self.map[self.point].children.contains(next) {
             self.state.relic_mut("WINGED_BOOTS").expect("Winged Boots").counter += 1;

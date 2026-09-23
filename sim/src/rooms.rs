@@ -13,7 +13,7 @@
 use crate::ancients::AncientOffer;
 use crate::effects::{DeckAction, DeckPick, Offered, RestOption};
 use crate::events::{EventFight, EventOption};
-use crate::map::PointId;
+use crate::map::{ActMap, PointId};
 use crate::rewards::{Offer, Rewards};
 use crate::rng::Rng;
 use crate::run::{DeckCard, RoomType, RunState};
@@ -22,9 +22,9 @@ use crate::shop::{Item, Shop, Slot, Ware};
 /// One decision, with what it chooses among.
 #[derive(Clone, Copy, Debug)]
 pub enum Decision<'a> {
-    /// The next map point, among those the current one leads to: its
-    /// children, or the whole next row with Winged Boots.
-    Path(&'a [PointId]),
+    /// The next map point on the act's map, among those the current one
+    /// leads to: its children, or the whole next row with Winged Boots.
+    Path(&'a ActMap, &'a [PointId]),
     /// The next relic reward to take; past the end leaves the rest.
     Relic(&'a [String]),
     /// A card to take; past the end takes none.
@@ -80,7 +80,7 @@ pub struct Random(pub Rng);
 impl Chooser for Random {
     fn choose(&mut self, _: &RunState, decision: Decision<'_>) -> usize {
         let options = match decision {
-            Decision::Path(points) => points.len(),
+            Decision::Path(_, points) => points.len(),
             Decision::Relic(relics) => relics.len(),
             Decision::Card(cards) => cards.len() + 1,
             Decision::Bundle(bundles) => bundles.len() + 1,
