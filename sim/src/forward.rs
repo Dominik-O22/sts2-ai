@@ -14,7 +14,6 @@ use std::collections::BTreeMap;
 
 use crate::card::UNSUPPORTED_CARDS;
 use crate::effects::Offered;
-use crate::encounter::Encounter;
 use crate::gen::FightSetup;
 use crate::map::{ActMap, PointId};
 use crate::plan::{select_acts, Unlocks};
@@ -22,7 +21,7 @@ use crate::pools::sim_card;
 use crate::rewards::Offer;
 use crate::rng::Rng;
 use crate::rooms::{Chooser, Decision};
-use crate::run::{Room, RunState};
+use crate::run::{Room, RoomType, RunState};
 use crate::types::Ascension;
 
 /// How a fight went, once `Fights::fight` has written it into the run.
@@ -90,64 +89,122 @@ pub enum End {
     Stuck(String),
 }
 
-/// A run played to its end.
+/// Where a run stopped: at a fight to play, or at its end.
 #[derive(Clone, Debug)]
-pub struct Played {
+pub enum Next {
+    Fight(FightSetup),
+    End(End),
+}
+
+/// A run in progress, stopped between rooms. `next` plays it to its next
+/// fight and hands the fight out, so whoever plays fights (`play` with a
+/// `Fights`, or a `VecEnv` slot over many steps) owns the loop.
+#[derive(Clone, Debug)]
+pub struct Run {
     pub state: RunState,
-    pub end: End,
-    /// Fights fought, won or not.
+    map: ActMap,
+    /// The map point to enter next, or, while `fighting`, the fight's.
+    point: PointId,
+    /// The room type of the fight handed out and not yet fought.
+    fighting: Option<RoomType>,
+    /// Fights handed out, won or not.
     pub fights: usize,
     /// What the port lacks that the run met, by what, with how often.
     pub unported: BTreeMap<String, usize>,
 }
 
-/// Plays the run `seed` names at `ascension` on a fully unlocked profile.
-/// The same seed, chooser and fights play the same run.
-pub fn play(seed: &str, ascension: Ascension, chooser: &mut impl Chooser, fights: &mut impl Fights) -> Played {
-    let unlocks = Unlocks::default();
-    let acts = select_acts(crate::game_rng::RunRngs::new(seed).seed, &unlocks);
-    let mut run = Played { state: RunState::new(seed, acts, ascension, &unlocks), end: End::Won, fights: 0, unported: BTreeMap::new() };
-    let mut chooser = Playable(chooser);
-    for (i, &act) in acts.iter().enumerate() {
-        run.state.enter_act(i);
-        let map = ActMap::generate(run.state.rngs.seed, act, ascension);
-        let mut point = map.start;
+impl Run {
+    /// The run `seed` names at `ascension` on a fully unlocked profile, at
+    /// the first act's start.
+    pub fn new(seed: &str, ascension: Ascension) -> Self {
+        let unlocks = Unlocks::default();
+        let acts = select_acts(crate::game_rng::RunRngs::new(seed).seed, &unlocks);
+        let mut state = RunState::new(seed, acts, ascension, &unlocks);
+        state.enter_act(0);
+        let map = ActMap::generate(state.rngs.seed, acts[0], ascension);
+        let point = map.start;
+        Self { state, map, point, fighting: None, fights: 0, unported: BTreeMap::new() }
+    }
+
+    /// Whether a fight has been handed out and not yet fought.
+    pub fn fighting(&self) -> bool {
+        self.fighting.is_some()
+    }
+
+    /// Plays the run on to its next fight or its end: first the rewards of
+    /// the fight handed out last, `fought` (written into `state` already),
+    /// then room after room. `fought` is `Some` exactly when `fighting`.
+    /// The same seed, choices and fights play the same run.
+    pub fn next(&mut self, fought: Option<Fought>, chooser: &mut impl Chooser) -> Next {
+        assert_eq!(fought.is_some(), self.fighting(), "a fight's result goes with the fight");
+        let mut chooser = Playable(chooser);
+        if let (Some(kind), Some(fought)) = (self.fighting.take(), fought) {
+            if !fought.won || self.state.hp <= 0 {
+                return Next::End(End::Died);
+            }
+            let mut log = Vec::new();
+            let rewards = self.state.combat_rewards(kind, fought.gold_proportion);
+            self.state.take_rewards(rewards, &mut chooser, &mut log);
+            if let Some(end) = self.left(log) {
+                return Next::End(end);
+            }
+            if !self.move_on(&mut chooser) {
+                return Next::End(End::Won);
+            }
+        }
         loop {
-            if let Some(end) = run.room(&map, point, &mut chooser, fights) {
-                run.end = end;
-                return run;
+            match self.state.enter(&self.map, self.point) {
+                Room::Combat(kind, encounter) => {
+                    // Enemies rolled from the run's seed and the floor, not
+                    // on the run's streams.
+                    let mut rng = Rng::new((self.state.rngs.seed as u64) << 8 | self.state.floor as u64);
+                    return match self.state.fight_setup(encounter, encounter.monsters(&mut rng)) {
+                        Ok(setup) => {
+                            self.fighting = Some(kind);
+                            self.fights += 1;
+                            Next::Fight(setup)
+                        }
+                        Err(why) => Next::End(End::Stuck(why)),
+                    };
+                }
+                room => {
+                    if let Some(end) = self.room(room, &mut chooser) {
+                        return Next::End(end);
+                    }
+                }
             }
-            let children: Vec<PointId> = map[point].children.iter().collect();
-            if children.is_empty() {
-                break;
+            if !self.move_on(&mut chooser) {
+                return Next::End(End::Won);
             }
-            let i = chooser.choose(&run.state, Decision::Path(&children));
-            point = children[i.min(children.len() - 1)];
         }
     }
-    run
-}
 
-impl Played {
+    /// Steps to the next map point: one of the current point's children,
+    /// or the next act's start. False past the last act.
+    fn move_on(&mut self, chooser: &mut impl Chooser) -> bool {
+        let children: Vec<PointId> = self.map[self.point].children.iter().collect();
+        if children.is_empty() {
+            let act = self.state.act + 1;
+            let Some(plan) = self.state.plan.acts.get(act) else { return false };
+            self.map = ActMap::generate(self.state.rngs.seed, plan.act, self.state.ascension);
+            self.state.enter_act(act);
+            self.point = self.map.start;
+            return true;
+        }
+        let i = chooser.choose(&self.state, Decision::Path(&children));
+        self.point = children[i.min(children.len() - 1)];
+        true
+    }
+
     fn count(&mut self, what: String) {
         *self.unported.entry(what).or_default() += 1;
     }
 
-    /// Enters `point` and plays its room; `Some` if the run ended there.
-    fn room(&mut self, map: &ActMap, point: PointId, chooser: &mut impl Chooser, fights: &mut impl Fights) -> Option<End> {
+    /// Plays a room that is not a fight; `Some` if the run ended there.
+    fn room(&mut self, room: Room, chooser: &mut impl Chooser) -> Option<End> {
         let mut log = Vec::new();
-        match self.state.enter(map, point) {
-            Room::Combat(kind, encounter) => {
-                let fought = match self.fight(encounter, fights) {
-                    Ok(fought) => fought,
-                    Err(why) => return Some(End::Stuck(why)),
-                };
-                if !fought.won || self.state.hp <= 0 {
-                    return Some(End::Died);
-                }
-                let rewards = self.state.combat_rewards(kind, fought.gold_proportion);
-                self.state.take_rewards(rewards, chooser, &mut log);
-            }
+        match room {
+            Room::Combat(..) => unreachable!("fights are handed out"),
             Room::Treasure => {
                 self.state.treasure_room(chooser, &mut log);
             }
@@ -162,6 +219,12 @@ impl Played {
             }
             Room::Ancient(name) => self.count(format!("ancient {name}'s options")),
         }
+        self.left(log)
+    }
+
+    /// Counts the unported relics a room's `log` met; `Some` if the player
+    /// left the room dead.
+    fn left(&mut self, log: Vec<Offered>) -> Option<End> {
         for offer in log {
             if let Offered::Unported(relic) = offer {
                 self.count(format!("relic {relic}"));
@@ -169,14 +232,30 @@ impl Played {
         }
         (self.state.hp <= 0).then_some(End::Died)
     }
+}
 
-    /// Builds the fight, enemies rolled from the run's seed and the floor,
-    /// and has `fights` play it.
-    fn fight(&mut self, encounter: Encounter, fights: &mut impl Fights) -> Result<Fought, String> {
-        let mut rng = Rng::new((self.state.rngs.seed as u64) << 8 | self.state.floor as u64);
-        let setup = self.state.fight_setup(encounter, encounter.monsters(&mut rng))?;
-        self.fights += 1;
-        Ok(fights.fight(&mut self.state, setup))
+/// A run played to its end.
+#[derive(Clone, Debug)]
+pub struct Played {
+    pub state: RunState,
+    pub end: End,
+    /// Fights fought, won or not.
+    pub fights: usize,
+    /// What the port lacks that the run met, by what, with how often.
+    pub unported: BTreeMap<String, usize>,
+}
+
+/// Plays the run `seed` names at `ascension` on a fully unlocked profile,
+/// each fight played by `fights`. The same seed, chooser and fights play
+/// the same run.
+pub fn play(seed: &str, ascension: Ascension, chooser: &mut impl Chooser, fights: &mut impl Fights) -> Played {
+    let mut run = Run::new(seed, ascension);
+    let mut fought = None;
+    loop {
+        match run.next(fought, chooser) {
+            Next::Fight(setup) => fought = Some(fights.fight(&mut run.state, setup)),
+            Next::End(end) => return Played { state: run.state, end, fights: run.fights, unported: run.unported },
+        }
     }
 }
 
