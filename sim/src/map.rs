@@ -628,6 +628,9 @@ impl Generator {
         if p.kind == PointType::Boss {
             return;
         }
+        // Sixteen 4-bit room types fill the key; a path climbs a row a step,
+        // so this only fails for an act taller than any the game has.
+        assert!(walk.path.len() <= 16, "segment too long for its key");
         let inner_kinds = if walk.path.len() == 1 { 0 } else { inner_kinds << 4 | p.kind as u64 };
         for child in p.children.iter() {
             if walk.on_path[child.0 as usize] {
