@@ -117,6 +117,88 @@ impl FightSetup {
 
     /// The parsing shared with the replay harness.
     pub fn from_start(start: &Value, first_snap: &Value, ids: &Ids) -> Result<Self, String> {
+        let RunParts { deck, relics, potions, gold, max_energy, asc } = RunParts::of(start, ids)?;
+        let enc_name = start["encounter"].as_str().unwrap_or("");
+        let encounter = *ids.encounters.get(enc_name).ok_or_else(|| format!("unknown encounter {enc_name}"))?;
+        let monsters: Vec<MonsterId> = start["enemies"]
+            .as_array()
+            .ok_or("start without enemies")?
+            .iter()
+            .map(|e| {
+                let id = e["id"].as_str().unwrap_or("");
+                ids.monsters.get(id).copied().ok_or_else(|| format!("unknown monster {id}"))
+            })
+            .collect::<Result<_, _>>()?;
+        let room = match start["room"].as_str() {
+            Some("Elite") => RoomKind::Elite,
+            Some("Boss") => RoomKind::Boss,
+            _ => RoomKind::Monster,
+        };
+        Ok(Self {
+            deck,
+            hp: first_snap["hp"].as_i64().unwrap_or(1) as i32,
+            max_hp: first_snap["max_hp"].as_i64().unwrap_or(1) as i32,
+            max_energy,
+            relics,
+            potions,
+            enemies: specs_for(encounter, &monsters),
+            encounter,
+            room,
+            asc,
+            floor: 0,
+            gold,
+        })
+    }
+
+    /// The run in `start` (a recorder `start` record, or the same fields
+    /// sent at a card reward) against `encounter` on `floor`, at `hp` of
+    /// `max_hp`: the deck, relics, potions and gold are the run's, the
+    /// enemies are rolled with `rng` as the generator would.
+    pub fn run_against(start: &Value, ids: &Ids, hp: i32, max_hp: i32, encounter: Encounter, floor: u32, rng: &mut Rng) -> Result<Self, String> {
+        let run = RunParts::of(start, ids)?;
+        let rolled = generate_against(rng, floor, run.asc, encounter);
+        Ok(Self {
+            deck: run.deck,
+            hp,
+            max_hp,
+            max_energy: run.max_energy,
+            relics: run.relics,
+            potions: run.potions,
+            gold: run.gold,
+            asc: run.asc,
+            ..rolled
+        })
+    }
+}
+
+/// `repeats` fights of the run in `start` against each of `encounters`
+/// (game name, floor), in that order (`FightSetup::run_against`). Fight k's
+/// enemies are rolled from `seed` and k alone, so two runs given the same
+/// encounters and seed face the same enemies.
+pub fn run_fights(start: &Value, ids: &Ids, hp: i32, max_hp: i32, encounters: &[(String, u32)], repeats: usize, seed: u64) -> Result<Vec<FightSetup>, String> {
+    let mut setups = vec![];
+    for (name, floor) in encounters {
+        let &enc = ids.encounters.get(name.as_str()).ok_or_else(|| format!("unknown encounter {name}"))?;
+        for _ in 0..repeats {
+            let mut rng = Rng::new(seed ^ (setups.len() as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+            setups.push(FightSetup::run_against(start, ids, hp, max_hp, enc, *floor, &mut rng)?);
+        }
+    }
+    Ok(setups)
+}
+
+/// What a fight takes from the run, read off a recorder `start` record.
+struct RunParts {
+    deck: Vec<Card>,
+    relics: Vec<Relic>,
+    potions: Vec<Option<PotionId>>,
+    gold: i32,
+    max_energy: i32,
+    asc: Ascension,
+}
+
+impl RunParts {
+    fn of(start: &Value, ids: &Ids) -> Result<Self, String> {
         let deck: Vec<Card> = start["deck"]
             .as_array()
             .ok_or("start without deck")?
@@ -164,36 +246,13 @@ impl FightSetup {
             })
             .transpose()?
             .unwrap_or_default();
-        let gold = start["gold"].as_i64().unwrap_or(0) as i32;
-        let enc_name = start["encounter"].as_str().unwrap_or("");
-        let encounter = *ids.encounters.get(enc_name).ok_or_else(|| format!("unknown encounter {enc_name}"))?;
-        let monsters: Vec<MonsterId> = start["enemies"]
-            .as_array()
-            .ok_or("start without enemies")?
-            .iter()
-            .map(|e| {
-                let id = e["id"].as_str().unwrap_or("");
-                ids.monsters.get(id).copied().ok_or_else(|| format!("unknown monster {id}"))
-            })
-            .collect::<Result<_, _>>()?;
-        let room = match start["room"].as_str() {
-            Some("Elite") => RoomKind::Elite,
-            Some("Boss") => RoomKind::Boss,
-            _ => RoomKind::Monster,
-        };
         Ok(Self {
             deck,
-            hp: first_snap["hp"].as_i64().unwrap_or(1) as i32,
-            max_hp: first_snap["max_hp"].as_i64().unwrap_or(1) as i32,
-            max_energy: start["max_energy"].as_i64().unwrap_or(3) as i32,
             relics,
             potions,
-            enemies: specs_for(encounter, &monsters),
-            encounter,
-            room,
+            gold: start["gold"].as_i64().unwrap_or(0) as i32,
+            max_energy: start["max_energy"].as_i64().unwrap_or(3) as i32,
             asc: Ascension(start["ascension"].as_i64().unwrap_or(0) as u8),
-            floor: 0,
-            gold,
         })
     }
 }

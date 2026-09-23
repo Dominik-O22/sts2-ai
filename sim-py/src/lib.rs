@@ -101,6 +101,21 @@ impl VecEnv {
         n
     }
 
+    /// Switch to cycling through fights of the run in `start` (JSON with a
+    /// recorder `start` record's run fields: deck, relics, potions, gold,
+    /// max_energy, ascension) at `hp` of `max_hp`: `repeats` fights against
+    /// each of `encounters` (game name, floor), in that order
+    /// (`sim::gen::run_fights`: the same encounters and seed give the same
+    /// enemies). Returns the number of fights.
+    #[pyo3(signature = (start, hp, max_hp, encounters, repeats, seed=0))]
+    fn use_run(&mut self, start: &str, hp: i32, max_hp: i32, encounters: Vec<(String, u32)>, repeats: usize, seed: u64) -> PyResult<usize> {
+        let v: Value = serde_json::from_str(start).map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("bad run json: {e}")))?;
+        let setups = sim::gen::run_fights(&v, &Ids::new(), hp, max_hp, &encounters, repeats, seed).map_err(pyo3::exceptions::PyValueError::new_err)?;
+        let n = setups.len();
+        self.inner.set_fixed(setups);
+        Ok(n)
+    }
+
     /// Switch to cycling through the recordings in `dir` (the held-out
     /// set). Returns the number loaded and the files that failed to parse.
     fn load_recordings(&mut self, dir: &str) -> PyResult<(usize, Vec<String>)> {
