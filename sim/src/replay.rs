@@ -567,6 +567,11 @@ fn adopt_offer(c: &mut Combat, snap: &Value) {
     if !c.pending.as_ref().is_some_and(|p| p.then == Then::TakeOffer) {
         return;
     }
+    // A Curse of Knowledge pick (always Disintegration or another curse)
+    // becomes a power and never reaches the hand.
+    if c.player.offer.iter().any(|k| k.id == CardId::Disintegration) {
+        return;
+    }
     let empty = vec![];
     let mut held: Vec<String> = c.player.hand.iter().map(|k| slug(&format!("{:?}", k.id))).collect();
     let ids = Ids::new();
@@ -1433,10 +1438,12 @@ mod tests {
                         let id = potions[slot].map(|p| slug(&format!("{p:?}")));
                         lines.push(json!({ "t": "potion", "id": id, "target": living_idx(target) }));
                     }
-                    Action::EndTurn if c.player.turn > turn_before => {
-                        lines.push(json!({ "t": "turn_start", "turn": c.player.turn }));
-                    }
                     _ => {}
+                }
+                // Usually an end of turn, but a choice the enemy turn opened
+                // (Curse of Knowledge) holds the turn until it is answered.
+                if c.player.turn > turn_before {
+                    lines.push(json!({ "t": "turn_start", "turn": c.player.turn }));
                 }
             }
             lines.push(json!({ "t": "end", "won": c.outcome == Some(Outcome::Won), "hp": c.player.creature.hp }));
