@@ -397,6 +397,7 @@ impl Monster {
             MechaKnight => flat(300, 320),
             // `MysteriousKnight : FlailKnight`, which keeps its HP and moves.
             FlailKnight | MysteriousKnight => flat(101, 108),
+            FakeMerchantMonster => flat(165, 175),
             SpectralKnight => flat(93, 97),
             MagiKnight => flat(82, 89),
             SoulNexus => flat(234, 254),
@@ -1279,6 +1280,11 @@ fn moves(id: MonsterId, name: &str, me: CreatureRef, asc: Ascension, vars: &mut 
         (TestSubject, "BURNING_GROWL_MOVE") => {
             statuses(CardId::Burn, d(3, 5) as u32).chain([buff(me, PowerId::Strength, d(2, 3))]).collect()
         }
+
+        (FakeMerchantMonster, "SWIPE_MOVE") => vec![attack(me, d(13, 15), 1)],
+        (FakeMerchantMonster, "SPEW_COINS_MOVE") => vec![attack(me, 2, 8)],
+        (FakeMerchantMonster, "THROW_RELIC_MOVE") => vec![attack(me, d(9, 10), 1), debuff(me, PowerId::Frail, 1)],
+        (FakeMerchantMonster, "ENRAGE_MOVE") => vec![buff(me, PowerId::Strength, 2)],
 
         (Aeonglass, "EBB_MOVE") => vec![attack(me, d(26, 32), 1), block(me, 33)],
         (Aeonglass, "EYE_LASERS_MOVE") => vec![attack(me, d(11, 12), 2)],
@@ -2405,6 +2411,27 @@ fn graph(id: MonsterId, asc: Ascension, flags: Flags) -> (Vec<State>, usize) {
             g.follow(growl, lacerate);
             g.follow(respawn, revive);
             g.done(bite)
+        }
+        // Opens on Swipe. Enrage's branch is `AddBranch(state, 3, CannotRepeat)`,
+        // the cooldown overload, so it weighs the same as the others. After
+        // Throw Relic only an attack can follow.
+        FakeMerchantMonster => {
+            let swipe = g.mv("SWIPE_MOVE", vec![atk(d(13, 15))]);
+            let spew = g.mv("SPEW_COINS_MOVE", vec![multi(2, 8)]);
+            let throw = g.mv("THROW_RELIC_MOVE", vec![atk(d(9, 10)), Debuff { strong: false }]);
+            let enrage = g.mv("ENRAGE_MOVE", vec![Buff]);
+            let rand = g.random(vec![
+                br(swipe, Repeat::CannotRepeat),
+                br(spew, Repeat::CannotRepeat),
+                br(throw, Repeat::CannotRepeat),
+                Branch { state: enrage, cooldown: 3, repeat: Repeat::CannotRepeat, weight: Weight::Fixed(1.0) },
+            ]);
+            let attack = g.random(vec![br(swipe, Repeat::CannotRepeat), br(spew, Repeat::CannotRepeat), br(throw, Repeat::CannotRepeat)]);
+            g.follow(swipe, rand);
+            g.follow(spew, rand);
+            g.follow(enrage, rand);
+            g.follow(throw, attack);
+            g.done(swipe)
         }
         Aeonglass => {
             let ebb = g.mv("EBB_MOVE", vec![atk(d(26, 32)), Defend]);

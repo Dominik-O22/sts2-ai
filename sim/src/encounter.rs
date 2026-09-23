@@ -130,6 +130,7 @@ pub enum Encounter {
     DenseVegetationEventEncounter,
     PunchOffEventEncounter,
     MysteriousKnightEventEncounter,
+    FakeMerchantEventEncounter,
 }
 
 pub const ALL: &[Encounter] = &[
@@ -216,6 +217,7 @@ pub const ALL: &[Encounter] = &[
     Encounter::DenseVegetationEventEncounter,
     Encounter::PunchOffEventEncounter,
     Encounter::MysteriousKnightEventEncounter,
+    Encounter::FakeMerchantEventEncounter,
 ];
 
 fn one(id: MonsterId) -> EnemySpec {
@@ -243,7 +245,10 @@ impl Encounter {
     /// `RoomType`, which is `Monster` for all of them.
     pub fn is_event(self) -> bool {
         use Encounter::*;
-        matches!(self, DenseVegetationEventEncounter | PunchOffEventEncounter | MysteriousKnightEventEncounter)
+        matches!(
+            self,
+            DenseVegetationEventEncounter | PunchOffEventEncounter | MysteriousKnightEventEncounter | FakeMerchantEventEncounter
+        )
     }
 
     pub fn kind(self) -> Kind {
@@ -286,6 +291,8 @@ impl Encounter {
             // `Acts/Underdocks.cs` lists the `PunchOff` event.
             | PunchOffEventEncounter => Act::Underdocks,
             // `Acts/Overgrowth.cs` lists the `DenseVegetation` event.
+            // `FakeMerchant` is one of `ModelDb.AllSharedEvents`, open to
+            // every act; it sits here because an encounter names one.
             _ => Act::Overgrowth,
         }
     }
@@ -489,6 +496,7 @@ impl Encounter {
                 })
                 .collect(),
             MysteriousKnightEventEncounter => vec![one(MysteriousKnight)],
+            FakeMerchantEventEncounter => vec![one(FakeMerchantMonster)],
         }
     }
 }

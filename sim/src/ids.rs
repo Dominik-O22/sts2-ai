@@ -658,6 +658,8 @@ pub enum MonsterId {
     // Event fights.
     /// A Flail Knight that starts stronger (The Lantern Key).
     MysteriousKnight,
+    /// The merchant's double (Fake Merchant).
+    FakeMerchantMonster,
 }
 
 /// Every variant, for id lookups by name.
@@ -1130,4 +1132,5 @@ pub const ALL_MONSTERS: &[MonsterId] = &[
     MonsterId::TestSubject,
     MonsterId::Aeonglass,
     MonsterId::MysteriousKnight,
+    MonsterId::FakeMerchantMonster,
 ];

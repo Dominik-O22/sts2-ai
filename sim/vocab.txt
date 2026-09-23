@@ -460,6 +460,7 @@ monster TorchHeadAmalgam
 monster TestSubject
 monster Aeonglass
 monster MysteriousKnight
+monster FakeMerchantMonster
 relic BurningBlood
 relic AmethystAubergine
 relic Anchor
@@ -951,6 +952,8 @@ move BURNING_GROWL_MOVE
 move EBB_MOVE
 move EYE_LASERS_MOVE
 move INCREASING_INTENSITY_MOVE
+move SPEW_COINS_MOVE
+move THROW_RELIC_MOVE
 enchant Adroit
 enchant Clone
 enchant Corrupted
