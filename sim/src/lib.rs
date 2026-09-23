@@ -927,4 +927,134 @@ mod tests {
         let costs: Vec<i32> = c.player.hand.iter().map(|k| c.cost(k)).collect();
         assert_eq!(costs, vec![1, 1]);
     }
+
+    /// A Nibbit fight with `cards` put into hand (uids 900 up) and energy to
+    /// spare.
+    fn with_hand(enemies: &[EnemySpec], cards: &[(ids::CardId, bool)]) -> Combat {
+        let mut c = fight(enemies, 3);
+        for (i, &(id, up)) in cards.iter().enumerate() {
+            c.player.hand.push(card::Card::new(900 + i as u32, id, up));
+        }
+        c.player.energy = 10;
+        c
+    }
+
+    fn hand_idx(c: &Combat, uid: u32) -> usize {
+        c.player.hand.iter().position(|k| k.uid == uid).unwrap()
+    }
+
+    /// NostalgiaPower picks the result pile before the play starts, so the
+    /// first attack or skill of the turn is the one that goes back on top.
+    #[test]
+    fn nostalgia_returns_only_the_first_attack_or_skill() {
+        use ids::CardId::*;
+        let mut c = with_hand(&[one(MonsterId::Nibbit)], &[(Nostalgia, false), (StrikeIronclad, false), (DefendIronclad, false)]);
+        c.step(Action::PlayCard { hand_idx: hand_idx(&c, 900), target: None });
+        c.step(Action::PlayCard { hand_idx: hand_idx(&c, 901), target: Some(0) });
+        assert_eq!(c.player.draw[0].uid, 901);
+        c.step(Action::PlayCard { hand_idx: hand_idx(&c, 902), target: None });
+        assert!(c.player.discard.iter().any(|k| k.uid == 902));
+    }
+
+    /// Each Bomb is its own instance: they count down side by side and go
+    /// off for their own damage.
+    #[test]
+    fn two_bombs_are_separate_instances() {
+        use ids::CardId::*;
+        let mut c = with_hand(&[one(MonsterId::Nibbit)], &[(TheBomb, true), (TheBomb, false)]);
+        let e = &mut c.enemies[0].creature;
+        (e.hp, e.max_hp) = (500, 500);
+        c.step(Action::PlayCard { hand_idx: hand_idx(&c, 900), target: None });
+        c.step(Action::PlayCard { hand_idx: hand_idx(&c, 901), target: None });
+        let bombs = |c: &Combat| c.player.creature.powers.iter().filter(|p| p.id == PowerId::TheBomb).map(|p| p.amount).collect::<Vec<_>>();
+        assert_eq!(bombs(&c), [3, 3]);
+        c.step(Action::EndTurn);
+        c.step(Action::EndTurn);
+        assert_eq!(bombs(&c), [1, 1]);
+        c.step(Action::EndTurn);
+        assert!(bombs(&c).is_empty());
+        assert_eq!(c.enemies[0].creature.hp, 500 - 50 - 40);
+    }
+
+    /// Purity picks every card first and exhausts them together once the
+    /// selection closes.
+    #[test]
+    fn purity_exhausts_its_picks_when_the_selection_closes() {
+        use ids::CardId::*;
+        let mut c = with_hand(&[one(MonsterId::Nibbit)], &[(Purity, false), (Wound, false), (Dazed, false)]);
+        let exhausted = c.player.exhaust.len();
+        c.step(Action::PlayCard { hand_idx: hand_idx(&c, 900), target: None });
+        let pick = |c: &Combat, uid: u32| c.pending.as_ref().unwrap().options.iter().position(|&u| u == uid).unwrap();
+        c.step(Action::Choose(pick(&c, 901)));
+        assert!(!c.pending.as_ref().unwrap().options.contains(&901));
+        assert_eq!(c.player.exhaust.len(), exhausted);
+        c.step(Action::Choose(pick(&c, 902)));
+        c.step(Action::Skip);
+        let gone: Vec<u32> = c.player.exhaust.iter().map(|k| k.uid).collect();
+        assert!(gone.contains(&901) && gone.contains(&902) && gone.contains(&900));
+    }
+
+    /// Omnislice passes on block eaten and overkill too, not just HP lost.
+    #[test]
+    fn omnislice_splashes_everything_the_hit_dealt() {
+        use ids::CardId::*;
+        let mut c = with_hand(&[one(MonsterId::Nibbit), one(MonsterId::Nibbit)], &[(Omnislice, false)]);
+        c.enemies[0].creature.block = 5;
+        c.enemies[0].creature.hp = 1;
+        c.enemies[1].creature.block = 0;
+        let hp1 = c.enemies[1].creature.hp;
+        c.step(Action::PlayCard { hand_idx: hand_idx(&c, 900), target: Some(0) });
+        assert!(!c.enemies[0].creature.alive());
+        assert_eq!(c.enemies[1].creature.hp, hp1 - 8);
+    }
+
+    /// Stratagem's pick after a shuffle comes before the draw that caused
+    /// the shuffle takes its card.
+    #[test]
+    fn stratagem_picks_before_the_draw_that_shuffled() {
+        use ids::CardId::*;
+        let mut c = with_hand(&[one(MonsterId::Nibbit)], &[(ShrugItOff, false)]);
+        c.player.creature.powers.push(Power::new(PowerId::Stratagem, 1));
+        let draw = std::mem::take(&mut c.player.draw);
+        c.player.discard.extend(draw);
+        let held = c.player.hand.len();
+        c.step(Action::PlayCard { hand_idx: hand_idx(&c, 900), target: None });
+        assert_eq!(c.player.hand.len(), held - 1, "nothing drawn while the pick is open");
+        let picked = c.pending.as_ref().unwrap().options[0];
+        c.step(Action::Choose(0));
+        assert_eq!(c.player.hand.len(), held + 1);
+        assert!(c.player.hand.iter().any(|k| k.uid == picked));
+    }
+
+    /// The colorless cards the Ironclad meets outside its pool, dealt into
+    /// random decks and played at random: catches panics and loops.
+    #[test]
+    fn colorless_decks_do_not_panic() {
+        use crate::card::Card;
+        use ids::CardId::*;
+        let pool = [
+            Nostalgia, Omnislice, Panache, PanicButton, PrepTime, Production, Prolong, Prowess, Purity, Rally, Rend,
+            Restlessness, RollingBoulder, Salvo, Scrawl, SecretTechnique, SecretWeapon, SeekerStrike, Shockwave,
+            Stratagem, TagTeam, TheBomb, TheGambit, ThinkingAhead, ThrummingHatchet, UltimateDefend, UltimateStrike,
+            Volley, Havoc, BurningPact, ShrugItOff,
+        ];
+        for seed in 0..300u64 {
+            let mut rng = rng::Rng::new(seed);
+            let mut deck = ironclad_starter_deck();
+            for _ in 0..10 {
+                deck.push(Card::new(0, *rng.pick(&pool).unwrap(), rng.next_int(2) == 0));
+            }
+            let enemies = [one(MonsterId::Nibbit), one(MonsterId::Nibbit)];
+            let mut c = Combat::new(&deck, IRONCLAD_HP, IRONCLAD_HP, IRONCLAD_ENERGY, &enemies, Ascension(10), seed);
+            let mut steps = 0;
+            while !c.is_over() {
+                let acts = c.legal_actions();
+                assert!(!acts.is_empty(), "no legal actions at seed {seed}");
+                c.step(acts[rng.next_int(acts.len())]);
+                steps += 1;
+                assert!(steps < 20_000, "runaway fight at seed {seed}");
+                assert!(c.player.hand.len() <= combat::MAX_HAND);
+            }
+        }
+    }
 }

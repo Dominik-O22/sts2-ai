@@ -5,7 +5,7 @@
 
 use serde_json::Value;
 
-use crate::card::{def, Card, IRONCLAD_POOL};
+use crate::card::{def, Card, IRONCLAD_POOL, UNSUPPORTED_CARDS};
 use crate::enchant::{self, Enchantment};
 use crate::combat::{Combat, EnemySpec, RoomKind, Setup};
 use crate::encounter::{Encounter, Kind};
@@ -128,7 +128,7 @@ impl FightSetup {
                 Ok::<_, String>(k)
             })
             .collect::<Result<_, _>>()?;
-        if let Some((id, why)) = crate::card::UNSUPPORTED_CARDS.iter().find(|(id, _)| deck.iter().any(|k| k.id == *id)) {
+        if let Some((id, why)) = UNSUPPORTED_CARDS.iter().find(|(id, _)| deck.iter().any(|k| k.id == *id)) {
             return Err(format!("unsupported card {id:?}: {why}"));
         }
         let relics: Vec<Relic> = start["relics"]

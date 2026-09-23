@@ -340,6 +340,15 @@ power Rebound
 power EnergyNextTurn
 power DrawCardsNextTurn
 power ToricToughness
+power Nostalgia
+power Panache
+power NoBlock
+power PrepTime
+power RollingBoulder
+power Stratagem
+power TagTeam
+power TheBomb
+power TheGambit
 monster Nibbit
 monster FuzzyWurmCrawler
 monster ShrinkerBeetle
