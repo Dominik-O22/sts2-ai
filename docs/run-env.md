@@ -1,7 +1,8 @@
 # The run environment
 
-Status: step 1 built (the effect layer, direct fights, a forward run);
-steps 2 to 5 are design. The run layer under it (`game_rng.rs`, `map.rs`,
+Status: steps 1 and 2 built (the effect layer, direct fights, a forward
+run; runs as a `VecEnv` fight source with random run decisions); steps 3
+to 5 are design. The run layer under it (`game_rng.rs`, `map.rs`,
 `plan.rs`, `run.rs`, `rewards.rs`, `shop.rs`, `pools.rs`, `events.rs`)
 replays real runs floor for floor; `effects.rs`, `rooms.rs` and
 `forward.rs` make it something a policy plays.
@@ -84,9 +85,15 @@ Castle's upgrades, which shuffle on the Niche stream.
 - A run is about 1500 combat decisions and about 100 run decisions. Combat
   is where the compute goes, so fights from many runs batch on the GPU as
   `VecEnv` batches them now, and the combat batch should stay full.
-- A run's 1500 combat steps cost 60 to 90 ms of CPU at 130k to 200k steps/s;
-  three maps at 15 ms each are 45 ms, comparable. Generate an act's map on
-  arrival (most early runs die in act 1); cache maps by seed if it shows.
+- A run's 1500 combat steps cost 60 to 90 ms of CPU at 130k to 200k steps/s.
+  An act's map costs about 20 ms (`ActMap::generate`), 18.5 of it in
+  `prune_and_repair`, whose segment pruning lists every path of the map
+  again each round. It shows: a map is made on arrival in an act, and
+  with most runs dying in act 1 that is one map per run and 90% of run
+  mode's env time (Build order, step 2).
+  Caching maps by seed does not help, since training seeds are fresh every
+  run. Making the port of the pruning faster, with `mapcheck` holding it to
+  the game's maps, is the lever.
 - Combat plays greedy in the first cut. A search per decision is 10x to 100x
   and would turn ~130 runs/s into a few.
 
@@ -94,12 +101,26 @@ Castle's upgrades, which shuffle on the Niche stream.
 
 ### A fight source in `VecEnv`, not a new env
 
-`VecEnv` already has two fight sources (generated and fixed). A run is a
-third: a slot that owns a `RunState`, the act's `ActMap` and its position.
-In `Slot::reset` it writes the finished fight back, advances the run to its
-next fight, and builds the `FightSetup`. `observe`, `step`, `fork`, `fight`
-and `combat(i)` carry over unchanged, so the combat policy, search and PPO
-code keep working.
+`VecEnv` had two fight sources (generated and fixed). Runs are a third
+(`VecEnv::set_runs`, `Envs.use_runs` in Python): a slot owns a
+`forward::Run`, which holds the `RunState`, the act's `ActMap` and the map
+point. `Run::next` plays the run to its next fight and hands the
+`FightSetup` out, so `forward::play` is a loop over it with a `Fights`, and
+a slot is the same loop spread over many steps. In `Slot::reset` the slot
+writes the finished fight back (`end_fight`), calls `next` with how it
+went, and starts the fight it gets. A run that ends starts a fresh one: a
+slot's `k`-th run is seed index `base + slot + k * n`, game seed
+`SIM<index>`. `observe`, `step`, `fork`, `fight` and `combat(i)` carry over
+unchanged, so the combat policy, search and PPO code keep working.
+
+In step 2 the run decisions are made in Rust by `rooms::Random`, on an RNG
+seeded from the seed index, never the run's streams: uniform over the
+options, a skip counting as one option for card and bundle rewards and
+optional deck picks; relics are all taken, in random order, and potions
+kept. `EpisodeEnd.run` (`End.run` in Python) carries the run's seed index,
+act, deck size and, on the fight that ended the run, how it ended (won,
+died, or stuck on a fight the sim cannot build). `End.floor` is the run's
+floor in run mode.
 
 Between fights the run waits at run decisions. `VecEnv` gains
 `step_run(indices, actions)`, which does no combat work: Python calls it in
@@ -247,11 +268,28 @@ among the relics.
    result (won, HP x 0.7) and a fixed choice rule, deterministically.
    `runcheck` still matches the real runs it matched, and `runcheck
    --effects` checks the effects against them.
-2. The loop: the `VecEnv` run source, with run decisions made in Rust by a
-   random policy, played from Python with the current combat checkpoint
-   through the unchanged `Envs` wrapper (episode ends gain the run floor and
-   whether the run ended). Floors reached, deck size and throughput are then
-   real numbers.
+2. Done. The loop: the `VecEnv` run source, with run decisions made in
+   Rust by a random policy, played from Python with the current combat
+   checkpoint through the unchanged `Envs` wrapper. A Rust test plays runs
+   through the env with the first legal action and replays each with
+   `forward::play` and the same fights: the same setup at every fight and
+   the same end. `sts2ai.runplay` reports the numbers. set-12 greedy, 256
+   envs, each env's first 8 runs (2048), 3 rayon threads beside a training
+   run:
+   - Every run died, 99% in act 1: floor 10.5 on average, median 9, p90 17
+     (the act 1 boss), best 30. Deck 15 cards at the last fight.
+   - Combat win rate in act 1: weak 100%, normal 85%, elite 39% (1959
+     fights), boss 9% (256). Six act 1 elites end most runs.
+   - The deck is not the main reason. Run fights start at about half HP
+     (elites at 48% on average), since random paths walk into elites and
+     random rest sites smith half the time; elites entered above 70% HP are
+     won about 70% of the time, near the 78% of generated elites on floors 6
+     to 10. The run also lacks Neow's options, shops and events, so the deck
+     is the starter plus a few random picks.
+   - 7.6k combat steps/s, 270k runs/hour. The env step is 90% of the wall
+     time, and nearly all of that is making maps (Numbers that shape it).
+     Without maps the rest of a run between fights costs about 6 µs a
+     fight.
 3. Run decisions exposed to Python (`step_run`, token rows), the run policy
    with afterstate scoring, PPO over run decisions.
 4. Shops (prices, removal), Neow and the act ancients' options, events by
@@ -261,6 +299,8 @@ among the relics.
 ## Open questions
 
 - The combat policy was trained on generated decks; runs from a weak run
-  policy make odd decks. Watch combat win rates by act.
+  policy make odd decks. Watch combat win rates by act. With random run
+  decisions the first answer is HP, not decks: fights start far lower
+  than the generator's.
 - Whether map options need the full map as tokens or the per-option summary
   is enough.
