@@ -37,7 +37,10 @@ Change one here before changing the code that depends on it.
   rolls one the card can take. Their value hooks run ahead of every power and relic, which
   is where `Hook.ModifyDamage` puts them.
 - Ascension is a parameter with explicit code paths. Training and evaluation use A10 only.
-- Own RNG. We do not reproduce MegaCrit's generator.
+- Combat has its own RNG and does not reproduce MegaCrit's values; the replay forces the
+  outcomes that matter. The run layer uses the game's generator value for value
+  (`game_rng.rs`), so a run's seed reproduces its map, rewards and shops, and a save's
+  stream counters resume it. `tools/oracle` runs the game's own code for a seed to check it.
 - Hand and piles are multisets. Hand order does not matter. The draw pile tracks a known
   top-N when an effect revealed it, unknown order below.
 - Run state and combat state are separate structs from day one so the full-run sim and the

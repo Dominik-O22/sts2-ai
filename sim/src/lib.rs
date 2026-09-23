@@ -15,6 +15,7 @@ pub mod potion;
 pub mod power;
 pub mod relic;
 pub mod replay;
+pub mod game_rng;
 pub mod rng;
 pub mod types;
 
