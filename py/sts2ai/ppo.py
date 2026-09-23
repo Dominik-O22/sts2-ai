@@ -240,18 +240,18 @@ def start_search(
         autocast = torch.autocast(device.type, dtype=torch.bfloat16, enabled=cfg.bf16 and device.type == "cuda")
         with torch.cuda.stream(stream), autocast:
             score = rollout(net, device, forks, first, on_step=lambda *_: go.wait())
-        target = np.zeros((len(roots), mask.shape[1]), np.float32)
-        for r in range(len(roots)):
-            f, sc = first[r * n : (r + 1) * n], score[r * n : (r + 1) * n]
-            acts = np.unique(f)
-            q = np.array([sc[f == a].mean() for a in acts])
-            prior = np.exp(logits[r, acts] - logits[r, acts].max())
-            v = float((prior * q).sum() / prior.sum())
-            tilted = logits[r].copy()
-            tilted[acts] += (q - v) / cfg.search_temp
-            p = np.exp(tilted - tilted.max())
-            target[r] = p / p.sum()
-        return floats, ids, mask, target
+        # Per (root, action): copies, and their summed score.
+        R, A = logits.shape
+        cell = np.repeat(np.arange(R) * A, n) + first
+        count = np.bincount(cell, minlength=R * A).reshape(R, A)
+        total = np.bincount(cell, weights=score, minlength=R * A).reshape(R, A)
+        searched = count > 0
+        q = total / np.maximum(count, 1)
+        prior = np.where(searched, np.exp(logits - np.where(searched, logits, -np.inf).max(axis=1, keepdims=True)), 0.0)
+        v = (prior * q).sum(axis=1, keepdims=True) / prior.sum(axis=1, keepdims=True)
+        tilted = logits + np.where(searched, (q - v) / cfg.search_temp, 0.0)
+        p = np.exp(tilted - tilted.max(axis=1, keepdims=True))
+        return floats, ids, mask, (p / p.sum(axis=1, keepdims=True)).astype(np.float32)
 
     return finish
 
