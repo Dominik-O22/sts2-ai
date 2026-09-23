@@ -314,7 +314,7 @@ impl Player {
     }
 
     /// The deck after a floor: cards removed, transformed, gained,
-    /// enchanted and upgraded, as the record lists them.
+    /// enchanted, downgraded and upgraded, as the record lists them.
     fn follow_deck(&mut self, stats: &Value) {
         let list = |key: &str| stats[key].as_array().cloned().unwrap_or_default();
         for card in list("cards_removed") {
@@ -333,6 +333,14 @@ impl Player {
                 c.enchantment = card.enchantment;
             }
         }
+        // Downgrades first: an event that downgrades (Reflections) may
+        // upgrade the same card again after.
+        for card in list("downgraded_cards") {
+            let card = game_id(card.as_str().unwrap());
+            if let Some(c) = self.deck.iter_mut().find(|c| c.id == card && c.upgraded) {
+                c.upgraded = false;
+            }
+        }
         for card in list("upgraded_cards") {
             let card = game_id(card.as_str().unwrap());
             if let Some(c) = self.deck.iter_mut().find(|c| c.id == card && !c.upgraded) {
@@ -342,12 +350,17 @@ impl Player {
     }
 
     /// Sets the port's player to this one. Relics keep their counters where
-    /// the port holds them.
+    /// the port holds them, and a deck that holds the same cards stays as
+    /// the port has it: the record does not say which copy of a card an
+    /// upgrade went to, nor the order, which later random picks read.
     fn restore(&self, state: &mut RunState) {
         state.hp = self.hp;
         state.max_hp = self.max_hp;
         state.gold = self.gold;
-        state.deck = self.deck.clone();
+        let (only_port, only_game) = difference(state.deck.iter().map(card_text).collect(), self.deck.iter().map(card_text).collect());
+        if !only_port.is_empty() || !only_game.is_empty() {
+            state.deck = self.deck.clone();
+        }
         let mut held = std::mem::take(&mut state.relics);
         state.relics = self
             .relics
@@ -370,11 +383,7 @@ impl Player {
                 diffs.push(format!("{what} {port}, the run had {game}"));
             }
         }
-        let card = |c: &DeckCard| {
-            let ench = c.enchantment.as_ref().map_or(String::new(), |e| format!(" {}:{}", e.id, e.amount));
-            format!("{}{}{ench}", c.id, if c.upgraded { "+" } else { "" })
-        };
-        let (only_port, only_game) = difference(state.deck.iter().map(card).collect(), self.deck.iter().map(card).collect());
+        let (only_port, only_game) = difference(state.deck.iter().map(card_text).collect(), self.deck.iter().map(card_text).collect());
         if !only_port.is_empty() || !only_game.is_empty() {
             diffs.push(format!("deck has {only_port:?}, the run had {only_game:?}"));
         }
@@ -389,6 +398,13 @@ impl Player {
         }
         (!diffs.is_empty()).then(|| diffs.join("; "))
     }
+}
+
+/// A deck card as the effects check compares it: id, `+` if upgraded, the
+/// enchantment and its amount.
+fn card_text(c: &DeckCard) -> String {
+    let ench = c.enchantment.as_ref().map_or(String::new(), |e| format!(" {}:{}", e.id, e.amount));
+    format!("{}{}{ench}", c.id, if c.upgraded { "+" } else { "" })
 }
 
 /// What each of two lists holds that the other does not, as multisets.
@@ -869,7 +885,10 @@ fn drawn_as_recorded(
         // The ancient's own option, drawn on the event's stream.
         want_relics.remove(0);
     }
-    if !same_set(want_relics.clone(), relics_offered.clone()) {
+    // A chest's relic left behind is not in the record; it is drawn on the
+    // TreasureRoomRelics stream, not the Rewards one.
+    let chest_left = matches!(room, Room::Treasure) && want_relics.is_empty();
+    if !chest_left && !same_set(want_relics.clone(), relics_offered.clone()) {
         return Err(format!("relics {relics_offered:?}, the run was offered {want_relics:?}"));
     }
     // An ancient's potions come from relics that draw on the run's
