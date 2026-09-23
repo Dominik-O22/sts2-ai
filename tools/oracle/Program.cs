@@ -18,32 +18,38 @@ switch (args[0])
     // children, children as col,row.
     case "map":
     {
-        ActModel act = args[2] switch
-        {
-            "Overgrowth" => new Overgrowth(),
-            "Underdocks" => new Underdocks(),
-            "Hive" => new Hive(),
-            "Glory" => new Glory(),
-            _ => throw new ArgumentException(args[2]),
-        };
-        var n = int.Parse(args[3]);
-        var seed = (uint)StringHelper.GetDeterministicHashCode(args[1]);
-        // Ascension lives on the running game's RunManager, so the counts
-        // are drawn here the way the act draws them, on the same stream,
-        // with Swarming Elites (A1) applied by hand.
-        var ascension = int.Parse(args[4]);
-        var rng = new Rng(seed, $"act_{n}_map");
-        var drawn = act.GetMapPointTypes(rng);
-        var counts = new MapPointTypeCounts(drawn.NumOfUnknowns, drawn.NumOfRests)
-        {
-            NumOfElites = (int)Math.Round(5f * (ascension >= 1 ? 1.6f : 1f)),
-            PointTypesThatIgnoreRules = drawn.PointTypesThatIgnoreRules,
-        };
-        var map = new StandardActMap(rng, act, false, false, n == 3 && ascension >= 10, counts);
+        var map = BuildMap(args[1], args[2], int.Parse(args[3]), int.Parse(args[4]));
         foreach (var p in map.GetAllMapPoints().OrderBy(p => p.coord.row).ThenBy(p => p.coord.col))
         {
-            var kids = string.Join(" ", p.Children.OrderBy(c => c.coord.col).Select(c => $"{c.coord.col},{c.coord.row}"));
-            Console.WriteLine($"{p.coord.col} {p.coord.row} {p.PointType} {kids}");
+            Console.WriteLine(PointLine(p));
+        }
+        break;
+    }
+    // maps: one map per stdin line `SEED ACT ASCENSION`, each printed as a
+    // `map SEED ACT ASCENSION` header and then its points like `map`, plus
+    // the starting point and the boss points, which `map` leaves out. N is
+    // the act's own index, as in a real run.
+    case "maps":
+    {
+        string? line;
+        while ((line = Console.ReadLine()) != null)
+        {
+            var parts = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length == 0)
+            {
+                continue;
+            }
+            var n = parts[1] switch { "Hive" => 2, "Glory" => 3, _ => 1 };
+            var map = BuildMap(parts[0], parts[1], n, int.Parse(parts[2]));
+            Console.WriteLine($"map {parts[0]} {parts[1]} {parts[2]}");
+            var points = map.GetAllMapPoints()
+                .Append(map.StartingMapPoint)
+                .Append(map.BossMapPoint)
+                .Concat(map.SecondBossMapPoint is { } second ? new[] { second } : []);
+            foreach (var p in points.OrderBy(p => p.coord.row).ThenBy(p => p.coord.col))
+            {
+                Console.WriteLine(PointLine(p));
+            }
         }
         break;
     }
@@ -78,4 +84,37 @@ switch (args[0])
         Console.WriteLine($"rewards {string.Join(" ", Enumerable.Range(0, 5).Select(_ => player.Rewards.NextInt(100)))}");
         break;
     }
+}
+
+// Act N's map (1-based) as `StandardActMap.CreateFor` builds it for a single
+// player.
+static StandardActMap BuildMap(string seedText, string actName, int n, int ascension)
+{
+    ActModel act = actName switch
+    {
+        "Overgrowth" => new Overgrowth(),
+        "Underdocks" => new Underdocks(),
+        "Hive" => new Hive(),
+        "Glory" => new Glory(),
+        _ => throw new ArgumentException(actName),
+    };
+    var seed = (uint)StringHelper.GetDeterministicHashCode(seedText);
+    // Ascension lives on the running game's RunManager, so the counts
+    // are drawn here the way the act draws them, on the same stream,
+    // with Swarming Elites (A1) applied by hand.
+    var rng = new Rng(seed, $"act_{n}_map");
+    var drawn = act.GetMapPointTypes(rng);
+    var counts = new MapPointTypeCounts(drawn.NumOfUnknowns, drawn.NumOfRests)
+    {
+        NumOfElites = (int)Math.Round(5f * (ascension >= 1 ? 1.6f : 1f)),
+        PointTypesThatIgnoreRules = drawn.PointTypesThatIgnoreRules,
+    };
+    return new StandardActMap(rng, act, false, false, n == 3 && ascension >= 10, counts);
+}
+
+// One point: col row type children, children as col,row.
+static string PointLine(MapPoint p)
+{
+    var kids = string.Join(" ", p.Children.OrderBy(c => c.coord.col).Select(c => $"{c.coord.col},{c.coord.row}"));
+    return $"{p.coord.col} {p.coord.row} {p.PointType} {kids}";
 }
