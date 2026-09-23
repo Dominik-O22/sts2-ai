@@ -303,6 +303,7 @@ public static class Recorder
             card = CardRef(playing);
             int idx = _lastHand.FindIndex(c => ReferenceEquals(c, playing));
             card["hand_idx"] = idx < 0 ? null : idx;
+            if (_playing is var (c, target) && ReferenceEquals(c, playing)) card["target"] = target;
         }
         var now = me.PotionSlots;
         string? potion = null;
@@ -419,6 +420,16 @@ public static class Recorder
 
     // ---- hooks --------------------------------------------------------------
 
+    // The card in play and its target, from BeforeCardPlayed: a choice the
+    // card opens mid-play is recorded before the play record, and the
+    // replay needs the target to apply the play early.
+    private static (CardModel card, int? target)? _playing;
+
+    internal static void OnCardPlaying(CardPlay cardPlay)
+    {
+        _playing = (cardPlay.Card, EnemyIndex(cardPlay.Target));
+    }
+
     internal static void OnCardPlayed(CardPlay cardPlay)
     {
         if (cardPlay.IsAutoPlay || cardPlay.PlayIndex != 0) return;
@@ -505,6 +516,12 @@ public static class Recorder
 public sealed class RecorderModel : AbstractModel
 {
     public override bool ShouldReceiveCombatHooks => true;
+
+    public override Task BeforeCardPlayed(CardPlay cardPlay)
+    {
+        Guard(() => Recorder.OnCardPlaying(cardPlay));
+        return Task.CompletedTask;
+    }
 
     public override Task AfterCardPlayed(PlayerChoiceContext choiceContext, CardPlay cardPlay)
     {
