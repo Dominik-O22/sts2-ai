@@ -345,6 +345,20 @@ impl VecEnv {
     }
 }
 
+/// FxHash-style mix of every word of an encoding, then murmur3's finalizer.
+fn row_hash(floats: &[f32], ids: &[i64], mask: &[bool]) -> u64 {
+    let mut h = 0u64;
+    let mut mix = |w: u64| h = (h.rotate_left(5) ^ w).wrapping_mul(0x51_7C_C1_B7_27_22_0A_95);
+    floats.chunks(2).for_each(|p| mix(p.iter().fold(0, |a, x| a << 32 | x.to_bits() as u64)));
+    ids.iter().for_each(|&x| mix(x as u64));
+    mask.chunks(8).for_each(|p| mix(p.iter().fold(0, |a, &x| a << 8 | x as u64)));
+    h ^= h >> 33;
+    h = h.wrapping_mul(0xFF51_AFD7_ED55_8CCD);
+    h ^= h >> 33;
+    h = h.wrapping_mul(0xC4CE_B9FE_1A85_EC53);
+    h ^ h >> 33
+}
+
 /// Copies of a combat stepped together, for a search over the rest of the
 /// current turn (the advisor's plan, `searcheval`). Several roots can share
 /// one batch, each with its own run of copies. Each fork forgets the recording's
@@ -412,14 +426,39 @@ impl Forks {
         (0..self.combats.len()).filter(|&i| !self.turn_over(i)).collect()
     }
 
-    /// Encode forks `rows`, packed: row k of the buffers is fork `rows[k]`.
-    /// Searches only feed the network the forks that still need a move.
-    pub fn observe_rows(&self, rows: &[usize], floats: &mut [f32], ids: &mut [i64], mask: &mut [bool]) {
-        rows.par_iter()
+    /// Encode forks `rows`, one row per distinct observation: the distinct
+    /// ones are packed at the front of the buffers, `inverse[k]` is the row
+    /// fork `rows[k]` encodes to, and the count is returned. Copies of a
+    /// root that took the same first action in the same shuffle group
+    /// mostly still look the same, so the network sees about a quarter of
+    /// the rows (a fourteenth on the first step). Forks are told apart by a
+    /// 64-bit hash of their encoding.
+    pub fn observe_unique(&self, rows: &[usize], floats: &mut [f32], ids: &mut [i64], mask: &mut [bool], inverse: &mut [usize]) -> usize {
+        // Hash each encoding in a scratch row that stays in cache, then
+        // write only the distinct ones to the (large) buffers.
+        let scratch = || (vec![0.0; N_FLOATS], vec![0; N_IDS], vec![false; N_ACTIONS]);
+        let hashes: Vec<u64> = rows
+            .par_iter()
+            .map_init(scratch, |(f, i, m), &r| {
+                encode::encode(&self.combats[r], f, i, m);
+                row_hash(f, i, m)
+            })
+            .collect();
+        let mut distinct = std::collections::HashMap::with_capacity(rows.len());
+        let mut first = vec![];
+        for (k, h) in hashes.into_iter().enumerate() {
+            inverse[k] = *distinct.entry(h).or_insert_with(|| {
+                first.push(rows[k]);
+                first.len() - 1
+            });
+        }
+        first
+            .par_iter()
             .zip(floats.par_chunks_mut(N_FLOATS))
             .zip(ids.par_chunks_mut(N_IDS))
             .zip(mask.par_chunks_mut(N_ACTIONS))
             .for_each(|(((&r, f), i), m)| encode::encode(&self.combats[r], f, i, m));
+        first.len()
     }
 
     /// Step every fork whose turn is still running; the rest ignore their
@@ -507,12 +546,13 @@ mod tests {
         let mut ids = vec![0; n * N_IDS];
         let mut mask = vec![false; n * N_ACTIONS];
         let mut rewards = vec![0.0f32; n];
+        let mut inverse = vec![0; n];
         let all: Vec<usize> = (0..n).collect();
         for _ in 0..40 {
-            forks.observe_rows(&all, &mut floats, &mut ids, &mut mask);
+            forks.observe_unique(&all, &mut floats, &mut ids, &mut mask, &mut inverse);
             let actions: Vec<i64> = (0..n)
                 .map(|i| {
-                    let m = &mask[i * N_ACTIONS..][..N_ACTIONS];
+                    let m = &mask[inverse[i] * N_ACTIONS..][..N_ACTIONS];
                     (0..N_ACTIONS).filter(|&k| m[k]).max_by_key(|&k| rng.next_int(1000).wrapping_add(k * 0)).unwrap_or(0) as i64
                 })
                 .collect();
@@ -523,6 +563,45 @@ mod tests {
             }
         }
         panic!("some fork never ended its turn");
+    }
+
+    /// Forks that look the same share a row, and each row is its forks'
+    /// own encoding: before anything happens only the shuffle group can
+    /// set forks apart, and after a random move each still reads its own.
+    #[test]
+    fn observe_unique_keeps_one_row_per_observation() {
+        let mut rng = Rng::new(4);
+        let root = generate(&mut rng, 8, Ascension(10)).combat(3);
+        let (n, groups) = (16, 4);
+        let mut forks = Forks::new(&root, n, groups, 11);
+        let mut floats = vec![0.0; n * N_FLOATS];
+        let mut ids = vec![0; n * N_IDS];
+        let mut mask = vec![false; n * N_ACTIONS];
+        let mut inverse = vec![0; n];
+        let mut rewards = vec![0.0f32; n];
+        let all: Vec<usize> = (0..n).collect();
+        let (mut f, mut i, mut m) = (vec![0.0; N_FLOATS], vec![0; N_IDS], vec![false; N_ACTIONS]);
+        for round in 0..2 {
+            let distinct = forks.observe_unique(&all, &mut floats, &mut ids, &mut mask, &mut inverse);
+            if round == 0 {
+                assert!(distinct <= groups, "{distinct} distinct rows before any move");
+            }
+            for (k, &row) in inverse.iter().enumerate() {
+                assert!(row < distinct);
+                encode::encode(forks.combat(k), &mut f, &mut i, &mut m);
+                assert_eq!(f, floats[row * N_FLOATS..][..N_FLOATS], "fork {k}");
+                assert_eq!(i, ids[row * N_IDS..][..N_IDS], "fork {k}");
+                assert_eq!(m, mask[row * N_ACTIONS..][..N_ACTIONS], "fork {k}");
+            }
+            let actions: Vec<i64> = (0..n)
+                .map(|k| {
+                    let m = &mask[inverse[k] * N_ACTIONS..][..N_ACTIONS];
+                    let legal: Vec<usize> = (0..N_ACTIONS).filter(|&a| m[a]).collect();
+                    legal[rng.next_int(legal.len())] as i64
+                })
+                .collect();
+            forks.step(&actions, &mut rewards);
+        }
     }
 
     /// Killing a monster that revives at full HP is progress, not a loss.

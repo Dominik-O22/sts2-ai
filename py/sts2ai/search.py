@@ -70,6 +70,7 @@ def rollout(
     score."""
     n = len(forks)
     floats, ids, mask = buffers(n, Layout.load())
+    inverse = np.empty(n, np.int64)
     rewards = np.zeros(n, np.float32)
     score = np.zeros(n, np.float32)
     actions = np.ascontiguousarray(first, dtype=np.int64)
@@ -81,12 +82,14 @@ def rollout(
             live = np.array(forks.live(), dtype=np.int64)
             if len(live) == 0:
                 break
-            k = len(live)
-            forks.observe_rows(live.tolist(), floats.numpy(), ids.numpy(), mask.numpy())
-            logits, _ = forward(policy, device, floats[:k], ids[:k])
-            masked = masked_logits(logits.float(), mask[:k].to(device, non_blocking=True))
+            # The network sees each distinct observation once; every copy
+            # still samples its own action.
+            u = forks.observe_unique(live.tolist(), floats.numpy(), ids.numpy(), mask.numpy(), inverse)
+            logits, _ = forward(policy, device, floats[:u], ids[:u])
+            masked = masked_logits(logits.float(), mask[:u].to(device, non_blocking=True))
+            per_copy = masked[torch.from_numpy(inverse[: len(live)]).to(device)]
             actions = np.zeros(n, np.int64)
-            actions[live] = torch.distributions.Categorical(logits=masked, validate_args=False).sample().cpu().numpy()
+            actions[live] = torch.distributions.Categorical(logits=per_copy, validate_args=False).sample().cpu().numpy()
         if on_step is not None:
             on_step(actions, live)
         forks.step(actions, rewards)
@@ -95,9 +98,9 @@ def rollout(
     # already paid its terminal reward.
     rows = np.flatnonzero(~np.array(forks.is_over()))
     if len(rows):
-        forks.observe_rows(rows.tolist(), floats.numpy(), ids.numpy(), mask.numpy())
-        _, value = forward(policy, device, floats[: len(rows)], ids[: len(rows)])
-        score[rows] += value.float().cpu().numpy()
+        u = forks.observe_unique(rows.tolist(), floats.numpy(), ids.numpy(), mask.numpy(), inverse)
+        _, value = forward(policy, device, floats[:u], ids[:u])
+        score[rows] += value.float().cpu().numpy()[inverse[: len(rows)]]
     return score
 
 
