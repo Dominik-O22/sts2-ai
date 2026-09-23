@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 from collections import defaultdict
+from collections.abc import Callable
 from pathlib import Path
 
 import numpy as np
@@ -32,7 +33,7 @@ def act_of(floor: int) -> int:
 
 
 @torch.no_grad()
-def evaluate(
+def play(
     policy: Policy,
     device: torch.device,
     repeats: int = 2,
@@ -40,10 +41,9 @@ def evaluate(
     recordings: Path = DEFAULT_RECORDINGS,
     seed: int = 12345,
     acts: int = 3,
-) -> tuple[float, dict[str, tuple[int, int]], dict[str, float]]:
+) -> list[End]:
     """Plays every setup in the set `repeats` times (different shuffles),
-    one env per setup so each gets exactly that many fights. Returns the
-    overall win rate, per-encounter (wins, fights), and per-kind win rates."""
+    one env per setup so each gets exactly that many fights, greedy."""
     if source == "recordings" and not has_recordings(recordings):
         raise SystemExit(f"no run recordings in {recordings}; play with the recorder mod on (dev-console fights sit in dev/)")
     probe = Envs(1, seed=seed)
@@ -65,18 +65,38 @@ def evaluate(
             if per_env[e.env] < repeats:
                 per_env[e.env] += 1
                 ends.append(e)
+    return ends
+
+
+def by_kind(ends: list[End], value: Callable[[End], float | None]) -> dict[str, float]:
+    """Mean of `value` per act and kind, over the fights it is not None
+    for. Act 1 keys stay plain ("boss"), later acts get a prefix
+    ("a2_boss")."""
+    return {
+        f"{'' if a == 1 else f'a{a}_'}{k.lower()}": float(np.mean(vs))
+        for a in (1, 2, 3)
+        for k in ("Weak", "Normal", "Elite", "Boss")
+        if (vs := [v for e in ends if e.kind == k and act_of(e.floor) == a and (v := value(e)) is not None])
+    }
+
+
+def evaluate(
+    policy: Policy,
+    device: torch.device,
+    repeats: int = 2,
+    source: str = "holdout",
+    recordings: Path = DEFAULT_RECORDINGS,
+    seed: int = 12345,
+    acts: int = 3,
+) -> tuple[float, dict[str, tuple[int, int]], dict[str, float]]:
+    """`play`, summed up: the overall win rate, per-encounter (wins,
+    fights), and per-kind win rates."""
+    ends = play(policy, device, repeats, source, recordings, seed, acts)
     by_enc: dict[str, tuple[int, int]] = defaultdict(lambda: (0, 0))
     for e in ends:
         w, n = by_enc[e.encounter]
         by_enc[e.encounter] = (w + e.won, n + 1)
-    # Act 1 keys stay plain ("boss"), later acts get a prefix ("a2_boss").
-    by_kind = {
-        f"{'' if a == 1 else f'a{a}_'}{k.lower()}": float(np.mean(won))
-        for a in (1, 2, 3)
-        for k in ("Weak", "Normal", "Elite", "Boss")
-        if (won := [e.won for e in ends if e.kind == k and act_of(e.floor) == a])
-    }
-    return float(np.mean([e.won for e in ends])), dict(by_enc), by_kind
+    return float(np.mean([e.won for e in ends])), dict(by_enc), by_kind(ends, lambda e: e.won)
 
 
 def main() -> None:
@@ -92,10 +112,10 @@ def main() -> None:
     policy = Policy(Layout.load()).to(device)
     load_policy(args.checkpoint, policy, device, args.old_vocab)
     policy.eval()
-    win, by_enc, by_kind = evaluate(policy, device, args.repeats, args.source, args.recordings, acts=args.acts)
+    win, by_enc, kinds = evaluate(policy, device, args.repeats, args.source, args.recordings, acts=args.acts)
     for enc, (w, n) in sorted(by_enc.items()):
         print(f"{enc:32s} {w:4d}/{n:<4d} {w / n:6.1%}")
-    print("  ".join(f"{k} {v:.1%}" for k, v in by_kind.items()))
+    print("  ".join(f"{k} {v:.1%}" for k, v in kinds.items()))
     print(f"overall {win:.1%} over {sum(n for _, n in by_enc.values())} {args.source} fights")
 
 

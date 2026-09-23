@@ -67,7 +67,7 @@ impl Rng {
 }
 
 /// The subset of `RunRngType` streams that combat consumes.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CombatRngs {
     pub shuffle: Rng,
     pub monster_ai: Rng,

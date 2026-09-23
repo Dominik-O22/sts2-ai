@@ -66,7 +66,13 @@ maturin from `sim-py/` into the package `sts2ai._sim`.
   about 16 HP. On top of it, potential-based shaping: each step pays the
   change in half the enemy HP lost (a running count over the fight, as a
   fraction of what the enemies started with) minus `w` times the player HP
-  fraction lost, measured from the fight's own start. The count matters:
+  fraction lost, plus 0.1 per potion gained (a drink counts as one lost),
+  measured from the fight's own start. Before the potion term a drink cost
+  nothing until the fight ended, and the policy drank combat potions in
+  weak fights it lost 5% HP in; with it, over 600 iterations from set-11,
+  potions per fight fell by a third everywhere (weak 0.18 to 0.12, act 3
+  boss 0.73 to 0.47) at the same win rates and about 2 points more HP lost
+  in elites, the price the terminal reward sets. The count matters:
   read off the current HP bars, a monster that revives at full HP (Test
   Subject, the Waterfall Giant's blast turn) took the potential back, the
   killing blow cost half a fight's reward, and the policy learned to leave
@@ -133,6 +139,19 @@ wrecked it in 30 iterations. Targets go to a buffer and the loss waits for
 plain PPO 89.1% held-out and 58% on act 2 bosses, distillation 90.2% and
 66%.
 
+Roots come only from envs where the policy's favourite first move leads
+the runner-up by at most `--search-margin` (0.8). Where it leads by more,
+the target is the policy's own and trains nothing: offline, over 40% of
+random roots were like that and carried 8 to 16% of the targets'
+divergence from the policy. Filtered roots carry about 1.5x the signal
+each, so `--search-states 352` matches 512 random ones. The search does
+not hold up training: one still running when the rollout ends keeps
+going, and that iteration starts none (`--search-sync` waits instead).
+From set-11, 600 iterations at 10 repeats: 512 random roots with
+`--search-sync` 91.8% at 92k steps/s, 352 filtered roots without it
+91.9% at 112k. Entropy fell faster with the filtered roots, whose
+targets pull harder.
+
 `uv run python -m sts2ai.compare A.pt B.pt --repeats 10` puts checkpoints
 side by side by act and kind; two repeats swing a boss number six points.
 
@@ -159,20 +178,20 @@ once there are a few dozen run fights.
 
 ## Speed
 
-Measured 2026-09-23 on the RTX 5070 Ti (8-core Ryzen 9850X3D) with 1024
-envs x 32 steps, resuming set-11: plain PPO runs about 178k steps/s. With
-the set-11 search (`--search-states 512`, 128 copies) it is about 90k,
-up from 39k on the same machine at the same time; the rollout takes 55
-ms, the update 130 to 180 ms, and the search about 250 ms, most of it
-the sim stepping 65k copies. The search is the critical path: the update
-waits on it.
+Measured 2026-09-23 on the RTX 5070 Ti (8-core Ryzen 9850X3D, SMT off in
+the BIOS) with 1024 envs x 32 steps, resuming set-11, the same machine
+and hour for both numbers: plain PPO runs about 178k steps/s; with the
+search (`--search-states 352`, 128 copies, the defaults otherwise) about
+130k, where the set-11 recipe on the code before (512 random roots, one
+search per iteration) ran 41k.
 
 What the search costs depends on how it shares the machine with the rest
 of the iteration:
 
-- It runs in a thread beside the update, and pauses while the rollout
-  runs (`search_go`): the rollout waits on the GPU and the sim every step
-  and ran three to four times slower beside it.
+- It runs in a thread beside the update, pauses while the rollout runs
+  (`search_go`), and never holds the iteration up (Search distillation,
+  above). The rollout waits on the GPU and the sim every step and ran
+  three to four times slower beside it.
 - Its network is compiled too, and every graph compiles in the first
   iteration, with the search waited for. After that `torch.compile` may
   not compile again (`eager_on_recompile`): compiling in one thread while
@@ -180,10 +199,13 @@ of the iteration:
 - Nothing in the update reads a value back per minibatch, so the update
   does not stall on each GPU round trip.
 - Observations cross to the GPU from pinned buffers.
-- The extension allocates with mimalloc: forks clone combats with every
-  `Vec` at capacity, so their first moves reallocate on all threads at
-  once, and glibc's malloc spent a fifth of the search waiting on locks.
-- A copy is hashed (for the row sharing) inside `Forks::step`, while its
+- `Forks` keeps copies that are in the same state on one node, with
+  their own dice, and steps a (node, action) once unless the step rolls
+  any; about half the search's sim steps were such repeats. That pays
+  only because a clone is cheap: monster move graphs and the shuffle log
+  sit behind `Arc`, and the extension allocates with mimalloc (glibc's
+  malloc spent a fifth of the search waiting on locks).
+- A node is hashed (for the row sharing) inside `Forks::step`, while its
   state is in cache, skipping the all-zero blocks that make up 97% of an
   encoding.
 

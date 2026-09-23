@@ -50,18 +50,25 @@ pub struct EpisodeEnd {
     pub reward: f32,
 }
 
+/// What a potion kept is worth: about the 16 HP it is worth to the fights
+/// ahead, at `hp_weight`.
+const POTION_VALUE: f32 = 0.1;
+
 /// Stopgap terminal reward (DESIGN.md, Decision engine): a win is worth 1
-/// plus the HP fraction kept at `hp_weight` and 0.1 per unused potion, about
-/// the 16 HP a potion is worth to the fights ahead; a loss or a timed-out
-/// fight is -1.
+/// plus the HP fraction kept at `hp_weight` and `POTION_VALUE` per unused
+/// potion; a loss or a timed-out fight is -1.
 pub fn terminal_reward(c: &Combat) -> f32 {
     match c.outcome {
         Some(Outcome::Won) => {
             let hp = c.player.creature.hp as f32 / c.player.creature.max_hp.max(1) as f32;
-            1.0 + hp_weight(c) * hp + 0.1 * c.potions.iter().flatten().count() as f32
+            1.0 + hp_weight(c) * hp + POTION_VALUE * potions_held(c) as f32
         }
         _ => -1.0,
     }
+}
+
+fn potions_held(c: &Combat) -> usize {
+    c.potions.iter().flatten().count()
 }
 
 /// What the HP fraction is worth: half a win, except after an act boss.
@@ -83,6 +90,7 @@ fn hp_weight(c: &Combat) -> f32 {
 pub struct Baseline {
     taken: f32,
     hp: i32,
+    potions: usize,
 }
 
 /// Enemy HP lost so far, as a fraction of what the enemies started with.
@@ -96,13 +104,16 @@ fn enemy_hp_taken(c: &Combat) -> f32 {
 
 impl Baseline {
     pub fn of(c: &Combat) -> Self {
-        Self { taken: enemy_hp_taken(c), hp: c.player.creature.hp }
+        Self { taken: enemy_hp_taken(c), hp: c.player.creature.hp, potions: potions_held(c) }
     }
 }
 
 /// Potential for reward shaping: half the enemy HP taken since the
-/// baseline (`enemy_hp_taken`), minus the fraction of the player's HP lost at the
-/// price the terminal reward puts on it.
+/// baseline (`enemy_hp_taken`), minus the fraction of the player's HP lost
+/// and plus the potions gained (a drink counts as one lost) at the prices
+/// the terminal reward puts on them. Without the potion term a drink cost
+/// nothing until the fight ended, and the policy drank combat potions in
+/// weak fights it lost 5% HP in.
 /// Zero at the baseline and, by convention, once the fight is over. Each
 /// step is rewarded the change in potential, so a fight's rewards sum to
 /// its terminal reward and no ordering of plays is preferred beyond what
@@ -114,7 +125,8 @@ pub fn potential(c: &Combat, base: Baseline) -> f32 {
         return 0.0;
     }
     let lost = (base.hp - c.player.creature.hp.max(0)) as f32 / c.player.creature.max_hp.max(1) as f32;
-    0.5 * (enemy_hp_taken(c) - base.taken) - hp_weight(c) * lost
+    let potions = potions_held(c) as f32 - base.potions as f32;
+    0.5 * (enemy_hp_taken(c) - base.taken) - hp_weight(c) * lost + POTION_VALUE * potions
 }
 
 /// The reward for a transition: the potential change, plus the terminal
@@ -409,7 +421,7 @@ pub struct Forks {
 struct Fork {
     node: usize,
     rngs: CombatRngs,
-    turn: u32,
+    last_turn: u32,
     base: Baseline,
 }
 
@@ -444,19 +456,6 @@ struct Moved {
     rngs: Option<CombatRngs>,
 }
 
-/// Whether a step rolled no dice: every stream is where it was. Xoshiro
-/// never returns to a state, so equal means untouched.
-fn rngs_unchanged(a: &CombatRngs, b: &CombatRngs) -> bool {
-    a.shuffle == b.shuffle
-        && a.monster_ai == b.monster_ai
-        && a.targets == b.targets
-        && a.niche == b.niche
-        && a.card_generation == b.card_generation
-        && a.card_selection == b.card_selection
-        && a.energy_costs == b.energy_costs
-        && a.potion_generation == b.potion_generation
-}
-
 impl Forks {
     pub fn new(root: &Combat, n: usize, groups: usize, seed: u64) -> Self {
         Self::of(&[root], n, groups, seed, 1)
@@ -487,7 +486,7 @@ impl Forks {
                 Fork {
                     node: r * n_groups + i / per_group,
                     rngs: CombatRngs::new(root_seed(r) ^ (i as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15)),
-                    turn: roots[r].player.turn + depth.max(1) - 1,
+                    last_turn: roots[r].player.turn + depth.max(1) - 1,
                     base: Baseline::of(roots[r]),
                 }
             })
@@ -513,7 +512,7 @@ impl Forks {
     /// the fight ended.
     pub fn turn_over(&self, i: usize) -> bool {
         let c = self.combat(i);
-        c.is_over() || c.player.turn > self.copies[i].turn
+        c.is_over() || c.player.turn > self.copies[i].last_turn
     }
 
     /// The forks still in their turn.
@@ -669,7 +668,8 @@ impl Forks {
         };
         let rep = members[0].2;
         let (c, hash) = play(take(&mut pre, 0), rep);
-        if rngs_unchanged(&c.rngs, &self.copies[rep].rngs) {
+        // Xoshiro never returns to a state, so equal dice mean none rolled.
+        if c.rngs == self.copies[rep].rngs {
             let moved = members.iter().enumerate().map(|(j, &(_, _, copy))| Moved { copy, node: 0, reward: reward(j, &c), rngs: None }).collect();
             return GroupOut { nodes: vec![(c, hash)], moved, stayed: None };
         }

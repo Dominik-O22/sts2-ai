@@ -84,9 +84,9 @@ def rollout(
                 break
             # The network sees each distinct observation once; every copy
             # still samples its own action.
-            u = forks.observe_unique(live.tolist(), floats.numpy(), ids.numpy(), mask.numpy(), inverse)
-            logits, _ = forward(policy, device, floats[:u], ids[:u])
-            masked = masked_logits(logits.float(), mask[:u].to(device, non_blocking=True))
+            n_unique = forks.observe_unique(live.tolist(), floats.numpy(), ids.numpy(), mask.numpy(), inverse)
+            logits, _ = forward(policy, device, floats[:n_unique], ids[:n_unique])
+            masked = masked_logits(logits.float(), mask[:n_unique].to(device, non_blocking=True))
             per_copy = masked[torch.from_numpy(inverse[: len(live)]).to(device)]
             actions = np.zeros(n, np.int64)
             actions[live] = torch.distributions.Categorical(logits=per_copy, validate_args=False).sample().cpu().numpy()
@@ -98,8 +98,8 @@ def rollout(
     # already paid its terminal reward.
     rows = np.flatnonzero(~np.array(forks.is_over()))
     if len(rows):
-        u = forks.observe_unique(rows.tolist(), floats.numpy(), ids.numpy(), mask.numpy(), inverse)
-        _, value = forward(policy, device, floats[:u], ids[:u])
+        n_unique = forks.observe_unique(rows.tolist(), floats.numpy(), ids.numpy(), mask.numpy(), inverse)
+        _, value = forward(policy, device, floats[:n_unique], ids[:n_unique])
         score[rows] += value.float().cpu().numpy()[inverse[: len(rows)]]
     return score
 

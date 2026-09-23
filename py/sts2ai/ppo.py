@@ -74,11 +74,12 @@ class Config:
     # cannot tell moves apart leaves the policy as it was. 0 turns it off.
     search_states: int = 0
     # Roots are drawn only where the policy's favourite first action leads
-    # the runner-up by at most this much probability. Where it leads by
-    # more, the search's target is the policy's own and trains nothing:
-    # offline, those roots were over 40% of the searched ones and carried
-    # 8 to 16% of the target's divergence from the policy. 1 keeps all.
+    # the runner-up by at most this much probability: where it leads by
+    # more, the search's target is the policy's own and trains nothing
+    # (docs/training.md). 1 keeps all.
     search_margin: float = 0.8
+    # Fight kinds roots are drawn from, comma separated.
+    search_kinds: str = "Normal,Elite,Boss"
     search_copies: int = 128
     search_top: int = 8
     search_temp: float = 0.05
@@ -223,8 +224,9 @@ def start_search(
     stream: torch.cuda.Stream | None,
     go: threading.Event,
 ):
-    """Turn search on up to `cfg.search_states` random envs with a choice
-    to make and a policy unsure between its top two (`cfg.search_margin`).
+    """Turn search on up to `cfg.search_states` random envs in a fight of
+    `cfg.search_kinds` with a choice to make and a policy unsure between
+    its top two (`cfg.search_margin`).
     Forks them now, while `envs` holds their states, and returns the rest
     of the work as a function: it plays the copies out and returns the
     roots' observations, masks, and the search's distribution over first
@@ -232,7 +234,8 @@ def start_search(
     play on `net`, `policy` compiled, and their GPU work goes on `stream`,
     so it does not queue behind the update's. Each step of theirs waits
     for `go`."""
-    choice = np.flatnonzero(envs.mask.sum(axis=1) > 1)
+    kinds = set(cfg.search_kinds.split(","))
+    choice = np.array([i for i in np.flatnonzero(envs.mask.sum(axis=1) > 1) if envs.sim.fight(int(i))[1] in kinds], np.int64)
     logits, _ = policy(torch.from_numpy(envs.floats[choice]).to(device), torch.from_numpy(envs.ids[choice]).to(device))
     logits = masked_logits(logits.float(), torch.from_numpy(envs.mask[choice]).to(device))
     top2 = torch.softmax(logits, dim=1).topk(2, dim=1).values
@@ -399,9 +402,8 @@ def train(cfg: Config) -> Policy:
         }
         mb = B // cfg.minibatches
         # Summed on the GPU and read once after the update: a read per
-        # minibatch waits for the GPU each time, and the update stalls
-        # whenever the search holds the GPU or the CPU. So does
-        # `Categorical`'s argument check, hence `validate_args=False`.
+        # minibatch (or `Categorical`'s argument check) waits for the GPU,
+        # and the update stalls whenever the search holds the GPU or CPU.
         losses = {k: torch.zeros((), device=device) for k in ("policy", "value", "entropy", "clipfrac", "approx_kl", "search")}
         n_updates = 0
         for _ in range(cfg.epochs):
