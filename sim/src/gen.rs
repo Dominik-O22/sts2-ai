@@ -490,17 +490,21 @@ pub fn generate_against(rng: &mut Rng, floor: u32, asc: Ascension, encounter: En
     // Most runs commit to a plan; the rest take whatever, so the policy
     // still sees unfocused decks.
     let plan = (rng.next_int(5) != 0).then(|| PLANS[rng.next_int(PLANS.len())]);
+    // Act 1 rates per floor are set from the four played runs recorded by
+    // 2026-09-23 (`scripts/deckstats.py --gen`): act 1 decks carry well
+    // under one upgrade, enchantment and removal. Later acts had one played
+    // run between them, too few to set anything from.
     for f in 1..floor {
         // Later acts have more rest sites spent on smithing, and more shops
         // and events that remove cards.
         let later = act_floor(f).0 > 0;
         if rng.next_int(3) < 2 {
             if let Some(id) = card_reward(rng, &pool, act_floor(f).0, &deck, plan) {
-                deck.push(Card::new(0, id, rng.next_int(8) == 0));
+                deck.push(Card::new(0, id, rng.next_int(20) == 0));
             }
         }
         // Smiths go to the cards that matter, not to Strikes.
-        if rng.next_int(if later { 4 } else { 6 }) == 0 {
+        if rng.next_int(if later { 4 } else { 20 }) == 0 {
             let good: Vec<usize> = (0..deck.len())
                 .filter(|&i| !deck[i].upgraded && !matches!(def(deck[i].id).rarity, CardRarity::Basic | CardRarity::Special))
                 .collect();
@@ -513,7 +517,7 @@ pub fn generate_against(rng: &mut Rng, floor: u32, asc: Ascension, encounter: En
             }
         }
         // Removals take Strikes first, then Defends.
-        if rng.next_int(if later { 5 } else { 8 }) == 0 {
+        if rng.next_int(if later { 5 } else { 16 }) == 0 {
             let strikes = deck.iter().filter(|c| c.id == CardId::StrikeIronclad).count();
             let first = if strikes > 0 { CardId::StrikeIronclad } else { CardId::DefendIronclad };
             if let Some(i) = deck.iter().position(|c| c.id == first) {
@@ -523,7 +527,7 @@ pub fn generate_against(rng: &mut Rng, floor: u32, asc: Ascension, encounter: En
         // Relics and events hand out enchantments; act 1 rarely sees more
         // than one or two, and they only ever land on a card that accepts
         // them (`EnchantmentModel.CanEnchant`).
-        if rng.next_int(10) == 0 {
+        if rng.next_int(30) == 0 {
             enchant_one(rng, &mut deck);
         }
     }
@@ -541,8 +545,9 @@ pub fn generate_against(rng: &mut Rng, floor: u32, asc: Ascension, encounter: En
         relics.push(Relic::new(ancients.swap_remove(i)));
     }
     let slots = if relics.iter().any(|r| r.id == RelicId::PotionBelt) { 4 } else { 2 };
+    // Played runs carry about one potion into an act 1 fight.
     let potions: Vec<Option<PotionId>> =
-        (0..slots).map(|_| if rng.next_int(3) == 0 { Some(*rng.pick(potion::ALL).unwrap()) } else { None }).collect();
+        (0..slots).map(|_| if rng.next_int(2) == 0 { Some(*rng.pick(potion::ALL).unwrap()) } else { None }).collect();
 
     let room = match encounter.kind() {
         Kind::Elite => RoomKind::Elite,
@@ -552,11 +557,11 @@ pub fn generate_against(rng: &mut Rng, floor: u32, asc: Ascension, encounter: En
     // Events, relics and Ancients raise max HP by roughly this much an act.
     let max_hp = IRONCLAD_HP + (0..act_floor(floor).0).map(|_| 5 + rng.next_int(8) as i32).sum::<i32>();
     // The floor before the boss is a rest site, so boss fights start
-    // rested. Elites keep the full range: real runs meet them at any HP.
+    // rested. Played runs reach elites and other fights at about 65%.
     let (lo, span) = match encounter.kind() {
         Kind::Boss => (0.7, 0.3),
         _ if floor == 1 => (1.0, 0.0),
-        _ => (0.4, 0.6),
+        _ => (0.35, 0.6),
     };
     let hp = (max_hp as f32 * (lo + rng.next_float(span))).round() as i32;
     FightSetup {
