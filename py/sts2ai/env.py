@@ -70,11 +70,62 @@ class Layout:
         return cls(**_sim.layout())
 
 
+@dataclass(frozen=True)
+class RunLayout:
+    """Offsets and sizes of the run observation (`sim::runobs`): per row,
+    a global token, then deck, relic, potion and option tokens, each
+    segment a fixed number of tokens of fixed width in `floats` and `ids`,
+    whose first float says the token is there."""
+
+    run_floats: int
+    run_ids: int
+    max_deck: int
+    max_relics: int
+    max_potions: int
+    max_options: int
+    option_cards: int
+    global_ids: int
+    global_floats: int
+    deck_ids: int
+    deck_floats: int
+    relic_ids: int
+    relic_floats: int
+    potion_ids: int
+    potion_floats: int
+    option_ids: int
+    option_floats: int
+    f_deck: int
+    f_relics: int
+    f_potions: int
+    f_options: int
+    i_deck: int
+    i_relics: int
+    i_potions: int
+    i_options: int
+    card_vocab: int
+    enchant_vocab: int
+    potion_vocab: int
+    relic_vocab: int
+    decision_vocab: int
+    option_vocab: int
+    room_vocab: int
+    act_vocab: int
+    event_vocab: int
+    boss_vocab: int
+    event_key_vocab: int
+
+    @classmethod
+    def load(cls) -> RunLayout:
+        return cls(**_sim.run_layout())
+
+
 class RunFight(NamedTuple):
-    """A run-mode fight's place in its run."""
+    """A run-mode fight's place in its run, or where a run ended between
+    fights (`Envs.step_run`)."""
 
     seed: int
     act: int  # 0-based
+    floor: int
     deck: int  # cards in the deck the fight was fought with
     # How the run ended with this fight: "won", "died", "stuck: <why>".
     end: str | None
@@ -147,11 +198,35 @@ class Envs:
         self.sim.observe(self.floats, self.ids, self.mask)
         return n
 
-    def use_runs(self, seed: int = 0, asc: int = 10) -> None:
-        """Play whole runs, fight after fight, with random run decisions;
-        a run that ends starts a fresh one from the next seed."""
-        self.sim.use_runs(seed, asc)
+    def use_runs(self, seed: int = 0, asc: int = 10, choices: str = "random") -> None:
+        """Play whole runs, fight after fight; a run that ends starts a
+        fresh one from the next seed. `choices` makes the run decisions:
+        "random", "first", or "caller", where each run stops at its
+        decisions until `step_run` answers them."""
+        self.sim.use_runs(seed, asc, choices)
+        if choices == "caller":
+            self.run_layout = RunLayout.load()
+            self.run_floats = pinned((self.n, self.run_layout.run_floats), torch.float32)
+            self.run_ids = pinned((self.n, self.run_layout.run_ids), torch.int64)
         self.sim.observe(self.floats, self.ids, self.mask)
+
+    def run_waiting(self) -> list[int]:
+        """The envs whose run waits at a decision. A combat `step` leaves
+        them where they are."""
+        return self.sim.run_waiting()
+
+    def observe_run(self, envs: list[int]) -> tuple[np.ndarray, np.ndarray]:
+        """The run decisions `envs` wait at, one row each, in the first
+        rows of `run_floats` and `run_ids`."""
+        self.sim.observe_run(envs, self.run_floats, self.run_ids)
+        return self.run_floats[: len(envs)], self.run_ids[: len(envs)]
+
+    def step_run(self, envs: list[int], options: np.ndarray) -> list[tuple[int, RunFight]]:
+        """Answer each env's decision with an option token and play on;
+        the fights that start fill their combat rows. Returns the runs
+        that ended, by env."""
+        ended = self.sim.step_run(envs, np.ascontiguousarray(options, dtype=np.int64), self.floats, self.ids, self.mask)
+        return [(env, RunFight(*r)) for env, r in ended]
 
     def load_recordings(self, directory: Path = DEFAULT_RECORDINGS) -> int:
         """Cycle through recorded fights instead of generated ones."""

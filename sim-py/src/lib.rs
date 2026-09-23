@@ -9,7 +9,8 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use serde_json::Value;
 use sim::encode::*;
-use sim::env::{EnvConfig, Forks as InnerForks, VecEnv as Inner};
+use sim::env::{EnvConfig, Forks as InnerForks, RunChoices, VecEnv as Inner};
+use sim::runobs;
 use sim::gen::{holdout, load_recordings, ACTS, LAST_FLOOR};
 use sim::ids::{ALL_CARDS, ALL_MONSTERS};
 use sim::replay::{command, Ids, Replayer, Step};
@@ -30,9 +31,9 @@ struct VecEnv {
 /// One finished fight: (env, won, hp_frac, hp_lost, potions_used, steps, floor, encounter, kind, reward, run).
 type End = (usize, bool, f32, f32, u32, u32, u32, String, String, f32, Option<RunFight>);
 
-/// A run fight's place in its run: (seed index, act, deck size, how the
-/// run ended with it: "won", "died", "stuck: <why>", or None).
-type RunFight = (u64, u32, u32, Option<String>);
+/// A run fight's place in its run: (seed index, act, floor, deck size, how
+/// the run ended with it: "won", "died", "stuck: <why>", or None).
+type RunFight = (u64, u32, u32, u32, Option<String>);
 
 fn run_fight(r: sim::env::RunFight) -> RunFight {
     use sim::forward::End;
@@ -41,7 +42,7 @@ fn run_fight(r: sim::env::RunFight) -> RunFight {
         End::Died => "died".into(),
         End::Stuck(why) => format!("stuck: {why}"),
     });
-    (r.seed, r.act, r.deck, end)
+    (r.seed, r.act, r.floor, r.deck, end)
 }
 
 impl VecEnv {
@@ -131,11 +132,54 @@ impl VecEnv {
     }
 
     /// Switch to run mode: every env plays whole runs at `asc`, fight
-    /// after fight, with random run decisions; the envs' k-th runs are seed
-    /// indices `seed + env + k * n` (`sim::env::VecEnv::set_runs`).
-    #[pyo3(signature = (seed=0, asc=10))]
-    fn use_runs(&mut self, py: Python<'_>, seed: u64, asc: u8) {
-        py.detach(|| self.inner.set_runs(Ascension(asc), seed));
+    /// after fight; the envs' k-th runs are seed indices `seed + env + k *
+    /// n` (`sim::env::VecEnv::set_runs`). `choices` makes the run
+    /// decisions: "random", "first", or "caller" (`run_waiting`,
+    /// `observe_run`, `step_run`).
+    #[pyo3(signature = (seed=0, asc=10, choices="random"))]
+    fn use_runs(&mut self, py: Python<'_>, seed: u64, asc: u8, choices: &str) -> PyResult<()> {
+        let choices = match choices {
+            "random" => RunChoices::Random,
+            "first" => RunChoices::First,
+            "caller" => RunChoices::Caller,
+            other => return Err(pyo3::exceptions::PyValueError::new_err(format!("unknown run choices {other:?}: random, first or caller"))),
+        };
+        py.detach(|| self.inner.set_runs(Ascension(asc), seed, choices));
+        Ok(())
+    }
+
+    /// The envs whose run waits at a decision for the caller.
+    fn run_waiting(&self) -> Vec<usize> {
+        self.inner.run_waiting()
+    }
+
+    /// Fill rows `0..len(envs)` of `floats [k, RUN_FLOATS]` and `ids [k,
+    /// RUN_IDS]` with the decision each env waits at (`sim::runobs`).
+    fn observe_run(&self, py: Python<'_>, envs: Vec<usize>, mut floats: PyReadwriteArray2<f32>, mut ids: PyReadwriteArray2<i64>) -> PyResult<()> {
+        let f = floats.as_slice_mut()?;
+        let i = ids.as_slice_mut()?;
+        py.detach(|| self.inner.observe_run(&envs, f, i));
+        Ok(())
+    }
+
+    /// Answer each of `envs`' run decision with its option token
+    /// `options[k]` and play on, writing the combat rows of the fights that
+    /// start. Returns the runs that ended: (env, run).
+    fn step_run(
+        &mut self,
+        py: Python<'_>,
+        envs: Vec<usize>,
+        options: PyReadonlyArray1<i64>,
+        mut floats: PyReadwriteArray2<f32>,
+        mut ids: PyReadwriteArray2<i64>,
+        mut mask: PyReadwriteArray2<bool>,
+    ) -> PyResult<Vec<(usize, RunFight)>> {
+        let o = options.as_slice()?;
+        let f = floats.as_slice_mut()?;
+        let i = ids.as_slice_mut()?;
+        let m = mask.as_slice_mut()?;
+        let ended = py.detach(|| self.inner.step_run(&envs, o, f, i, m));
+        Ok(ended.into_iter().map(|(env, r)| (env, run_fight(r))).collect())
     }
 
     /// Switch to cycling through the recordings in `dir` (the held-out
@@ -481,6 +525,75 @@ fn layout(py: Python<'_>) -> PyResult<Bound<'_, PyDict>> {
     Ok(d)
 }
 
+/// Offsets and sizes of the run observation (`sim::runobs`), by name.
+#[pyfunction]
+fn run_layout(py: Python<'_>) -> PyResult<Bound<'_, PyDict>> {
+    use runobs::*;
+    let d = PyDict::new(py);
+    for (k, v) in [
+        ("run_floats", RUN_FLOATS),
+        ("run_ids", RUN_IDS),
+        ("max_deck", MAX_DECK),
+        ("max_relics", MAX_RELICS),
+        ("max_potions", MAX_POTIONS),
+        ("max_options", MAX_OPTIONS),
+        ("option_cards", OPTION_CARDS),
+        ("global_ids", GLOBAL_IDS),
+        ("global_floats", GLOBAL_FLOATS),
+        ("deck_ids", DECK_IDS),
+        ("deck_floats", DECK_FLOATS),
+        ("relic_ids", RELIC_IDS),
+        ("relic_floats", RELIC_FLOATS),
+        ("potion_ids", POTION_IDS),
+        ("potion_floats", POTION_FLOATS),
+        ("option_ids", OPTION_IDS),
+        ("option_floats", OPTION_FLOATS),
+        ("f_deck", F_DECK),
+        ("f_relics", F_RELICS),
+        ("f_potions", F_POTIONS),
+        ("f_options", F_OPTIONS),
+        ("i_deck", I_DECK),
+        ("i_relics", I_RELICS),
+        ("i_potions", I_POTIONS),
+        ("i_options", I_OPTIONS),
+        ("card_vocab", CARD_VOCAB),
+        ("enchant_vocab", ENCHANT_VOCAB),
+        ("potion_vocab", POTION_VOCAB),
+        ("relic_vocab", RELIC_VOCAB),
+        ("decision_vocab", DECISION_VOCAB),
+        ("option_vocab", OPTION_VOCAB),
+        ("room_vocab", ROOM_VOCAB),
+        ("act_vocab", ACT_VOCAB),
+        ("event_vocab", EVENT_VOCAB),
+        ("boss_vocab", BOSS_VOCAB),
+        ("event_key_vocab", EVENT_KEY_VOCAB),
+    ] {
+        d.set_item(k, v)?;
+    }
+    Ok(d)
+}
+
+/// The run vocabularies' names by id, id 0 the pad: "decision", "option",
+/// "room", "act", "event", "boss", and "relic" with the relics the combat
+/// sim leaves out after its own (`sim::runobs`).
+#[pyfunction]
+fn run_names() -> std::collections::HashMap<&'static str, Vec<String>> {
+    use runobs::*;
+    let named = |names: Vec<String>| std::iter::once("<pad>".to_string()).chain(names).collect::<Vec<_>>();
+    std::collections::HashMap::from([
+        ("decision", named(DECISIONS.iter().map(|d| d.to_string()).collect())),
+        ("option", named(OPTION_KINDS.iter().map(|k| format!("{k:?}")).collect())),
+        ("room", named(ROOMS.iter().map(|r| r.to_string()).collect())),
+        ("act", named(ACTS.iter().map(|a| format!("{a:?}")).collect())),
+        ("event", named(RUN_EVENTS.iter().map(|e| e.to_string()).collect())),
+        ("boss", named(RUN_BOSSES.iter().map(|b| format!("{b:?}")).collect())),
+        (
+            "relic",
+            named(sim::relic::ALL.iter().map(|r| sim::replay::slug(&format!("{r:?}"))).chain(RUN_RELICS.iter().map(|r| r.to_string())).collect()),
+        ),
+    ])
+}
+
 /// Card names by vocabulary index (index 0 is the pad).
 #[pyfunction]
 fn card_names() -> Vec<String> {
@@ -586,6 +699,8 @@ fn _sim(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Advisor>()?;
     m.add_class::<Forks>()?;
     m.add_function(wrap_pyfunction!(layout, m)?)?;
+    m.add_function(wrap_pyfunction!(run_layout, m)?)?;
+    m.add_function(wrap_pyfunction!(run_names, m)?)?;
     m.add_function(wrap_pyfunction!(card_names, m)?)?;
     m.add_function(wrap_pyfunction!(card_ids, m)?)?;
     m.add_function(wrap_pyfunction!(game_ids, m)?)?;

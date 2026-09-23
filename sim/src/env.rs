@@ -13,7 +13,9 @@ use crate::encounter::{Encounter, Kind};
 use crate::forward::{self, Fought, Next, Run};
 use crate::gen::{act_floor, encounter_of_kind, generate, generate_against, FightSetup, BOSS_FLOOR, LAST_FLOOR};
 use crate::rng::{CombatRngs, Rng};
-use crate::rooms::Random;
+use crate::rooms::{Chooser, Decision, First, Random};
+use crate::run::RunState;
+use crate::runobs::{self, RunObs, RUN_FLOATS, RUN_IDS};
 use crate::potion::PotionId;
 use crate::relic::RelicId;
 use crate::types::{Ascension, AscensionLevel};
@@ -58,13 +60,16 @@ pub struct EpisodeEnd {
     pub run: Option<RunFight>,
 }
 
-/// A run fight's place in its run.
+/// A run fight's place in its run, or, reported by `step_run`, where a
+/// run ended between fights.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RunFight {
     /// The run's seed index (`RunSlot`).
     pub seed: u64,
     /// The act, 0-based.
     pub act: u32,
+    /// The run's floor.
+    pub floor: u32,
     /// Cards in the deck the fight was fought with.
     pub deck: u32,
     /// How the run ended, when it ended with this fight: the fight lost,
@@ -193,12 +198,98 @@ struct Slot {
     run: Option<RunSlot>,
 }
 
+/// Who makes a run-mode slot's run decisions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RunChoices {
+    /// `rooms::Random`, on an RNG of the run's own (`run_chooser`).
+    Random,
+    /// `rooms::First`.
+    First,
+    /// The caller: the run stops at each decision until `step_run`
+    /// answers it.
+    Caller,
+}
+
+enum Choosing {
+    Random(Random),
+    First,
+    Caller(Segment),
+}
+
+impl Choosing {
+    fn of(choices: RunChoices, seed: u64) -> Self {
+        match choices {
+            RunChoices::Random => Choosing::Random(run_chooser(seed)),
+            RunChoices::First => Choosing::First,
+            RunChoices::Caller => Choosing::Caller(Segment::default()),
+        }
+    }
+}
+
+/// A run between fights under the caller's choices: the fight it came
+/// from and the answers given since. `Run::next` cannot stop halfway, so
+/// each answer plays the segment again from the last fight on a copy of
+/// the run, with the answers so far, up to the first decision not yet
+/// answered (`Replay`), and the copy is kept once it reaches a fight or
+/// the run's end. The same run and answers play the same way, so the
+/// replays agree.
+#[derive(Default)]
+struct Segment {
+    fought: Option<Fought>,
+    answers: Vec<usize>,
+    /// The decision the run waits at.
+    waiting: Option<RunObs>,
+}
+
+/// Unwinds out of `Run::next` at the first decision the caller has not
+/// answered, carrying it.
+struct Unanswered(RunObs);
+
+/// Answers from a segment's list, then stops the run at the next decision.
+/// A decision with one option or none takes the first without asking;
+/// nothing is learned from it.
+struct Replay<'a> {
+    answers: &'a [usize],
+    next: usize,
+}
+
+impl Chooser for Replay<'_> {
+    fn choose(&mut self, run: &RunState, decision: Decision<'_>) -> usize {
+        if runobs::option_count(decision) <= 1 {
+            return 0;
+        }
+        if let Some(&answer) = self.answers.get(self.next) {
+            self.next += 1;
+            return answer;
+        }
+        std::panic::resume_unwind(Box::new(Unanswered(runobs::observe(run, decision))))
+    }
+}
+
+impl Segment {
+    /// Plays `run`'s copy through the answers: to the next fight or end
+    /// with the copy, or the decision it stops at.
+    fn replay(&self, run: &Run) -> Result<(Run, Next), RunObs> {
+        let mut run = run.clone();
+        let mut chooser = Replay { answers: &self.answers, next: 0 };
+        let played = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run.next(self.fought, &mut chooser)));
+        match played {
+            Ok(next) => Ok((run, next)),
+            Err(payload) => match payload.downcast::<Unanswered>() {
+                Ok(stop) => Err(stop.0),
+                Err(other) => std::panic::resume_unwind(other),
+            },
+        }
+    }
+}
+
 /// A slot's run, with the chooser making its run decisions. A slot's
 /// `k`-th run is seed index `base + slot + k * n`, so a base seed and a
 /// batch size name every run the batch plays.
 struct RunSlot {
     run: Run,
-    chooser: Random,
+    chooser: Choosing,
+    choices: RunChoices,
     asc: Ascension,
     base: u64,
     /// The current run's seed index.
@@ -208,35 +299,83 @@ struct RunSlot {
 }
 
 impl RunSlot {
-    fn new(asc: Ascension, base: u64, index: usize) -> Self {
+    fn new(asc: Ascension, base: u64, index: usize, choices: RunChoices) -> Self {
         let seed = base + index as u64;
-        Self { run: Run::new(&run_seed(seed), asc), chooser: run_chooser(seed), asc, base, seed, started: 1 }
+        Self { run: Run::new(&run_seed(seed), asc), chooser: Choosing::of(choices, seed), choices, asc, base, seed, started: 1 }
+    }
+
+    /// The decision the run waits at for the caller, if it does.
+    fn waiting(&self) -> Option<&RunObs> {
+        match &self.chooser {
+            Choosing::Caller(segment) => segment.waiting.as_ref(),
+            _ => None,
+        }
+    }
+
+    fn report(&self, deck: usize) -> RunFight {
+        RunFight { seed: self.seed, act: self.run.state.act as u32, floor: self.run.state.floor as u32, deck: deck as u32, end: None }
     }
 
     /// Writes the fight `setup` started back into the run, now that it is
-    /// over as `combat`, and plays on to the next fight, through as many
-    /// fresh runs as it takes. Returns the next fight and the finished
-    /// one's place in its run (none for the first fight of a slot's first
-    /// run, which follows no fight).
-    fn next_fight(&mut self, setup: &FightSetup, combat: &Combat, index: usize, n: usize) -> (FightSetup, Option<RunFight>) {
-        let mut fought = self.run.fighting().then(|| Fought {
+    /// over as `combat`, and plays on (`advance`). The report is the
+    /// finished fight's place in its run (none for the first fight of a
+    /// slot's first run, which follows no fight).
+    fn next_fight(&mut self, setup: &FightSetup, combat: &Combat, index: usize, n: usize) -> (Option<FightSetup>, Option<RunFight>) {
+        let fought = self.run.fighting().then(|| Fought {
             won: combat.outcome == Some(Outcome::Won),
             gold_proportion: self.run.state.end_fight(setup, combat),
         });
-        let mut report = fought.map(|_| RunFight { seed: self.seed, act: self.run.state.act as u32, deck: setup.deck.len() as u32, end: None });
+        let report = fought.map(|_| self.report(setup.deck.len()));
+        self.advance(fought, report, index, n)
+    }
+
+    /// Answers the decision the run waits at with option `option` of its
+    /// encoding, and plays on (`advance`). The report says where the run
+    /// ended, if it did.
+    fn answer(&mut self, option: usize, index: usize, n: usize) -> (Option<FightSetup>, Option<RunFight>) {
+        let report = self.report(self.run.state.deck.len());
+        let Choosing::Caller(segment) = &mut self.chooser else { panic!("env {index}: no run decision to answer") };
+        let waiting = segment.waiting.take().unwrap_or_else(|| panic!("env {index}: not at a run decision"));
+        let answer = *waiting.answers.get(option).unwrap_or_else(|| panic!("env {index}: option {option} of {}", waiting.answers.len()));
+        segment.answers.push(answer);
+        self.advance(None, Some(report), index, n)
+    }
+
+    /// Plays on to the next fight, through as many fresh runs as it takes,
+    /// or to a decision the caller answers (None). The first run to end
+    /// sets `report`'s end and floor; later ones are fresh runs that ended
+    /// before a fight.
+    fn advance(&mut self, mut fought: Option<Fought>, mut report: Option<RunFight>, index: usize, n: usize) -> (Option<FightSetup>, Option<RunFight>) {
         loop {
-            match self.run.next(fought.take(), &mut self.chooser) {
-                Next::Fight(setup) => return (setup, report),
+            let next = match &mut self.chooser {
+                Choosing::Random(chooser) => self.run.next(fought.take(), chooser),
+                Choosing::First => self.run.next(fought.take(), &mut First),
+                Choosing::Caller(segment) => {
+                    segment.fought = fought.take().or(segment.fought);
+                    match segment.replay(&self.run) {
+                        Err(decision) => {
+                            segment.waiting = Some(decision);
+                            return (None, report);
+                        }
+                        Ok((run, next)) => {
+                            self.run = run;
+                            *segment = Segment::default();
+                            next
+                        }
+                    }
+                }
+            };
+            match next {
+                Next::Fight(setup) => return (Some(setup), report),
                 Next::End(end) => {
-                    // The first end is the finished fight's run's; later
-                    // ones are fresh runs that ended before a fight.
                     if let Some(report) = report.as_mut().filter(|r| r.end.is_none()) {
+                        report.floor = self.run.state.floor as u32;
                         report.end = Some(end);
                     }
                     self.seed = self.base + index as u64 + self.started * n as u64;
                     self.started += 1;
                     self.run = Run::new(&run_seed(self.seed), self.asc);
-                    self.chooser = run_chooser(self.seed);
+                    self.chooser = Choosing::of(self.choices, self.seed);
                 }
             }
         }
@@ -257,16 +396,38 @@ impl Slot {
     /// Start the next fight. One already over before the first decision
     /// (Whispering Earring can win turn 1 on its own) is skipped: there is
     /// nothing in it to act on. In run mode, returns the finished fight's
-    /// place in its run.
+    /// place in its run; a run that waits at a decision for the caller
+    /// starts no fight until `step_run` answers it.
     fn reset(&mut self, index: usize, n: usize, cfg: &EnvConfig, fixed: &[FightSetup], hard: &[(Encounter, f32)]) -> Option<RunFight> {
         let mut report = None;
         loop {
             let rolled = self.roll(index, n, cfg, fixed, hard);
             report = report.or(rolled);
-            if !self.combat.is_over() {
+            if !self.combat.is_over() || self.waiting() {
                 return report;
             }
         }
+    }
+
+    /// Whether the slot's run waits at a decision for the caller.
+    fn waiting(&self) -> bool {
+        self.run.as_ref().is_some_and(|r| r.waiting().is_some())
+    }
+
+    /// Answers the run decision the slot waits at and starts the fight the
+    /// run reaches, if it reaches one; a fight over at once is skipped as
+    /// in `reset`. Returns where the run ended, if it did.
+    fn answer(&mut self, option: usize, index: usize, n: usize, cfg: &EnvConfig) -> Option<RunFight> {
+        let run = self.run.as_mut().expect("run mode");
+        let (setup, report) = run.answer(option, index, n);
+        if let Some(setup) = setup {
+            self.start(setup);
+            if self.combat.is_over() {
+                let later = self.reset(index, n, cfg, &[], &[]);
+                return report.filter(|r| r.end.is_some()).or(later.filter(|r| r.end.is_some()));
+            }
+        }
+        report.filter(|r| r.end.is_some())
     }
 
     fn roll(&mut self, index: usize, n: usize, cfg: &EnvConfig, fixed: &[FightSetup], hard: &[(Encounter, f32)]) -> Option<RunFight> {
@@ -274,10 +435,13 @@ impl Slot {
         let weighted: Vec<(Encounter, f32)> =
             hard.iter().copied().filter(|(e, _)| acts.contains(&(e.act().index() as u32))).collect();
         let mut report = None;
-        self.setup = if let Some(run) = &mut self.run {
+        let setup = if let Some(run) = &mut self.run {
             let (setup, fought) = run.next_fight(&self.setup, &self.combat, index, n);
             report = fought;
-            setup
+            match setup {
+                Some(setup) => setup,
+                None => return report,
+            }
         } else if !fixed.is_empty() {
             fixed[(index + self.resets * n) % fixed.len()].clone()
         } else if self.rng.next_float(1.0) < cfg.hard_frac && !weighted.is_empty() {
@@ -306,11 +470,16 @@ impl Slot {
             let floor = cfg.min_floor + self.rng.next_int((cfg.max_floor - cfg.min_floor + 1) as usize) as u32;
             generate(&mut self.rng, floor, cfg.asc)
         };
+        self.start(setup);
+        report
+    }
+
+    fn start(&mut self, setup: FightSetup) {
+        self.setup = setup;
         self.resets += 1;
         self.steps = 0;
         self.combat = self.setup.combat(self.rng.next_u64());
         self.base = Baseline::of(&self.combat);
-        report
     }
 
     fn end(&self, index: usize) -> EpisodeEnd {
@@ -401,17 +570,63 @@ impl VecEnv {
     }
 
     /// Run mode: every env plays runs at `asc`, fight after fight, its run
-    /// decisions made at random (`rooms::Random`), a fresh run from the next
-    /// seed index after each ends (`RunSlot`). Starts every env's first run.
-    pub fn set_runs(&mut self, asc: Ascension, base: u64) {
+    /// decisions made by `choices`, a fresh run from the next seed index
+    /// after each ends (`RunSlot`). Starts every env's first run; under
+    /// `RunChoices::Caller` each then waits at its first decision.
+    pub fn set_runs(&mut self, asc: Ascension, base: u64, choices: RunChoices) {
         self.fixed.clear();
         let n = self.slots.len();
         let (cfg, hard) = (self.cfg, &self.hard);
         self.slots.par_iter_mut().enumerate().for_each(|(i, s)| {
             s.resets = 0;
-            s.run = Some(RunSlot::new(asc, base, i));
+            s.run = Some(RunSlot::new(asc, base, i, choices));
             s.reset(i, n, &cfg, &[], hard);
         });
+    }
+
+    /// The envs whose run waits at a decision for the caller.
+    pub fn run_waiting(&self) -> Vec<usize> {
+        (0..self.slots.len()).filter(|&i| self.slots[i].waiting()).collect()
+    }
+
+    /// Encode the run decision each of `envs` waits at, a row each, laid
+    /// out per `runobs`.
+    pub fn observe_run(&self, envs: &[usize], floats: &mut [f32], ids: &mut [i64]) {
+        assert!(floats.len() >= envs.len() * RUN_FLOATS && ids.len() >= envs.len() * RUN_IDS, "run buffers too small");
+        floats.par_chunks_mut(RUN_FLOATS).zip(ids.par_chunks_mut(RUN_IDS)).zip(envs.par_iter()).for_each(|((f, i), &env)| {
+            let obs = self.slots[env].run.as_ref().and_then(RunSlot::waiting).unwrap_or_else(|| panic!("env {env}: not at a run decision"));
+            f.copy_from_slice(&obs.floats);
+            i.copy_from_slice(&obs.ids);
+        });
+    }
+
+    /// Answer the run decision each of `envs` waits at with its option
+    /// token `options[k]`, and play each run on: to its next decision, or
+    /// to a fight, which starts and whose combat row is written to the
+    /// observation buffers. No combat steps. Returns the runs that ended,
+    /// by env.
+    pub fn step_run(&mut self, envs: &[usize], options: &[i64], floats: &mut [f32], ids: &mut [i64], mask: &mut [bool]) -> Vec<(usize, RunFight)> {
+        self.check_buffers(floats, ids, mask);
+        assert_eq!(envs.len(), options.len(), "an option per env");
+        let n = self.slots.len();
+        let mut chosen = vec![None; n];
+        for (&env, &option) in envs.iter().zip(options) {
+            assert!(chosen[env].replace(option as usize).is_none(), "env {env} answered twice");
+        }
+        let cfg = self.cfg;
+        self.slots
+            .par_iter_mut()
+            .enumerate()
+            .zip(chosen.par_iter())
+            .zip(floats.par_chunks_mut(N_FLOATS))
+            .zip(ids.par_chunks_mut(N_IDS))
+            .zip(mask.par_chunks_mut(N_ACTIONS))
+            .filter_map(|(((((i, s), option), f), ids), m)| {
+                let ended = s.answer((*option)?, i, n, &cfg);
+                encode::encode(&s.combat, f, ids, m);
+                ended.map(|r| (i, r))
+            })
+            .collect()
     }
 
     pub fn combat(&self, i: usize) -> &Combat {
@@ -422,7 +637,8 @@ impl VecEnv {
         &self.slots[i].setup
     }
 
-    /// Encode every env's current state.
+    /// Encode every env's current state. A run waiting at a decision
+    /// shows the fight it last finished.
     pub fn observe(&self, floats: &mut [f32], ids: &mut [i64], mask: &mut [bool]) {
         self.check_buffers(floats, ids, mask);
         self.slots
@@ -459,6 +675,11 @@ impl VecEnv {
             .zip(rewards.par_iter_mut())
             .zip(dones.par_iter_mut())
             .map(|(((((((i, s), &a), f), ids), m), r), d)| {
+                // A run waiting at a decision sits the step out.
+                if s.waiting() {
+                    (*r, *d) = (0.0, false);
+                    return None;
+                }
                 let action = encode::decode(&s.combat, a as usize)
                     .unwrap_or_else(|| panic!("env {i}: action {a} is not legal; legal: {:?}", s.combat.legal_actions()));
                 let before = potential(&s.combat, s.base);
@@ -1124,7 +1345,7 @@ mod tests {
     /// every fight's report.
     fn play_runs(n: usize, runs: usize) -> (Vec<PlayedRun>, Vec<String>) {
         let mut env = VecEnv::new(n, 5, EnvConfig::default());
-        env.set_runs(Ascension(10), 100);
+        env.set_runs(Ascension(10), 100, RunChoices::Random);
         let (mut floats, mut ids, mut mask) = (vec![0.0; n * N_FLOATS], vec![0; n * N_IDS], vec![false; n * N_ACTIONS]);
         let (mut rewards, mut dones) = (vec![0.0; n], vec![false; n]);
         env.observe(&mut floats, &mut ids, &mut mask);
@@ -1170,6 +1391,89 @@ mod tests {
             assert_eq!(forward.fights, run.fights.len(), "seed {}", run.seed);
         }
         assert_eq!(reports, play_runs(3, 2).1);
+    }
+
+    /// Answers a run's decisions from a list, taking the only option of a
+    /// decision with one as `Replay` does.
+    struct Scripted(std::vec::IntoIter<usize>);
+
+    impl Chooser for Scripted {
+        fn choose(&mut self, _: &RunState, decision: Decision<'_>) -> usize {
+            if runobs::option_count(decision) <= 1 {
+                return 0;
+            }
+            self.0.next().expect("an answer for every decision")
+        }
+    }
+
+    /// Runs under the caller's choices play as `forward::play` does with
+    /// the same choices and fights: random options answered through
+    /// `step_run` until none wait, then a combat step with the first legal
+    /// action, and each finished run played forward with its answers.
+    #[test]
+    fn caller_choices_play_the_forward_run() {
+        let n = 4;
+        let mut env = VecEnv::new(n, 5, EnvConfig::default());
+        env.set_runs(Ascension(10), 300, RunChoices::Caller);
+        let (mut floats, mut ids, mut mask) = (vec![0.0; n * N_FLOATS], vec![0; n * N_IDS], vec![false; n * N_ACTIONS]);
+        let (mut rewards, mut dones) = (vec![0.0; n], vec![false; n]);
+        let (mut run_f, mut run_i) = (vec![0.0; n * RUN_FLOATS], vec![0; n * RUN_IDS]);
+        let mut rng = Rng::new(3);
+        let mut answers: std::collections::HashMap<u64, Vec<usize>> = Default::default();
+        let mut fights: std::collections::HashMap<u64, Vec<(FightSetup, Combat)>> = Default::default();
+        let mut ended: Vec<(u64, forward::End)> = vec![];
+        let mut decisions = 0;
+        while ended.len() < 8 {
+            loop {
+                let waiting = env.run_waiting();
+                if waiting.is_empty() {
+                    break;
+                }
+                env.observe_run(&waiting, &mut run_f, &mut run_i);
+                let options: Vec<i64> = waiting
+                    .iter()
+                    .enumerate()
+                    .map(|(k, &i)| {
+                        let slot = env.slots[i].run.as_ref().unwrap();
+                        let obs = slot.waiting().unwrap();
+                        assert_eq!(obs.floats, run_f[k * RUN_FLOATS..][..RUN_FLOATS], "env {i}: the row is its decision");
+                        let present = (0..runobs::MAX_OPTIONS).filter(|&o| run_f[k * RUN_FLOATS + runobs::F_OPTIONS + o * runobs::OPTION_FLOATS] == 1.0).count();
+                        assert_eq!(present, obs.answers.len(), "env {i}: an option token per answer");
+                        assert!(present > 1, "env {i}: a decision with one option is taken without asking");
+                        let option = rng.next_int(present);
+                        answers.entry(slot.seed).or_default().push(obs.answers[option]);
+                        option as i64
+                    })
+                    .collect();
+                decisions += waiting.len();
+                for (_, run) in env.step_run(&waiting, &options, &mut floats, &mut ids, &mut mask) {
+                    ended.push((run.seed, run.end.expect("an ended run")));
+                }
+            }
+            let actions: Vec<i64> = (0..n).map(|i| mask[i * N_ACTIONS..][..N_ACTIONS].iter().position(|&m| m).unwrap() as i64).collect();
+            let before: Vec<(FightSetup, Combat)> = env.slots.iter().map(|s| (s.setup.clone(), s.combat.clone())).collect();
+            for e in env.step(&actions, &mut floats, &mut ids, &mut mask, &mut rewards, &mut dones) {
+                let (setup, mut combat) = before[e.env].clone();
+                combat.step(encode::decode(&combat, actions[e.env] as usize).unwrap());
+                let run = e.run.expect("a run fight");
+                fights.entry(run.seed).or_default().push((setup, combat));
+                if let Some(end) = run.end {
+                    ended.push((run.seed, end));
+                }
+            }
+        }
+        assert!(decisions > 50, "{decisions} decisions");
+        for (seed, end) in ended {
+            let mut recorded = fights.remove(&seed).unwrap_or_default().into_iter();
+            let mut chooser = Scripted(answers.remove(&seed).unwrap_or_default().into_iter());
+            let forward = forward::play(&run_seed(seed), Ascension(10), &mut chooser, &mut |state: &mut RunState, setup: FightSetup| {
+                let (fought, combat) = recorded.next().expect("forward played more fights");
+                assert_eq!(format!("{setup:?}"), format!("{fought:?}"), "seed {seed}: fight on floor {}", state.floor);
+                Fought { won: combat.outcome == Some(Outcome::Won), gold_proportion: state.end_fight(&setup, &combat) }
+            });
+            assert_eq!(forward.end, end, "seed {seed}");
+            assert!(chooser.0.next().is_none(), "seed {seed}: answers left over");
+        }
     }
 
     #[test]
