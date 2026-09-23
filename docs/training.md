@@ -101,7 +101,10 @@ groups share one, since a plan must not know the draw), starts with a
 given first action, and the policy samples the rest. A copy scores the
 shaped reward it collected plus the value head where the next turn starts.
 Copies of many fights go through the network in one batch, and only the
-ones still playing each step.
+ones still playing each step. Copies that look the same share a row
+(`Forks::observe_unique`): copies of a root that took the same first move
+in the same shuffle group mostly do, so the network sees about a quarter
+of the rows, and each copy still samples its own action.
 
 `advise.py --search 256` (and `play.py`, and `record.py --pilot CKPT
 --search N`) runs it at every decision: every legal first action gets an
@@ -156,12 +159,28 @@ once there are a few dozen run fights.
 
 ## Speed
 
-Measured 2026-09-22 on the RTX 5070 Ti with 1024 envs x 32 steps: the sim
-alone steps a million env-steps a second; one training iteration is about
-0.16 s, two thirds of it the PPO update, which is memory-bound (the pair
-head's `[batch, hand, targets, hidden]` tensor). CUDA graphs and fewer,
-larger minibatches change nothing. About 200k steps/s, so a 2000-iteration
-run is under six minutes and 800M steps is about an hour.
+Measured 2026-09-23 on the RTX 5070 Ti (8-core Ryzen 9850X3D) with 1024
+envs x 32 steps, resuming set-11: plain PPO runs about 173k steps/s. With
+the set-11 search (`--search-states 512`, 128 copies) it is about 86k,
+up from 40k; the rollout takes 60 ms, the update 130 to 180 ms, and the
+search about 300 ms, most of it the sim stepping 65k copies.
+
+What the search costs depends on how it shares the machine with the rest
+of the iteration:
+
+- It runs in a thread beside the update, and pauses while the rollout
+  runs (`search_go`): the rollout waits on the GPU and the sim every step
+  and ran three to four times slower beside it.
+- Its network is compiled too, and every graph compiles in the first
+  iteration, with the search waited for. After that `torch.compile` may
+  not compile again (`eager_on_recompile`): compiling in one thread while
+  the other runs broke Adam once and hung once.
+- Nothing in the update reads a value back per minibatch, so the update
+  does not stall on each GPU round trip.
+- Observations cross to the GPU from pinned buffers.
+
+The search at play time (`advise.py --search`, `searcheval`) gets the
+same row sharing; `searcheval` on set-11 went from 9 s to 5 s.
 
 ## What to watch
 
