@@ -814,6 +814,7 @@ impl Combat {
                 StrikeDummy if card.has_tag(Tag::Strike) => add += 3.0,
                 FakeStrikeDummy if card.has_tag(Tag::Strike) => add += 1.0,
                 MiniatureCannon if card.upgraded => add += 3.0,
+                MysticLighter if card.enchantment.is_some() => add += 9.0,
                 _ => {}
             }
         }
