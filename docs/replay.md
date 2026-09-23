@@ -115,8 +115,8 @@ for known jobs, `{"job": {"name", "relics", "fights", "setup", "teardown",
 `sts2ai/results.jsonl`.
 
 Before it starts, it asks the sim whether it could build a fight from the
-run as it stands. A colorless card in the deck, a relic from an act that is
-not ported, a Colorless Potion in the belt: any of those makes every fight
+run as it stands. A card the sim refuses (`UNSUPPORTED_CARDS`: Splash, Mad
+Science), a relic it does not know, a Colorless Potion in the belt: any of those makes every fight
 fail on the setup rather than on the rules, so it says so and stops. A
 card or relic can come off with `remove_card` or `relic remove`; a potion
 has no remove command and has to be used up.

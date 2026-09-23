@@ -35,8 +35,8 @@ Every fight's replay result goes to `sts2ai/results.jsonl`.
 
 Start the game first, load a run at the ascension you want (ascension is
 fixed at run start), and leave it sitting anywhere outside combat. If the
-run is carrying something the sim has never heard of, a colorless card or a
-relic from an unported act, it says so and stops rather than sending you
+run is carrying something the sim cannot play, a card in `UNSUPPORTED_CARDS`
+or a relic it does not know, it says so and stops rather than sending you
 into fights that would fail on the setup.
 
 The deck is the point. A fast deck kills a boss in three turns and proves
@@ -402,8 +402,8 @@ def run_state() -> dict:
 
 def blocker(starting: bool = True) -> str | None:
     """Why fights cannot be set up from the run as it stands: no run, a dead
-    one, a fight in progress, or something the sim has never heard of (a
-    colorless card, a relic from an unported act, a potion like Colorless
+    one, a fight in progress, or something the sim cannot play (a card in
+    `UNSUPPORTED_CARDS`, a relic it does not know, a potion like Colorless
     Potion), which would make every fight fail on the setup rather than on
     the rules. Cards and relics come off with `remove_card` and `relic
     remove`; a potion has no remove command, so it has to be used up."""
