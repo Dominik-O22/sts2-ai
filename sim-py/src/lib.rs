@@ -423,6 +423,18 @@ fn card_names() -> Vec<String> {
     std::iter::once("<pad>".to_string()).chain(ALL_CARDS.iter().map(|c| format!("{c:?}"))).collect()
 }
 
+/// Every card's game id (`BODY_SLAM`), in the sim's order.
+#[pyfunction]
+fn card_ids() -> Vec<String> {
+    ALL_CARDS.iter().map(|c| sim::replay::slug(&format!("{c:?}"))).collect()
+}
+
+/// Game ids of the cards the sim refuses to play (`card::UNSUPPORTED_CARDS`).
+#[pyfunction]
+fn unsupported_cards() -> Vec<String> {
+    sim::card::UNSUPPORTED_CARDS.iter().map(|(c, _)| sim::replay::slug(&format!("{c:?}"))).collect()
+}
+
 #[pyfunction]
 fn monster_names() -> Vec<String> {
     std::iter::once("<pad>".to_string()).chain(ALL_MONSTERS.iter().map(|c| format!("{c:?}"))).collect()
@@ -484,6 +496,8 @@ fn _sim(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Forks>()?;
     m.add_function(wrap_pyfunction!(layout, m)?)?;
     m.add_function(wrap_pyfunction!(card_names, m)?)?;
+    m.add_function(wrap_pyfunction!(card_ids, m)?)?;
+    m.add_function(wrap_pyfunction!(unsupported_cards, m)?)?;
     m.add_function(wrap_pyfunction!(monster_names, m)?)?;
     m.add_function(wrap_pyfunction!(encounters, m)?)?;
     m.add_function(wrap_pyfunction!(start_blocker, m)?)?;

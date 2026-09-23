@@ -111,7 +111,14 @@ POWERED = Loadout(
 MAX_HP_RELICS = [("MANGO", 14), ("PEAR", 10), ("STRAWBERRY", 7)]
 
 
+# Card jobs: a lean deck so the cards under test come up every few turns,
+# and the HP to keep a long fight going.
+CARD_BASE = {"STRIKE_IRONCLAD": 3, "DEFEND_IRONCLAD": 3, "BASH": 1, "SHRUG_IT_OFF": 2}
+
+
 def loadout_for(job: "Job") -> Loadout:
+    if job.cards:
+        return Loadout({**CARD_BASE, **{c: 2 for c in job.cards}}, STANDARD.relics, 150)
     return POWERED if job.tags & {"hive", "glory"} else STANDARD
 
 
@@ -253,6 +260,9 @@ class Job:
     advice: str | None = None
     # Its fights need a person, not the pilot.
     human: bool = False
+    # Cards under test (`cards` jobs): the deck carries two of each, and the
+    # job is done once each has been played in a clean recording.
+    cards: list[str] = field(default_factory=list)
 
     def fights(self) -> list[str]:
         return [s.encounter for s in self.steps if isinstance(s, Fight)]
@@ -332,6 +342,27 @@ RELIC_FIGHTS = [
 ]
 
 
+# The Ruby Raiders are three at once, for area and random targeting; the
+# clam is one long fight for everything else.
+CARD_ENCOUNTERS = ["SEWER_CLAM_NORMAL", "RUBY_RAIDERS_NORMAL"]
+
+
+def card_jobs() -> list[Job]:
+    """The cards from outside the Ironclad pool, five to a job, in the order
+    the sim lists them. Cards the sim refuses to play are left out."""
+    from sts2ai import _sim
+
+    names = _sim.card_ids()
+    new = names[names.index("ALCHEMIZE"):]
+    refused = set(_sim.unsupported_cards())
+    new = [c for c in new if c not in refused]
+    return [
+        Job(f"cards_{i // 5 + 1:02d}", {"cards"}, [Fight(e) for e in CARD_ENCOUNTERS], cards=new[i : i + 5],
+            advice="Play the new cards whenever they come up: " + ", ".join(new[i : i + 5]) + ".")
+        for i in range(0, len(new), 5)
+    ]
+
+
 def encounter_jobs() -> list[Job]:
     """One job per encounter the sim models, tagged with act and kind."""
     return [
@@ -341,7 +372,7 @@ def encounter_jobs() -> list[Job]:
 
 
 def all_jobs() -> list[Job]:
-    return encounter_jobs() + RELIC_FIGHTS
+    return encounter_jobs() + RELIC_FIGHTS + card_jobs()
 
 
 def send(commands: list[str], quiet: bool = False) -> list[str]:
@@ -456,9 +487,39 @@ def replay_once(path: Path) -> tuple[bool, str]:
     return _replays[path]
 
 
+def card_coverage() -> dict[str, bool]:
+    """Every card seen in a recording, True if some clean recording shows it
+    played (or, for a card that cannot be played, held in hand)."""
+    seen: dict[str, bool] = {}
+    for path in sorted([*DEV.glob("*.jsonl"), *RECORDINGS.glob("*.jsonl")]):
+        records = [json.loads(l) for l in path.read_text().splitlines() if l.strip()]
+        played = {r["id"] for r in records if r.get("t") == "play"}
+        held = {c["id"] for r in records if r.get("t") == "snapshot" for c in r.get("hand", [])}
+        clean = None
+        for card in played | held:
+            if seen.get(card):
+                continue
+            if clean is None:
+                clean = replay_once(path)[0]
+            unplayable = card in held and all(c.get("cost", 0) < 0 for r in records if r.get("t") == "snapshot"
+                                              for c in r.get("hand", []) if c["id"] == card)
+            seen[card] = clean and (card in played or unplayable)
+    return seen
+
+
+_coverage: dict[str, bool] | None = None
+
+
 def status(job: Job) -> str:
     """ok when every fight of the job has a clean recording with the job's
-    relics on, missing when one has none, DIFF otherwise."""
+    relics on, missing when one has none, DIFF otherwise. A card job counts
+    its cards instead: ok once each is verified, else how many are left."""
+    global _coverage
+    if job.cards:
+        if _coverage is None:
+            _coverage = card_coverage()
+        left = [c for c in job.cards if not _coverage.get(c)]
+        return "ok" if not left else f"{len(left)}/{len(job.cards)} left"
     want = set(job.relics)
     worst = "ok"
     for enc in job.fights():
@@ -519,6 +580,8 @@ def fight(enc: str, job: Job, pilot: Pilot | None) -> tuple[bool, str, Path | No
 
 def run_job(job: Job, pilot: Pilot | None, run: Run | None) -> list[tuple[bool, str]]:
     """Set up, run every step, tear down. Returns each fight's result."""
+    global _coverage
+    _coverage = None  # new recordings change what is verified
     print(f"\n=== {job.name}" + (" (yours)" if job.human and pilot else ""))
     if job.relics:
         print(f"    relics:  {', '.join(job.relics)}")

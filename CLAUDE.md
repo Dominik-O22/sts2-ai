@@ -29,6 +29,7 @@ uv run python scripts/record.py --list                  # status per job
 uv run python scripts/record.py hive elite              # jobs matching every term
 uv run python scripts/record.py soul_fysh_boss --redo --repeat 2
 uv run python scripts/record.py --pilot runs/set-3/latest.pt --queue
+uv run python scripts/record.py --pilot runs/set-11/latest.pt --search 128 cards   # verify ported cards
 ```
 
 With `--pilot` the policy plays the fights and the run goes unattended; with
