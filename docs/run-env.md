@@ -177,6 +177,28 @@ other id, so run checkpoints stay remappable.
 - Combat uses the combat sim's own RNG. The run streams the game also draws
   in combat are not advanced.
 
+### Hidden information
+
+The run layer is exact to the game, so a run is deterministic given its
+seed and choices. The policies must not use that: they play on what a
+skilled human could know.
+
+- Allowed: what the game shows, and what a human could track from what they
+  have seen and the public rules (card counting): the draw pile as a
+  multiset, the unknown-room odds, the card rarity offset, the potion drop
+  odds.
+- Not allowed: the seed, stream positions, the run plan (upcoming
+  encounters, events, the relic bags' order), the true draw order, or any
+  lookahead that clones the exact streams.
+- Fights never advance the game's run streams, so combat play cannot steer
+  a run's rolls. Training seeds are fresh every run.
+- Any search (combat's turn search, a future run-level one) resamples: the
+  combat `Forks` already reshuffle the draw pile and roll their own dice.
+- The run observation gets a test: two runs with different seeds and the
+  same visible state encode identically.
+
+The exact streams are for checking the port against real runs.
+
 ### Exactness
 
 The run rolls what the game would roll for the same choices until the first
