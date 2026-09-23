@@ -1,6 +1,7 @@
 //! Vectorized training environments: `n` combats stepped together across
-//! all cores, each resetting to a fresh generated fight (or the next
-//! held-out setup) as soon as it ends. Observations are written into
+//! all cores, each resetting to its next fight as soon as one ends: a fresh
+//! generated fight, the next held-out setup, or, in run mode, the next
+//! fight of a run the slot plays (`forward::Run`). Observations are written into
 //! caller-owned buffers laid out per `encode`, so the Python side can hand
 //! over numpy arrays without copies.
 
@@ -9,8 +10,10 @@ use rayon::prelude::*;
 use crate::combat::{After, Combat, Outcome};
 use crate::encode::{self, N_ACTIONS, N_FLOATS, N_IDS};
 use crate::encounter::{Encounter, Kind};
+use crate::forward::{self, Fought, Next, Run};
 use crate::gen::{act_floor, encounter_of_kind, generate, generate_against, FightSetup, BOSS_FLOOR, LAST_FLOOR};
 use crate::rng::{CombatRngs, Rng};
+use crate::rooms::Random;
 use crate::potion::PotionId;
 use crate::relic::RelicId;
 use crate::types::{Ascension, AscensionLevel};
@@ -36,7 +39,7 @@ impl Default for EnvConfig {
 }
 
 /// What a finished fight looked like, for logging.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct EpisodeEnd {
     pub env: usize,
     pub won: bool,
@@ -46,10 +49,25 @@ pub struct EpisodeEnd {
     /// Potions drunk (or thrown) over the fight.
     pub potions_used: u32,
     pub steps: u32,
+    /// The floor generated for; in run mode, the run's floor.
     pub floor: u32,
     pub encounter: Encounter,
     pub kind: Kind,
     pub reward: f32,
+    /// The run the fight was in, in run mode.
+    pub run: Option<RunFight>,
+}
+
+/// A run fight's place in its run.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RunFight {
+    /// The run's seed index (`RunSlot`).
+    pub seed: u64,
+    /// The act, 0-based.
+    pub act: u32,
+    /// How the run ended, when it ended with this fight: the fight lost,
+    /// the last boss beaten, or the next fight one the sim cannot build.
+    pub end: Option<forward::End>,
 }
 
 /// What a potion kept is worth: about the 16 HP it is worth to the fights
@@ -169,26 +187,95 @@ struct Slot {
     steps: u32,
     rng: Rng,
     resets: usize,
+    /// In run mode, the run whose fight `combat` is.
+    run: Option<RunSlot>,
+}
+
+/// A slot's run, with the chooser making its run decisions. A slot's
+/// `k`-th run is seed index `base + slot + k * n`, so a base seed and a
+/// batch size name every run the batch plays.
+struct RunSlot {
+    run: Run,
+    chooser: Random,
+    asc: Ascension,
+    base: u64,
+    /// The current run's seed index.
+    seed: u64,
+    /// Runs the slot has started.
+    started: u64,
+}
+
+impl RunSlot {
+    fn new(asc: Ascension, base: u64, index: usize) -> Self {
+        let seed = base + index as u64;
+        Self { run: Run::new(&run_seed(seed), asc), chooser: run_chooser(seed), asc, base, seed, started: 1 }
+    }
+
+    /// Writes the fight `setup` started back into the run, now that it is
+    /// over as `combat`, and plays on to the next fight, through as many
+    /// fresh runs as it takes. Returns the next fight and the finished
+    /// one's place in its run (none for the first fight of a slot's first
+    /// run, which follows no fight).
+    fn next_fight(&mut self, setup: &FightSetup, combat: &Combat, index: usize, n: usize) -> (FightSetup, Option<RunFight>) {
+        let mut fought = self.run.fighting().then(|| Fought {
+            won: combat.outcome == Some(Outcome::Won),
+            gold_proportion: self.run.state.end_fight(setup, combat),
+        });
+        let mut report = fought.map(|_| RunFight { seed: self.seed, act: self.run.state.act as u32, end: None });
+        loop {
+            let with_fight = fought.is_some();
+            match self.run.next(fought.take(), &mut self.chooser) {
+                Next::Fight(setup) => return (setup, report),
+                Next::End(end) => {
+                    if let Some(report) = report.as_mut().filter(|_| with_fight) {
+                        report.end = Some(end);
+                    }
+                    self.seed = self.base + index as u64 + self.started * n as u64;
+                    self.started += 1;
+                    self.run = Run::new(&run_seed(self.seed), self.asc);
+                    self.chooser = run_chooser(self.seed);
+                }
+            }
+        }
+    }
+}
+
+/// The game seed of run seed index `seed`.
+fn run_seed(seed: u64) -> String {
+    format!("SIM{seed}")
+}
+
+/// The chooser for run seed index `seed`, on an RNG of its own.
+fn run_chooser(seed: u64) -> Random {
+    Random(Rng::new(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ 0x5EED))
 }
 
 impl Slot {
     /// Start the next fight. One already over before the first decision
     /// (Whispering Earring can win turn 1 on its own) is skipped: there is
-    /// nothing in it to act on.
-    fn reset(&mut self, index: usize, n: usize, cfg: &EnvConfig, fixed: &[FightSetup], hard: &[(Encounter, f32)]) {
+    /// nothing in it to act on. In run mode, returns the finished fight's
+    /// place in its run.
+    fn reset(&mut self, index: usize, n: usize, cfg: &EnvConfig, fixed: &[FightSetup], hard: &[(Encounter, f32)]) -> Option<RunFight> {
+        let mut report = None;
         loop {
-            self.roll(index, n, cfg, fixed, hard);
+            let rolled = self.roll(index, n, cfg, fixed, hard);
+            report = report.or(rolled);
             if !self.combat.is_over() {
-                return;
+                return report;
             }
         }
     }
 
-    fn roll(&mut self, index: usize, n: usize, cfg: &EnvConfig, fixed: &[FightSetup], hard: &[(Encounter, f32)]) {
+    fn roll(&mut self, index: usize, n: usize, cfg: &EnvConfig, fixed: &[FightSetup], hard: &[(Encounter, f32)]) -> Option<RunFight> {
         let acts = act_floor(cfg.min_floor).0..=act_floor(cfg.max_floor).0;
         let weighted: Vec<(Encounter, f32)> =
             hard.iter().copied().filter(|(e, _)| acts.contains(&(e.act().index() as u32))).collect();
-        self.setup = if !fixed.is_empty() {
+        let mut report = None;
+        self.setup = if let Some(run) = &mut self.run {
+            let (setup, fought) = run.next_fight(&self.setup, &self.combat, index, n);
+            report = fought;
+            setup
+        } else if !fixed.is_empty() {
             fixed[(index + self.resets * n) % fixed.len()].clone()
         } else if self.rng.next_float(1.0) < cfg.hard_frac && !weighted.is_empty() {
             // Elites and bosses by weight: the ones the policy loses most.
@@ -220,6 +307,7 @@ impl Slot {
         self.steps = 0;
         self.combat = self.setup.combat(self.rng.next_u64());
         self.base = Baseline::of(&self.combat);
+        report
     }
 
     fn end(&self, index: usize) -> EpisodeEnd {
@@ -236,6 +324,7 @@ impl Slot {
             encounter: self.setup.encounter,
             kind: self.setup.encounter.kind(),
             reward: terminal_reward(c),
+            run: None,
         }
     }
 }
@@ -257,7 +346,7 @@ impl VecEnv {
                 let mut rng = Rng::new(seed.wrapping_mul(0x9E37_79B9).wrapping_add(i as u64));
                 let setup = generate(&mut rng, 1, cfg.asc);
                 let combat = setup.combat(0);
-                Slot { base: Baseline::of(&combat), combat, setup, steps: 0, rng, resets: 0 }
+                Slot { base: Baseline::of(&combat), combat, setup, steps: 0, rng, resets: 0, run: None }
             })
             .collect();
         for (i, s) in slots.iter_mut().enumerate() {
@@ -303,8 +392,23 @@ impl VecEnv {
         let (cfg, fixed, hard) = (self.cfg, &self.fixed, &self.hard);
         for (i, s) in self.slots.iter_mut().enumerate() {
             s.resets = 0;
+            s.run = None;
             s.reset(i, n, &cfg, fixed, hard);
         }
+    }
+
+    /// Run mode: every env plays runs at `asc`, fight after fight, its run
+    /// decisions made at random (`rooms::Random`), a fresh run from the next
+    /// seed index after each ends (`RunSlot`). Starts every env's first run.
+    pub fn set_runs(&mut self, asc: Ascension, base: u64) {
+        self.fixed.clear();
+        let n = self.slots.len();
+        let (cfg, hard) = (self.cfg, &self.hard);
+        self.slots.par_iter_mut().enumerate().for_each(|(i, s)| {
+            s.resets = 0;
+            s.run = Some(RunSlot::new(asc, base, i));
+            s.reset(i, n, &cfg, &[], hard);
+        });
     }
 
     pub fn combat(&self, i: usize) -> &Combat {
@@ -358,11 +462,11 @@ impl VecEnv {
                 s.combat.step(action);
                 s.steps += 1;
                 let over = s.combat.is_over() || s.steps >= cfg.max_steps;
-                let end = over.then(|| s.end(i));
+                let mut end = over.then(|| s.end(i));
                 *r = step_reward(before, &s.combat, s.base, over);
                 *d = over;
-                if over {
-                    s.reset(i, n, &cfg, fixed, hard);
+                if let Some(end) = &mut end {
+                    end.run = s.reset(i, n, &cfg, fixed, hard);
                 }
                 encode::encode(&s.combat, f, ids, m);
                 end
@@ -1002,6 +1106,67 @@ mod tests {
             }
         }
         panic!("no seed revived the Test Subject");
+    }
+
+    /// One run as a run-mode env played it: each fight's setup and the
+    /// combat it ended as, and how the run ended.
+    struct PlayedRun {
+        seed: u64,
+        fights: Vec<(FightSetup, Combat)>,
+        end: forward::End,
+    }
+
+    /// Steps a run-mode env with the first legal action everywhere until
+    /// every slot has finished `runs` runs; returns the runs finished and
+    /// every fight's report.
+    fn play_runs(n: usize, runs: usize) -> (Vec<PlayedRun>, Vec<String>) {
+        let mut env = VecEnv::new(n, 5, EnvConfig::default());
+        env.set_runs(Ascension(10), 100);
+        let (mut floats, mut ids, mut mask) = (vec![0.0; n * N_FLOATS], vec![0; n * N_IDS], vec![false; n * N_ACTIONS]);
+        let (mut rewards, mut dones) = (vec![0.0; n], vec![false; n]);
+        env.observe(&mut floats, &mut ids, &mut mask);
+        let mut open: Vec<Vec<(FightSetup, Combat)>> = vec![vec![]; n];
+        let mut finished = vec![0; n];
+        let (mut played, mut reports) = (vec![], vec![]);
+        while finished.iter().any(|&f| f < runs) {
+            let actions: Vec<i64> = (0..n).map(|i| mask[i * N_ACTIONS..][..N_ACTIONS].iter().position(|&m| m).unwrap() as i64).collect();
+            let before: Vec<(FightSetup, Combat)> = env.slots.iter().map(|s| (s.setup.clone(), s.combat.clone())).collect();
+            for e in env.step(&actions, &mut floats, &mut ids, &mut mask, &mut rewards, &mut dones) {
+                let (setup, mut combat) = before[e.env].clone();
+                combat.step(encode::decode(&combat, actions[e.env] as usize).unwrap());
+                open[e.env].push((setup, combat));
+                let run = e.run.clone().expect("a run fight");
+                assert_eq!((run.seed - 100) % n as u64, e.env as u64, "a slot plays its own seeds");
+                if let Some(end) = run.end {
+                    played.push(PlayedRun { seed: run.seed, fights: std::mem::take(&mut open[e.env]), end });
+                    finished[e.env] += 1;
+                }
+                reports.push(format!("{e:?}"));
+            }
+        }
+        (played, reports)
+    }
+
+    /// Run mode plays runs across fight boundaries as `forward::play` does
+    /// given the same fights: the same run state at every fight (the setup
+    /// carries the deck, relics with their counters, potions, HP, max HP,
+    /// gold and floor) and the same end. A seed plays the same way twice.
+    #[test]
+    fn run_mode_plays_the_forward_run() {
+        let (played, reports) = play_runs(3, 2);
+        assert!(played.len() >= 6);
+        assert!(played.iter().any(|r| r.fights.len() > 1), "some run went past its first fight");
+        for run in &played {
+            let mut fights = run.fights.iter();
+            let forward = forward::play(&run_seed(run.seed), Ascension(10), &mut run_chooser(run.seed), &mut |state: &mut crate::run::RunState, setup: FightSetup| {
+                let (recorded, combat) = fights.next().expect("forward played more fights");
+                assert_eq!(format!("{setup:?}"), format!("{recorded:?}"), "seed {}: fight {}", run.seed, state.floor);
+                Fought { won: combat.outcome == Some(Outcome::Won), gold_proportion: state.end_fight(&setup, combat) }
+            });
+            assert_eq!(forward.end, run.end, "seed {}", run.seed);
+            assert_eq!(forward.fights, run.fights.len(), "seed {}", run.seed);
+        }
+        assert_eq!(reports, play_runs(3, 2).1);
     }
 
     #[test]
