@@ -348,6 +348,9 @@ RELIC_FIGHTS = [
     relic_job("dragon_fruit", ["DRAGON_FRUIT"],
               "Land the killing blow with Hand of Greed: the gold it pays raises max HP by 1.",
               setup=["card HAND_OF_GREED Deck"], teardown=["remove_card HAND_OF_GREED Deck"], human=True),
+    # Not ported yet: this recording is what the port gets checked against.
+    relic_job("toolbox", ["TOOLBOX"],
+              "Before the first draw it offers three colorless cards: take one and play it.", human=True),
     relic_job("elite", ["BOOMING_CONCH", "BLACK_BLOOD"],
               "Elites only for the conch. Win it: Black Blood heals 12 afterwards.",
               encounter="TERROR_EEL_ELITE"),
