@@ -6,9 +6,10 @@ playing the act's elites and boss with the trained policy.
 
 Watching, it polls the mod's `run.json` and prints a ranking for each new
 card reward (`card_reward`), deck pick outside combat (`deck_choice`: rest
-site and event upgrades, shop and event removals) and shop (`shop`, the
-cards for sale with their prices). Picks it cannot price (a transform is
-random) are named and left alone. With `--recording`, the run is a
+site and event upgrades, shop and event removals, and event offers of new
+cards, where each card is priced alone, so "pick 2" means the top two) and
+shop (`shop`, the cards for sale with their prices). Picks from the deck
+it cannot price (a transform is random) are named and left alone. With `--recording`, the run is a
 recorded fight's start and the options are cards to add.
 
 For each option the changed deck plays `repeats` fights against every
@@ -154,6 +155,17 @@ def describe(verdicts: list[Verdict]) -> str:
     return "\n".join(lines)
 
 
+def in_deck(cards: list[dict], deck: list[dict]) -> bool:
+    """Whether every one of `cards` is a card of `deck`, copies counted."""
+    rest = [json.dumps(c, sort_keys=True) for c in deck]
+    for c in cards:
+        key = json.dumps(c, sort_keys=True)
+        if key not in rest:
+            return False
+        rest.remove(key)
+    return True
+
+
 def choices(run: dict) -> dict[str, list[Change] | str]:
     """What `run.json` offers right now, by kind of choice: the changes to
     price, or why a choice is not priced."""
@@ -162,6 +174,10 @@ def choices(run: dict) -> dict[str, list[Change] | str]:
         out["card reward"] = [Change("add", c) for c in run["card_reward"]]
     if pick := run.get("deck_choice"):
         kind = {"TO_UPGRADE": "upgrade", "TO_REMOVE": "remove"}.get(pick.get("prompt"))
+        if kind is None and not in_deck(pick["options"], run["deck"]):
+            # Cards from outside the deck (an event's offer, like Room Full
+            # of Cheese): whatever is picked joins the deck.
+            kind = "add"
         out[f"deck pick {pick.get('prompt')}"] = [Change(kind, c) for c in pick["options"]] if kind else "not priced"
     if shop := run.get("shop"):
         if shop["cards"]:
