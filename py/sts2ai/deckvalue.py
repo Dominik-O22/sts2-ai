@@ -237,7 +237,7 @@ def cmd_check(args) -> None:
     offer (three reward cards, an upgrade, a removal, or keeping it), valued
     by the fights at `--repeats` and by the network, over the same
     encounters. Prints how often the picks match and what the network's
-    pick gives up against the fights' best."""
+    pick gives up against the fights' best, each beside a random pick's."""
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     policy = Policy(Layout.load()).to(device).eval()
     load_policy(args.checkpoint, policy, device)
@@ -249,7 +249,7 @@ def cmd_check(args) -> None:
     starts = played_starts(args.recordings)
     if not starts:
         raise SystemExit("no played-run recordings (pass files to use others)")
-    same = regret = 0.0
+    same = regret = random_regret = 0.0
     for n, start in enumerate(starts):
         deck = start["deck"]
         options = [start] + [{**start, "deck": deck + [{"id": str(c), "up": False}]} for c in rng.choice(REWARD_POOL, 3, replace=False)]
@@ -266,8 +266,10 @@ def cmd_check(args) -> None:
         guessed = pred[:, cols].mean(1).numpy()
         same += int(fought.argmax() == guessed.argmax())
         regret += float(fought.max() - fought[guessed.argmax()])
+        random_regret += float(fought.max() - fought.mean())
         print(f"{start['encounter']:28s} {len(deck):2d} cards  fights pick {int(fought.argmax())} ({fought.max():+.2f})  net pick {int(guessed.argmax())} ({fought[guessed.argmax()]:+.2f})", flush=True)
-    print(f"{len(starts)} decks: same pick {same / len(starts):.0%}, net gives up {regret / len(starts):.3f} a fight on average")
+    n = len(starts)
+    print(f"{n} decks: same pick {same / n:.0%} (random {1 / len(options):.0%}), gives up {regret / n:.3f} a fight on average (random {random_regret / n:.3f})")
 
 
 def main() -> None:
