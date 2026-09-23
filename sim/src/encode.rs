@@ -147,7 +147,8 @@ fn card_key(c: &Combat, k: &Card) -> (usize, bool, i32, usize, i32, i32, bool, u
 /// Hand indices in slot order.
 pub fn hand_order(c: &Combat) -> Vec<usize> {
     let mut idx: Vec<usize> = (0..c.player.hand.len()).collect();
-    idx.sort_by_key(|&i| card_key(c, &c.player.hand[i]));
+    // Cached: a key costs a `Combat::cost`, and the sort is stable either way.
+    idx.sort_by_cached_key(|&i| card_key(c, &c.player.hand[i]));
     idx
 }
 
@@ -161,7 +162,7 @@ pub(crate) fn option_card(c: &Combat, uid: u32) -> Option<&Card> {
 pub fn choice_order(c: &Combat) -> Vec<(u32, &Card)> {
     let Some(p) = &c.pending else { return vec![] };
     let mut opts: Vec<(u32, &Card)> = p.options.iter().filter_map(|&u| option_card(c, u).map(|k| (u, k))).collect();
-    opts.sort_by_key(|(_, k)| card_key(c, k));
+    opts.sort_by_cached_key(|(_, k)| card_key(c, k));
     opts.dedup_by_key(|(_, k)| card_key(c, k));
     opts.truncate(MAX_CHOICES);
     opts
@@ -220,11 +221,14 @@ pub fn decode(c: &Combat, index: usize) -> Option<Action> {
 
 /// Write the legal-action mask.
 pub fn mask(c: &Combat, out: &mut [bool]) {
+    mask_in(c, &hand_order(c), &choice_order(c), out);
+}
+
+/// `mask` with the slot orders already worked out.
+fn mask_in(c: &Combat, hand: &[usize], choices: &[(u32, &Card)], out: &mut [bool]) {
     out.fill(false);
-    let hand = hand_order(c);
-    let choices = choice_order(c);
     for a in c.legal_actions() {
-        if let Some(i) = index_of(c, &hand, &choices, a) {
+        if let Some(i) = index_of(c, hand, choices, a) {
             out[i] = true;
         }
     }
@@ -296,7 +300,9 @@ pub fn encode(c: &Combat, floats: &mut [f32], ids: &mut [i64], mask_out: &mut [b
 
     powers_into(c, CreatureRef::Player, &mut floats[F_PLAYER_POWERS..F_HAND]);
 
-    for (slot, &i) in hand_order(c).iter().enumerate().take(MAX_HAND) {
+    let hand = hand_order(c);
+    let choices = choice_order(c);
+    for (slot, &i) in hand.iter().enumerate().take(MAX_HAND) {
         let k = &p.hand[i];
         let cost = c.cost(k);
         let f = &mut floats[F_HAND + slot * HAND_FEATS..][..HAND_FEATS];
@@ -352,7 +358,7 @@ pub fn encode(c: &Combat, floats: &mut [f32], ids: &mut [i64], mask_out: &mut [b
         }
     }
 
-    for (slot, (_, k)) in choice_order(c).iter().enumerate() {
+    for (slot, (_, k)) in choices.iter().enumerate() {
         let f = &mut floats[F_CHOICES + slot * CHOICE_FEATS..][..CHOICE_FEATS];
         f[0] = 1.0;
         f[1] = k.upgraded as u8 as f32;
@@ -360,7 +366,7 @@ pub fn encode(c: &Combat, floats: &mut [f32], ids: &mut [i64], mask_out: &mut [b
         ids[I_CHOICES + slot] = k.id as i64 + 1;
     }
 
-    mask(c, mask_out);
+    mask_in(c, &hand, &choices, mask_out);
 }
 
 /// Names for the Python side: card ids by vocabulary index.
