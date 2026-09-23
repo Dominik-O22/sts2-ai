@@ -407,6 +407,10 @@ impl RunState {
     /// monster room scales its gold range by it, and at 0 gives no gold and
     /// draws none. The final act's boss gives nothing.
     pub fn combat_rewards(&mut self, room: RoomType, gold_proportion: f32) -> Rewards {
+        // Lasting Candy's `CombatsSeen` counts this fight.
+        if let Some(candy) = self.relic_mut("LASTING_CANDY") {
+            candy.counter += 1;
+        }
         let mut rewards = Rewards::default();
         if room == RoomType::Boss && self.act + 1 >= self.plan.acts.len() {
             return rewards;

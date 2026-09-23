@@ -26,6 +26,7 @@ pub mod run;
 pub mod shop;
 pub mod game_rng;
 pub mod rng;
+pub mod rooms;
 pub mod types;
 
 pub use combat::{Action, Combat, EnemySpec, Outcome, RoomKind, Setup};

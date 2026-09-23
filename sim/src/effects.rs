@@ -124,6 +124,10 @@ const NEOW_RELICS: &[&str] = &[
     "STONE_HUMIDIFIER",
 ];
 
+/// `CurseCardPool` less the curses that are not `CanBeGeneratedByModifiers`,
+/// ordered by id, as Neow's Bones and Sere Talon draw from it.
+const MODIFIER_CURSES: &[&str] = &["CLUMSY", "DEBT", "DECAY", "DOUBT", "GUILTY", "INJURY", "NORMALITY", "REGRET", "SHAME", "WRITHE"];
+
 /// Cards with `CardKeyword.Eternal`, which no screen removes.
 const ETERNAL: &[&str] = &["ASCENDERS_BANE", "BAD_LUCK", "CURSE_OF_THE_BELL", "ENTHRALLED", "FOLLY", "FORBIDDEN_GRIMOIRE", "GREED"];
 
@@ -360,6 +364,16 @@ impl RunState {
             }
             "NEOWS_TORMENT" => self.add_card(DeckCard::new("NEOWS_FURY")),
             "BLOOD_SOAKED_ROSE" => self.add_card(DeckCard::new("ENTHRALLED")),
+            // `SereTalon`: two different curses off the Niche stream, then
+            // three Wishes.
+            "SERE_TALON" => {
+                let mut curses = MODIFIER_CURSES.to_vec();
+                for _ in 0..2 {
+                    let i = self.rngs.run(RunStream::Niche).next_int_in(0, curses.len() as i32) as usize;
+                    self.add_card(DeckCard::new(curses.remove(i)));
+                }
+                (0..3).for_each(|_| self.add_card(DeckCard::new("WISH")));
+            }
             "DISTINGUISHED_CAPE" => {
                 self.lose_max_hp(9);
                 (0..3).for_each(|_| self.add_card(DeckCard::new("APPARITION")));
@@ -420,13 +434,16 @@ impl RunState {
                 offered.push(Offered::Relics(vec![relic]));
             }
             // `NeowsBones`: two of Neow's other relics, shuffled on the
-            // Rewards stream, as rewards. Its curse, off the Niche stream,
-            // is not ported.
+            // Rewards stream, as rewards, then a curse off the Niche stream.
+            // The game draws the curse once the rewards are taken; none of
+            // Neow's relics the port picks up draws on Niche, so drawing it
+            // here comes to the same.
             "NEOWS_BONES" => {
                 let mut relics: Vec<&str> = NEOW_RELICS.to_vec();
                 self.rngs.player(PlayerStream::Rewards).shuffle(&mut relics);
                 offered.push(Offered::Relics(relics[..2].iter().map(|r| r.to_string()).collect()));
-                offered.push(Offered::Unported(id.to_string()));
+                let curse = *self.rngs.run(RunStream::Niche).pick(MODIFIER_CURSES).expect("a curse");
+                self.add_card(DeckCard::new(curse));
             }
             "SCROLL_BOXES" => {
                 let bundles = self.scroll_boxes();

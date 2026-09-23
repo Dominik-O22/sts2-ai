@@ -4,24 +4,33 @@
 //! matched. Runs built through the dev console, whose fights are not their
 //! plan's, are listed and left out of the totals.
 //!
+//! With `--effects` it checks the effect layer too: per run, the floors
+//! whose effects were compared with the record, the first that differed
+//! and why, then every floor not compared, and totals of why.
+//!
 //! ```sh
-//! cargo run --release --example runcheck -- ~/.local/share/SlayTheSpire2/steam/*/modded/profile1/saves/history/*.run
+//! cargo run --release --example runcheck -- [--effects] ~/.local/share/SlayTheSpire2/steam/*/modded/profile1/saves/history/*.run
 //! ```
+use std::collections::BTreeMap;
+
 use serde_json::Value;
 
 use sim::history::{check, eligible};
 
 fn main() {
+    let effects = std::env::args().any(|a| a == "--effects");
     let (mut checked, mut skipped) = (0, 0);
     let (mut floors_total, mut floors_matched, mut rooms_ok) = (0, 0, 0);
-    for path in std::env::args().skip(1) {
+    let (mut compared, mut diverged) = (0, 0);
+    let mut not_compared: BTreeMap<String, usize> = BTreeMap::new();
+    for path in std::env::args().skip(1).filter(|a| a != "--effects") {
         let run: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         let name = path.rsplit('/').next().unwrap();
         if !eligible(&run) {
             skipped += 1;
             continue;
         }
-        let report = check(&run);
+        let report = check(&run, effects);
         if report.off_plan() {
             // Built through the dev console: its fights are not its plan's.
             println!("{name} {}: not its plan's run ({})", run["seed"].as_str().unwrap(), report.room_problem.unwrap());
@@ -41,9 +50,32 @@ fn main() {
             report.floors,
             report.stop
         );
+        if effects {
+            let e = &report.effects;
+            compared += e.checked;
+            diverged += e.divergences.len();
+            let first = e.divergences.first().map_or("none".to_string(), |d| d.clone());
+            println!("  effects: {} floors compared, {} differ; first: {first}", e.checked, e.divergences.len());
+            for d in e.divergences.iter().skip(1) {
+                println!("    also {d}");
+            }
+            for s in &e.skipped {
+                println!("    not compared: {s}");
+                let why = s.split_once(": ").map_or(s.as_str(), |(_, why)| why);
+                *not_compared.entry(why.to_string()).or_default() += 1;
+            }
+        }
     }
     println!(
         "{checked} runs ({skipped} others skipped): {floors_matched} of {floors_total} floors matched before the first unported consumer; rooms match in {rooms_ok}"
     );
+    if effects {
+        let skipped: usize = not_compared.values().sum();
+        println!("effects: {compared} floors compared, {diverged} differ; {skipped} not compared:");
+        let mut reasons: Vec<(&String, &usize)> = not_compared.iter().collect();
+        reasons.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+        for (why, n) in reasons {
+            println!("  {n:4} {why}");
+        }
+    }
 }
-
