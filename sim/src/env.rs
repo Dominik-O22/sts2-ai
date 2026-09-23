@@ -350,20 +350,27 @@ fn scratch() -> (Vec<f32>, Vec<i64>, Vec<bool>) {
     (vec![0.0; N_FLOATS], vec![0; N_IDS], vec![false; N_ACTIONS])
 }
 
-/// FxHash-style mix of an encoding's words in four independent lanes (a
-/// single chain waits on each multiply), then murmur3's finalizer.
+/// FxHash-style mix of an encoding, then murmur3's finalizer. The floats
+/// are mostly zero, so they go in 32-byte chunks and all-zero chunks are
+/// skipped; the others mix in with their position.
 fn row_hash(floats: &[f32], ids: &[i64], mask: &[bool]) -> u64 {
-    const K: u64 = 0x51_7C_C1_B7_27_22_0A_95;
-    let mut lanes = [1u64, 2, 3, 4];
-    let mut mix = |lane: usize, w: u64| lanes[lane] = (lanes[lane].rotate_left(5) ^ w).wrapping_mul(K);
-    for q in floats.chunks(8) {
-        for (lane, p) in q.chunks(2).enumerate() {
-            mix(lane, p.iter().fold(0, |a, x| a << 32 | x.to_bits() as u64));
+    let mut h = 0u64;
+    let mut mix = |w: u64| h = (h.rotate_left(5) ^ w).wrapping_mul(0x51_7C_C1_B7_27_22_0A_95);
+    // A branchless OR, so zero blocks scan at memory speed.
+    let any = |xs: &[f32]| xs.iter().fold(0, |a, x| a | x.to_bits()) != 0;
+    for (b, block) in floats.chunks(64).enumerate() {
+        if !any(block) {
+            continue;
+        }
+        for (n, chunk) in block.chunks(8).enumerate() {
+            if any(chunk) {
+                mix((b * 8 + n) as u64);
+                chunk.chunks(2).for_each(|p| mix(p.iter().fold(0, |a, x| a << 32 | x.to_bits() as u64)));
+            }
         }
     }
-    ids.iter().for_each(|&x| mix(0, x as u64));
-    mask.chunks(8).for_each(|p| mix(1, p.iter().fold(0, |a, &x| a << 8 | x as u64)));
-    let mut h = lanes.iter().fold(0u64, |h, &l| (h.rotate_left(5) ^ l).wrapping_mul(K));
+    ids.iter().for_each(|&x| mix(x as u64));
+    mask.chunks(8).for_each(|p| mix(p.iter().fold(0, |a, &x| a << 8 | x as u64)));
     h ^= h >> 33;
     h = h.wrapping_mul(0xFF51_AFD7_ED55_8CCD);
     h ^= h >> 33;

@@ -15,6 +15,12 @@ use sim::ids::{ALL_CARDS, ALL_MONSTERS};
 use sim::replay::{command, Ids, Replayer, Step};
 use sim::types::Ascension;
 
+/// Forks clone combats with every `Vec` at capacity, so their first moves
+/// reallocate, from every rayon thread at once; glibc's malloc spent a
+/// fifth of the search's CPU on that, mostly waiting on its locks.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 /// A batch of combats. See `sim::env::VecEnv`.
 #[pyclass]
 struct VecEnv {

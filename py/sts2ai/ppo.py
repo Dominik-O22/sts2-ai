@@ -404,17 +404,17 @@ def train(cfg: Config) -> Policy:
                 loss = pg + cfg.value_coef * vl - cfg.entropy * ent
                 if searched is not None:
                     # Runs before the warmup too, weighing nothing, so its
-                    # graph compiles in the first iteration with the rest.
+                    # forward and backward compile in the first iteration
+                    # with the rest.
                     s_floats, s_ids, s_mask, s_target = searched.sample(mb // 8)
                     with autocast:
                         s_logits, _ = net(s_floats, s_ids)
                     logp_all = torch.log_softmax(masked_logits(s_logits.float(), s_mask), dim=1)
                     ce = -(s_target * logp_all).sum(dim=1).mean()
-                    if len(searched) >= cfg.search_warmup:
-                        loss = loss + cfg.search_coef * ce
+                    warm = len(searched) >= cfg.search_warmup
+                    loss = loss + (cfg.search_coef if warm else 0.0) * ce
+                    if warm:
                         losses["search"] += ce.detach()
-                    else:
-                        loss = loss + 0.0 * ce
                 opt.zero_grad(set_to_none=True)
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(policy.parameters(), cfg.max_grad_norm)
