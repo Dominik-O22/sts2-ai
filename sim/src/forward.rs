@@ -161,6 +161,7 @@ impl Run {
                     let mut rng = Rng::new((self.state.rngs.seed as u64) << 8 | self.state.floor as u64);
                     return match self.state.fight_setup(encounter, encounter.monsters(&mut rng)) {
                         Ok(setup) => {
+                            self.state.enemies_created(setup.enemies.len());
                             self.fighting = Some(kind);
                             self.fights += 1;
                             Next::Fight(setup)

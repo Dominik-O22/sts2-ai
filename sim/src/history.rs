@@ -30,6 +30,7 @@
 use serde_json::Value;
 
 use crate::effects::{DeckAction, Offered, RestOption};
+use crate::game_rng::RunStream;
 use crate::encounter::{Act, Encounter};
 use crate::map::{ActMap, PointId, PointType};
 use crate::plan::Unlocks;
@@ -154,6 +155,9 @@ pub fn check(run: &Value, live: bool) -> Report {
         ancient_mismatches: Vec::new(),
     };
     let mut rewards_live = true;
+    // The run's Niche stream, which fights draw on once per enemy created:
+    // lost after a fight whose monsters can add more.
+    let mut niche_live = true;
     let mut previous_had_shop = false;
     let history = run["map_point_history"].as_array().unwrap();
     for (a, floors) in history.iter().enumerate() {
@@ -198,7 +202,11 @@ pub fn check(run: &Value, live: bool) -> Report {
             }
             let streamed = rewards_live;
             let counter = state.rewards().counter;
-
+            let niche_before = (niche_live, state.rngs.run(RunStream::Niche).counter);
+            let monsters = rooms.iter().filter_map(|r| r["monster_ids"].as_array()).flatten();
+            if monsters.filter_map(Value::as_str).any(|m| SUMMONERS.contains(&game_id(m))) {
+                niche_live = false;
+            }
             let walked = (!ended).then(|| follow(&mut state, room, rooms, stats));
             match walked.as_ref().and_then(|w| w.ancient.as_ref()) {
                 Some(Ok(())) => report.ancients += 1,
@@ -223,6 +231,9 @@ pub fn check(run: &Value, live: bool) -> Report {
                 None => Some("the run ended in this fight".to_string()),
                 Some(w) if w.unported.is_some() => w.unported.clone(),
                 _ if !streamed && state.rewards().counter != counter => Some("drew on the lost Rewards stream".into()),
+                _ if !niche_before.0 && state.rngs.run(RunStream::Niche).counter != niche_before.1 + fought(rooms) => {
+                    Some("drew on the lost Niche stream".into())
+                }
                 _ => None,
             };
             if let Some(why) = skip {
@@ -415,6 +426,19 @@ fn remove_card(deck: &mut Vec<DeckCard>, card: &DeckCard) {
     }
 }
 
+/// The monsters that can add enemies to a fight (`CreatureCmd.Add`, and
+/// the powers that call it) or hatch one (Tough Egg), each drawing on the
+/// run's Niche stream where the record does not show it.
+const SUMMONERS: &[&str] = &[
+    "AXEBOT", "FABRICATOR", "FOGMOG", "GREMLIN_MERC", "LIVING_FOG", "OVICOPTER", "PHROG_PARASITE", "THE_OBSCURA", "TOUGH_EGG",
+    "TWO_TAILED_RAT",
+];
+
+/// The enemies a floor's fights started with, as the record lists them.
+fn fought(rooms: &[Value]) -> u32 {
+    rooms.iter().filter_map(|r| r["monster_ids"].as_array()).map(|m| m.len() as u32).sum()
+}
+
 /// An ancient's option as the record keys it: the relic's id, but the
 /// character for Orobas' Sea Glass.
 fn ancient_option(option: &Value) -> String {
@@ -603,6 +627,7 @@ fn follow(state: &mut RunState, room: Room, rooms: &[Value], stats: &Value) -> W
 
     let fight = matches!(room, Room::Combat(..)) || rooms.len() > 1;
     if fight {
+        state.enemies_created(fought(rooms) as usize);
         // Petrified Toad hands a Potion-Shaped Rock over as each fight
         // starts (`BeforeCombatStartLate`), which the record lists with the
         // floor's potions.

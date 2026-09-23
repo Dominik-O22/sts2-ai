@@ -695,6 +695,16 @@ impl RunState {
         bundles
     }
 
+    /// `CombatState.CreateCreature` for a fight's `enemies`: each draws its
+    /// max HP on the run's Niche stream. Summons and Tough Egg's hatchlings
+    /// draw there too; the run layer does not see them, so a fight's play
+    /// never moves the run's streams (docs/run-env.md, Hidden information).
+    pub fn enemies_created(&mut self, enemies: usize) {
+        for _ in 0..enemies {
+            self.rngs.run(RunStream::Niche).next_int(1);
+        }
+    }
+
     /// What entering a room does before anything in it: an ancient's heal
     /// (`AncientEventModel.BeforeEventStarted`: Neow first empties HP, then
     /// the missing HP is healed, four fifths of it at Weary Traveler), then
