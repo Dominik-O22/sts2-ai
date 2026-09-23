@@ -9,7 +9,8 @@
 
 use crate::enchant::{Enchantment, EnchantmentId};
 use crate::combat::Combat;
-use crate::effect::{AttackTargets, CardFilter, Effect, GenPool, Pile, Then};
+use crate::effect::{AttackTargets, CardFilter, Effect, GenPool, Picked, Pile, Then};
+use crate::power::{is_debuff_for_amount, temp_power};
 use crate::ids::{CardId, PowerId};
 use crate::types::{CardRarity, CardType, CreatureRef, Keyword, TargetType, ValueProp};
 
@@ -17,7 +18,17 @@ use crate::types::{CardRarity, CardType, CreatureRef, Keyword, TargetType, Value
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tag {
     Strike,
+    Defend,
 }
+
+/// Cards the sim cannot play faithfully, with the reason. A fight whose deck
+/// holds one is refused (`gen::FightSetup::from_start`) rather than
+/// simulated wrong.
+pub const UNSUPPORTED_CARDS: &[(CardId, &str)] = &[
+    // Splash.cs offers attacks from the other characters' pools, none of
+    // which the sim has.
+    (CardId::Splash, "offers attacks from other characters' card pools"),
+];
 
 #[derive(Debug)]
 pub struct CardDef {
@@ -218,32 +229,35 @@ defs! {
     Nostalgia: 1, Power, Rare, Self_;
     Omnislice: 0, Attack, Uncommon, AnyEnemy;
     Panache: 0, Power, Uncommon, Self_;
-    PanicButton: 0, Skill, Uncommon, Self_;
+    PanicButton: 0, Skill, Uncommon, Self_, kw = [Exhaust];
     PrepTime: 1, Power, Uncommon, Self_;
-    Production: 0, Skill, Uncommon, Self_;
-    Prolong: 0, Skill, Uncommon, Self_;
+    Production: 0, Skill, Uncommon, Self_, kw = [Exhaust];
+    Prolong: 0, Skill, Uncommon, Self_, kw = [Exhaust];
     Prowess: 1, Power, Uncommon, Self_;
-    Purity: 0, Skill, Uncommon, Self_;
-    Rally: 2, Skill, Rare, Self_;
+    Purity: 0, Skill, Uncommon, Self_, kw = [Retain, Exhaust];
+    // MultiplayerOnly (it targets AllAllies): single-player pools and
+    // generation leave it out.
+    Rally: 2, Skill, Rare, Self_, gen = false;
     Rend: 2, Attack, Rare, AnyEnemy;
-    Restlessness: 0, Skill, Uncommon, Self_;
+    Restlessness: 0, Skill, Uncommon, Self_, kw = [Retain];
     RollingBoulder: 3, Power, Rare, Self_;
     Salvo: 1, Attack, Rare, AnyEnemy;
-    Scrawl: 1, Skill, Rare, Self_;
-    SecretTechnique: 0, Skill, Rare, Self_;
-    SecretWeapon: 0, Skill, Rare, Self_;
-    SeekerStrike: 1, Attack, Uncommon, AnyEnemy;
-    Shockwave: 2, Skill, Uncommon, AllEnemies;
+    Scrawl: 1, Skill, Rare, Self_, kw = [Exhaust];
+    SecretTechnique: 0, Skill, Rare, Self_, kw = [Exhaust];
+    SecretWeapon: 0, Skill, Rare, Self_, kw = [Exhaust];
+    SeekerStrike: 1, Attack, Uncommon, AnyEnemy, tags = [Strike];
+    Shockwave: 2, Skill, Uncommon, AllEnemies, kw = [Exhaust];
     Splash: 1, Skill, Uncommon, Self_;
     Stratagem: 1, Power, Uncommon, Self_;
-    TagTeam: 2, Attack, Uncommon, AnyEnemy;
+    // MultiplayerOnly, like Rally.
+    TagTeam: 2, Attack, Uncommon, AnyEnemy, gen = false;
     TheBomb: 2, Skill, Uncommon, Self_;
     TheGambit: 0, Skill, Rare, Self_;
-    ThinkingAhead: 0, Skill, Uncommon, Self_;
+    ThinkingAhead: 0, Skill, Uncommon, Self_, kw = [Exhaust];
     ThrummingHatchet: 1, Attack, Uncommon, AnyEnemy;
-    UltimateDefend: 1, Skill, Uncommon, Self_;
-    UltimateStrike: 1, Attack, Uncommon, AnyEnemy;
-    Volley: -1, Attack, Uncommon, RandomEnemy, x = true;
+    UltimateDefend: 1, Skill, Uncommon, Self_, tags = [Defend];
+    UltimateStrike: 1, Attack, Uncommon, AnyEnemy, tags = [Strike];
+    Volley: 0, Attack, Uncommon, RandomEnemy, x = true;
     Apotheosis: 2, Skill, Special, Self_;
     Apparition: 1, Skill, Special, Self_;
     BrightestFlame: 0, Skill, Special, Self_;
@@ -406,7 +420,7 @@ impl Card {
         let cheaper_when_upgraded = matches!(
             self.id,
             Barricade | BodySlam | Corruption | DarkEmbrace | ExpectAFight | Havoc | Hellraiser | MindBlast
-                | InfernalBlade | Stampede | Unmovable
+                | InfernalBlade | Stampede | Unmovable | Nostalgia | Stratagem
         );
         if self.upgraded && cheaper_when_upgraded {
             c - 1
@@ -448,6 +462,15 @@ impl Card {
         }
         if k == Keyword::Exhaust && self.dupe {
             return false;
+        }
+        // Keywords the upgrade removes or adds (`OnUpgrade`).
+        if self.upgraded {
+            use CardId::*;
+            match (self.id, k) {
+                (Prolong | SecretTechnique | SecretWeapon | ThinkingAhead, Keyword::Exhaust) => return false,
+                (Scrawl, Keyword::Retain) => return true,
+                _ => {}
+            }
         }
         if k == Keyword::Retain && self.retain_added {
             return true;
@@ -493,8 +516,33 @@ impl Card {
         let mut v = match self.id {
             // Not ported yet, group A; the porter deletes this arm.
             Alchemize | Anointed | Automation | BeaconOfHope | BeatDown | BelieveInYou | Bolas | Calamity | Catastrophe | Coordinate | DarkShackles | Discovery | DramaticEntrance | Entropy | Equilibrium | EternalArmor | Fasten | Finesse | Fisticuffs | FlashOfSteel | GangUp | GoldAxe | HandOfGreed | HiddenGem | HuddleUp | Impatience | Intercept | JackOfAllTrades | Jackpot | Knockdown | Lift | MasterOfStrategy | Mayhem | Mimic => d(),
-            // Not ported yet, group B; the porter deletes this arm.
-            Nostalgia | Omnislice | Panache | PanicButton | PrepTime | Production | Prolong | Prowess | Purity | Rally | Rend | Restlessness | RollingBoulder | Salvo | Scrawl | SecretTechnique | SecretWeapon | SeekerStrike | Shockwave | Splash | Stratagem | TagTeam | TheBomb | TheGambit | ThinkingAhead | ThrummingHatchet | UltimateDefend | UltimateStrike | Volley => d(),
+            // Colorless cards the Ironclad can meet outside its pool.
+            Nostalgia | Prolong | Scrawl | SecretTechnique | SecretWeapon | Splash | Stratagem => d(),
+            Omnislice => Vars { damage: pick(8.0, 11.0), ..d() },
+            Panache => Vars { magic: pick(10.0, 14.0), ..d() },
+            // `magic` is the Turns of No Block.
+            PanicButton => Vars { block: pick(30.0, 40.0), magic: 2.0, ..d() },
+            PrepTime => Vars { magic: pick(4.0, 6.0), ..d() },
+            Production => Vars { energy: if up { 3 } else { 2 }, ..d() },
+            Prowess => Vars { magic: pick(1.0, 2.0), ..d() },
+            Purity => Vars { cards: picku(3, 5), ..d() },
+            Rally => Vars { block: pick(12.0, 17.0), ..d() },
+            // CalculationBase plus ExtraDamage per debuff on the target.
+            Rend => Vars { damage: pick(15.0, 18.0), magic: pick(5.0, 8.0), ..d() },
+            Restlessness => Vars { cards: picku(2, 3), energy: if up { 3 } else { 2 }, ..d() },
+            RollingBoulder => Vars { magic: pick(5.0, 10.0), ..d() },
+            Salvo => Vars { damage: pick(12.0, 16.0), ..d() },
+            SeekerStrike => Vars { damage: pick(9.0, 12.0), cards: 3, ..d() },
+            Shockwave => Vars { magic: pick(3.0, 5.0), ..d() },
+            TagTeam => Vars { damage: pick(11.0, 15.0), ..d() },
+            // `magic` is the Turns, `damage` the BombDamage.
+            TheBomb => Vars { damage: pick(40.0, 50.0), magic: 3.0, ..d() },
+            TheGambit => Vars { block: pick(50.0, 75.0), ..d() },
+            ThinkingAhead => Vars { cards: 2, ..d() },
+            ThrummingHatchet => Vars { damage: pick(11.0, 14.0), ..d() },
+            UltimateDefend => Vars { block: pick(11.0, 15.0), ..d() },
+            UltimateStrike => Vars { damage: pick(14.0, 20.0), ..d() },
+            Volley => Vars { damage: pick(10.0, 14.0), ..d() },
             // Not ported yet, group C; the porter deletes this arm.
             Apotheosis | Apparition | BrightestFlame | ByrdSwoop | Caltrops | Clash | Distraction | DualWield | Enlightenment | Entrench | Exterminate | FeedingFrenzy | HelloWorld | MadScience | Maul | Metamorphosis | NeowsFury | Outmaneuver | Peck | Rebound | Relax | RipAndTear | Squash | Stack | ToricToughness | Whistle | Wish | ByrdonisEgg | LanternKey | SpoilsMap | Debris | Void | Shiv | Soul | Fuel | SovereignBlade | MinionDiveBomb | MinionSacrifice | MinionStrike | SweepingGaze => d(),
             Aggression | Barricade | Cascade | Havoc | Hellraiser | InfernalBlade | PrimalForce
@@ -636,8 +684,97 @@ impl Card {
         match self.id {
             // Not ported yet, group A; the porter deletes this arm.
             Alchemize | Anointed | Automation | BeaconOfHope | BeatDown | BelieveInYou | Bolas | Calamity | Catastrophe | Coordinate | DarkShackles | Discovery | DramaticEntrance | Entropy | Equilibrium | EternalArmor | Fasten | Finesse | Fisticuffs | FlashOfSteel | GangUp | GoldAxe | HandOfGreed | HiddenGem | HuddleUp | Impatience | Intercept | JackOfAllTrades | Jackpot | Knockdown | Lift | MasterOfStrategy | Mayhem | Mimic => vec![],
-            // Not ported yet, group B; the porter deletes this arm.
-            Nostalgia | Omnislice | Panache | PanicButton | PrepTime | Production | Prolong | Prowess | Purity | Rally | Rend | Restlessness | RollingBoulder | Salvo | Scrawl | SecretTechnique | SecretWeapon | SeekerStrike | Shockwave | Splash | Stratagem | TagTeam | TheBomb | TheGambit | ThinkingAhead | ThrummingHatchet | UltimateDefend | UltimateStrike | Volley => vec![],
+            Nostalgia => vec![self_power(PowerId::Nostalgia, 1)],
+            // Omnislice.cs: a plain damage call inside an AttackContext, then
+            // what it dealt to every other enemy; see `step`.
+            Omnislice => vec![
+                Effect::Damage { target: t(), amount: v.damage, props: ValueProp::MOVE, dealer: Some(me), card: Some(uid) },
+                step(1),
+            ],
+            Panache => vec![self_power(PowerId::Panache, m)],
+            PanicButton => vec![block(), self_power(PowerId::NoBlock, m)],
+            PrepTime => vec![self_power(PowerId::PrepTime, m)],
+            Production => vec![Effect::GainEnergy { amount: v.energy }],
+            // Prolong.cs: next turn's block is the block you have now.
+            Prolong => vec![self_power(PowerId::BlockNextTurn, c.player.creature.block)],
+            Prowess => vec![self_power(PowerId::Strength, m), self_power(PowerId::Dexterity, m)],
+            // Purity.cs: exhaust up to `cards` from hand, picked first, then
+            // exhausted together.
+            Purity => {
+                let then = Then::Select {
+                    from: Pile::Hand,
+                    filter: CardFilter::Any,
+                    left: v.cards as u8,
+                    optional: true,
+                    done: Picked::Exhaust,
+                };
+                vec![Effect::Choose { from: Pile::Hand, filter: CardFilter::Any, then, can_skip: true }]
+            }
+            // Rally.cs blocks every living player; in single player that is you.
+            Rally => vec![block()],
+            // Rend.cs: 15 + 5 per debuff on the target, counting Strength
+            // loss but not the temporary Strength powers (`ITemporaryPower`).
+            Rend => {
+                let debuffs = c
+                    .creature(t())
+                    .powers
+                    .iter()
+                    .filter(|p| is_debuff_for_amount(p.id, p.amount) && temp_power(p.id).is_none())
+                    .count() as f64;
+                vec![hit(v.damage + v.magic * debuffs, 1, AttackTargets::One(t()))]
+            }
+            // Restlessness.cs: only with nothing else in hand, one draw at a time.
+            Restlessness => {
+                if c.player.hand.is_empty() {
+                    let mut e: Vec<Effect> = (0..v.cards).map(|_| draw(1)).collect();
+                    e.push(Effect::GainEnergy { amount: v.energy });
+                    e
+                } else {
+                    vec![]
+                }
+            }
+            RollingBoulder => vec![self_power(PowerId::RollingBoulder, m)],
+            Salvo => vec![attack(1), self_power(PowerId::RetainHand, 1)],
+            // Scrawl.cs: draw until the hand is full.
+            Scrawl => vec![draw(crate::combat::MAX_HAND.saturating_sub(c.player.hand.len()) as u32)],
+            SecretTechnique => vec![Effect::Choose {
+                from: Pile::DrawTop,
+                filter: CardFilter::Type(CardType::Skill),
+                then: Then::MoveTo(Pile::Hand),
+                can_skip: false,
+            }],
+            SecretWeapon => vec![Effect::Choose {
+                from: Pile::DrawTop,
+                filter: CardFilter::Type(CardType::Attack),
+                then: Then::MoveTo(Pile::Hand),
+                can_skip: false,
+            }],
+            SeekerStrike => vec![attack(1), Effect::ChooseFromRandomDraw { count: v.cards }],
+            Shockwave => c
+                .living_enemies()
+                .flat_map(|i| {
+                    let e = CreatureRef::Enemy(i);
+                    [power(e, PowerId::Weak, m), power(e, PowerId::Vulnerable, m)]
+                })
+                .collect(),
+            // In UNSUPPORTED_CARDS: a fight holding it is never simulated.
+            Splash => vec![],
+            Stratagem => vec![self_power(PowerId::Stratagem, 1)],
+            // TagTeam.cs: its power only replays other players' attacks, so in
+            // single player it sits on the target doing nothing.
+            TagTeam => vec![attack(1), power(t(), PowerId::TagTeam, 1)],
+            TheBomb => vec![Effect::ApplyBomb { turns: m, damage: v.damage as i32 }],
+            TheGambit => vec![block(), self_power(PowerId::TheGambit, 1)],
+            ThinkingAhead => vec![
+                draw(v.cards),
+                Effect::Choose { from: Pile::Hand, filter: CardFilter::Any, then: Then::MoveTo(Pile::DrawTop), can_skip: false },
+            ],
+            // ThrummingHatchet.cs: its return to hand is `BeforeHandDraw`, in
+            // `Combat::start_turn`.
+            ThrummingHatchet => vec![attack(1)],
+            UltimateDefend => vec![block()],
+            UltimateStrike => vec![attack(1)],
+            Volley => vec![hit(v.damage, self.captured_x.max(0) as u32, AttackTargets::RandomOpponent)],
             // Not ported yet, group C; the porter deletes this arm.
             Apotheosis | Apparition | BrightestFlame | ByrdSwoop | Caltrops | Clash | Distraction | DualWield | Enlightenment | Entrench | Exterminate | FeedingFrenzy | HelloWorld | MadScience | Maul | Metamorphosis | NeowsFury | Outmaneuver | Peck | Rebound | Relax | RipAndTear | Squash | Stack | ToricToughness | Whistle | Wish | ByrdonisEgg | LanternKey | SpoilsMap | Debris | Void | Shiv | Soul | Fuel | SovereignBlade | MinionDiveBomb | MinionSacrifice | MinionStrike | SweepingGaze => vec![],
             Aggression => vec![self_power(PowerId::Aggression, 1)],
@@ -910,6 +1047,30 @@ impl Card {
             // Rampage: the growth into `extra_damage` is applied by the
             // combat loop as this step starts.
             (Rampage, 1) => vec![],
+            // Omnislice: the first hit's TotalDamage + OverkillDamage to every
+            // other enemy, unpowered, then the AttackContext closes.
+            (Omnislice, 1) => {
+                let me = CreatureRef::Player;
+                let tgt = target.unwrap();
+                let dealt = c.stats.last_card_hit.filter(|&(u, _)| u == self.uid).map(|(_, n)| n);
+                let mut e: Vec<Effect> = match dealt {
+                    Some(n) => c
+                        .living_enemies()
+                        .map(CreatureRef::Enemy)
+                        .filter(|&r| r != tgt)
+                        .map(|r| Effect::Damage {
+                            target: r,
+                            amount: n as f64,
+                            props: ValueProp::UNPOWERED.or(ValueProp::MOVE),
+                            dealer: Some(me),
+                            card: Some(self.uid),
+                        })
+                        .collect(),
+                    None => vec![],
+                };
+                e.push(Effect::EndAttack { dealer: me, card: Some(self.uid), props: ValueProp::MOVE });
+                e
+            }
             _ => vec![],
         }
     }
