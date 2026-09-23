@@ -989,6 +989,13 @@ impl Combat {
                 let subs = self.apply_power(target, id, amount, applier);
                 self.push_front_all(subs);
             }
+            Effect::ApplyPowerAllEnemies { id, amount, applier } => {
+                let subs: Vec<Effect> = self
+                    .living_enemies()
+                    .map(|i| Effect::ApplyPower { target: CreatureRef::Enemy(i), id, amount, applier })
+                    .collect();
+                self.push_front_all(subs);
+            }
             Effect::RemovePower { target, id } => {
                 self.creature_mut(target).powers.retain(|p| p.id != id);
             }

@@ -1276,13 +1276,10 @@ impl Card {
                     then_add_damage_to: Some(uid),
                 },
             ],
-            Thunderclap => {
-                let mut e = vec![aoe(1)];
-                for i in c.living_enemies() {
-                    e.push(power(CreatureRef::Enemy(i), PowerId::Vulnerable, m));
-                }
-                e
-            }
+            // Thunderclap.cs: the attack first, then `PowerCmd.Apply` over
+            // `HittableEnemies` as they stand after it, so an Axebot that
+            // Stock respawned under the damage is Vulnerable too.
+            Thunderclap => vec![aoe(1), Effect::ApplyPowerAllEnemies { id: PowerId::Vulnerable, amount: m, applier: Some(me) }],
             Tremble => vec![power(t(), PowerId::Vulnerable, m)],
             TrueGrit => {
                 let mut e = vec![block()];

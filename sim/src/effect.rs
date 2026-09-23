@@ -162,6 +162,10 @@ pub enum Effect {
         amount: i32,
         applier: Option<CreatureRef>,
     },
+    /// `PowerCmd.Apply` over `CombatState.HittableEnemies`, read when it
+    /// runs: Thunderclap's damage can respawn an Axebot (Stock) before its
+    /// Vulnerable lands, and the new one is hit too.
+    ApplyPowerAllEnemies { id: PowerId, amount: i32, applier: Option<CreatureRef> },
     /// `PowerCmd.Remove`.
     RemovePower { target: CreatureRef, id: PowerId },
     /// `PowerCmd.TickDownDuration`.
