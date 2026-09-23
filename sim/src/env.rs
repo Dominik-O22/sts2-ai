@@ -11,6 +11,8 @@ use crate::encode::{self, N_ACTIONS, N_FLOATS, N_IDS};
 use crate::encounter::{Encounter, Kind};
 use crate::gen::{act_floor, encounter_of_kind, generate, generate_against, FightSetup, BOSS_FLOOR, LAST_FLOOR};
 use crate::rng::{CombatRngs, Rng};
+use crate::potion::PotionId;
+use crate::relic::RelicId;
 use crate::types::{Ascension, AscensionLevel};
 
 #[derive(Clone, Copy, Debug)]
@@ -67,8 +69,19 @@ pub fn terminal_reward(c: &Combat) -> f32 {
     }
 }
 
+/// The potions the reward prices: a potion the run gets back for free next
+/// fight is worth nothing kept. Delicate Frond refills every empty slot
+/// before each combat and Petrified Toad hands out a Potion-Shaped Rock
+/// (`BeforeCombatStart`, `BeforeCombatStartLate`); Sozu stops both.
 fn potions_held(c: &Combat) -> usize {
-    c.potions.iter().flatten().count()
+    if c.has_relic(RelicId::Sozu) {
+        return c.potions.iter().flatten().count();
+    }
+    if c.has_relic(RelicId::DelicateFrond) {
+        return 0;
+    }
+    let free_rocks = c.has_relic(RelicId::PetrifiedToad);
+    c.potions.iter().flatten().filter(|&&p| !(free_rocks && p == PotionId::PotionShapedRock)).count()
 }
 
 /// What the HP fraction is worth: half a win, except after an act boss.
@@ -911,6 +924,24 @@ mod tests {
             assert!((0..total).all(|k| naive.turn_over(k)), "case {case}: a turn never ended");
         }
         assert!(shared_at_some_point, "no step shared a node between live copies");
+    }
+
+    /// A potion the run gets back next fight is not priced: Petrified
+    /// Toad's rock, and anything under Delicate Frond, unless Sozu stops
+    /// the refill.
+    #[test]
+    fn refilled_potions_are_free() {
+        use crate::relic::Relic;
+        let mut c = generate(&mut Rng::new(4), 8, Ascension(10)).combat(3);
+        c.relics = vec![];
+        c.potions = vec![Some(PotionId::PotionShapedRock), Some(PotionId::FirePotion)];
+        assert_eq!(potions_held(&c), 2);
+        c.relics.push(Relic::new(RelicId::PetrifiedToad));
+        assert_eq!(potions_held(&c), 1, "the Toad's rock comes back");
+        c.relics.push(Relic::new(RelicId::Sozu));
+        assert_eq!(potions_held(&c), 2, "Sozu stops the Toad");
+        c.relics = vec![Relic::new(RelicId::DelicateFrond)];
+        assert_eq!(potions_held(&c), 0, "the Frond refills every slot");
     }
 
     /// Killing a monster that revives at full HP is progress, not a loss.
