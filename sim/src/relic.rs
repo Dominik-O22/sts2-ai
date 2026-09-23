@@ -219,6 +219,7 @@ impl Combat {
                 _ => {}
             }
         }
+        self.stone_cracker();
         // FurCoat.BeforeCombatStart: a marked fight starts every enemy at 1 HP.
         if self.relics.iter().any(|r| r.id == FurCoat && r.counter > 0) {
             for &e in &enemies {
@@ -1125,6 +1126,24 @@ impl Combat {
             out.push(Effect::ApplyPower { target: CreatureRef::Enemy(i), id: PowerId::Strength, amount: 1, applier: None });
         }
         out
+    }
+
+    /// `StoneCracker.AfterRoomEntered`: upgrade 2 random upgradable cards of
+    /// the draw pile for this combat. `StableShuffle` sorts before it
+    /// shuffles, so the pick does not depend on the opening shuffle; uid
+    /// order stands in for the game's sort.
+    fn stone_cracker(&mut self) {
+        if !self.has_relic(RelicId::StoneCracker) {
+            return;
+        }
+        let mut uids: Vec<u32> = self.player.draw.iter().filter(|c| c.upgradable()).map(|c| c.uid).collect();
+        uids.sort_unstable();
+        self.rngs.card_selection.shuffle(&mut uids);
+        uids.truncate(2);
+        for c in self.player.draw.iter_mut().filter(|c| uids.contains(&c.uid)) {
+            c.upgraded = true;
+        }
+        self.stats.cracked = uids;
     }
 
     /// `DelicateFrond.BeforeCombatStart`: fill every empty slot with a random

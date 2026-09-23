@@ -329,6 +329,40 @@ fn adopt_layout(c: &mut Combat, snap: &Value, opening: bool) {
     c.player.draw = draw.into_iter().filter_map(|(_, k)| k).collect();
 }
 
+/// Stone Cracker upgraded random draw pile cards before the opening draw.
+/// The forced shuffle puts hand and draw pile in the same order in game and
+/// sim, so the first snapshot shows the game's picks by position. Move the
+/// sim's upgrades onto them, as long as it made as many: a wrong count is
+/// the port's error and stays a diff.
+fn adopt_cracked(c: &mut Combat, snap: &Value) {
+    let cracked = std::mem::take(&mut c.stats.cracked);
+    let game: Vec<(&str, bool)> = ["hand", "draw"]
+        .iter()
+        .flat_map(|p| snap[*p].as_array().into_iter().flatten())
+        .map(|r| (r["id"].as_str().unwrap_or(""), r["up"].as_bool().unwrap_or(false)))
+        .collect();
+    let p = &mut c.player;
+    let mut sim: Vec<&mut Card> = p.hand.iter_mut().chain(p.draw.iter_mut()).collect();
+    if cracked.is_empty()
+        || sim.len() != game.len()
+        || sim.iter().zip(&game).any(|(k, (id, _))| slug(&format!("{:?}", k.id)) != *id)
+    {
+        return;
+    }
+    let wrong: Vec<usize> =
+        (0..sim.len()).filter(|&i| cracked.contains(&sim[i].uid) && !game[i].1).collect();
+    let missed: Vec<usize> = (0..sim.len()).filter(|&i| game[i].1 && sim[i].upgradable()).collect();
+    if wrong.len() != missed.len() {
+        return;
+    }
+    for i in wrong {
+        sim[i].upgraded = false;
+    }
+    for i in missed {
+        sim[i].upgraded = true;
+    }
+}
+
 /// Results the game rolls and nothing records, which the snapshot shows
 /// once they are in: a card Entropy transformed at random, and a potion
 /// Alchemize procured. Take the snapshot's hand card that the sim cannot
@@ -856,6 +890,7 @@ impl Replayer {
         // having just done so again is undone.
         c.player.creature.hp = fs.hp;
         adopt_layout(&mut c, first_snap, true);
+        adopt_cracked(&mut c, first_snap);
 
         let report = Report { snapshots: 0, actions: 0, divergence: None, reseeds: 0, forced_end: false };
         let known_enemies = c.enemies.len();

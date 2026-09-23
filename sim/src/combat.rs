@@ -294,6 +294,9 @@ pub struct Stats {
     /// Hidden Gem's random pick and the replays it gave, until the next
     /// snapshot shows which card the game chose.
     pub gem_pick: Option<(u32, u32)>,
+    /// Draw pile cards Stone Cracker upgraded at random, until the first
+    /// snapshot shows which ones the game picked.
+    pub cracked: Vec<u32>,
 }
 
 #[derive(Clone, Debug)]

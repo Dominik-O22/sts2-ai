@@ -332,6 +332,8 @@ RELIC_FIGHTS = [
               "On pickup it asks for four cards to remove: take Defends. Every reshuffle adds a Soot.",
               human=True),
     relic_job("very_hot_cocoa", ["VERY_HOT_COCOA"], "Spend the four extra energy on turn 1."),
+    relic_job("stone_cracker", ["STONE_CRACKER"],
+              "Two draw pile cards start the fight upgraded. Go a few turns so both get played."),
     relic_job("elite", ["BOOMING_CONCH", "BLACK_BLOOD"],
               "Elites only for the conch. Win it: Black Blood heals 12 afterwards.",
               encounter="TERROR_EEL_ELITE"),
