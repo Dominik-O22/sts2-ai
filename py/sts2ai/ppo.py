@@ -73,6 +73,12 @@ class Config:
     # score) / `search_temp`; unsearched actions keep theirs. A search that
     # cannot tell moves apart leaves the policy as it was. 0 turns it off.
     search_states: int = 0
+    # Roots are drawn only where the policy's favourite first action leads
+    # the runner-up by at most this much probability. Where it leads by
+    # more, the search's target is the policy's own and trains nothing:
+    # offline, those roots were over 40% of the searched ones and carried
+    # 8 to 16% of the target's divergence from the policy. 1 keeps all.
+    search_margin: float = 0.8
     search_copies: int = 128
     search_top: int = 8
     search_temp: float = 0.05
@@ -81,6 +87,10 @@ class Config:
     # loss waits until `search_warmup` are in, so it does not fit a handful.
     search_buffer: int = 16384
     search_warmup: int = 4096
+    # Wait for each iteration's search instead of letting a slow one run
+    # on through the next iteration (which then starts none): one search
+    # per iteration, at the search's speed.
+    search_sync: bool = False
     eval_every: int = 50
     # Fights per held-out setup at each eval.
     eval_repeats: int = 2
@@ -213,7 +223,8 @@ def start_search(
     stream: torch.cuda.Stream | None,
     go: threading.Event,
 ):
-    """Turn search on `cfg.search_states` random envs with a choice to make.
+    """Turn search on up to `cfg.search_states` random envs with a choice
+    to make and a policy unsure between its top two (`cfg.search_margin`).
     Forks them now, while `envs` holds their states, and returns the rest
     of the work as a function: it plays the copies out and returns the
     roots' observations, masks, and the search's distribution over first
@@ -222,13 +233,16 @@ def start_search(
     so it does not queue behind the update's. Each step of theirs waits
     for `go`."""
     choice = np.flatnonzero(envs.mask.sum(axis=1) > 1)
-    roots = np.random.choice(choice, min(cfg.search_states, len(choice)), replace=False)
+    logits, _ = policy(torch.from_numpy(envs.floats[choice]).to(device), torch.from_numpy(envs.ids[choice]).to(device))
+    logits = masked_logits(logits.float(), torch.from_numpy(envs.mask[choice]).to(device))
+    top2 = torch.softmax(logits, dim=1).topk(2, dim=1).values
+    unsure = np.flatnonzero((top2[:, 0] - top2[:, 1]).cpu().numpy() <= cfg.search_margin)
+    pick = np.random.choice(unsure, min(cfg.search_states, len(unsure)), replace=False)
+    roots, logits = choice[pick], logits[pick].cpu().numpy()
     n = cfg.search_copies
-    logits, _ = policy(torch.from_numpy(envs.floats[roots]).to(device), torch.from_numpy(envs.ids[roots]).to(device))
-    logits = masked_logits(logits.float(), torch.from_numpy(envs.mask[roots]).to(device)).cpu().numpy()
     tops = [np.argsort(-logits[r])[: min(cfg.search_top, int(envs.mask[i].sum()))] for r, i in enumerate(roots)]
     forks = envs.sim.fork([int(i) for i in roots], n, seed=seed)
-    first = np.concatenate([spread(top, n) for top in tops])
+    first = np.concatenate([spread(top, n) for top in tops] or [np.zeros(0, np.int64)])
     floats, ids, mask = envs.floats[roots], envs.ids[roots], envs.mask[roots]
     if stream is not None:
         # The weights were just copied in on this thread's stream.
@@ -294,6 +308,7 @@ def train(cfg: Config) -> Policy:
     # Its batches shrink as copies end their turn, hence dynamic.
     search_net = torch.compile(search_policy, dynamic=True) if searched is not None and net is not policy else search_policy
     pending: Future | None = None
+    searches = 0
     # Cleared while the training rollout runs, which pauses the search: the
     # rollout waits on the GPU and the sim every step and ran three to four
     # times slower beside it, while the update, mostly GPU work, barely
@@ -354,9 +369,12 @@ def train(cfg: Config) -> Policy:
             adv, returns = roll.advantages(last_value.float(), cfg.gamma, cfg.lam)
         search_go.set()
         global_step += cfg.steps * cfg.envs
-        if searched is not None:
+        # A search still running when the rollout ends keeps running, and
+        # this iteration starts none, unless `search_sync`.
+        if searched is not None and (pending is None or cfg.search_sync or pending.done()):
             if pending is not None:
                 searched.add(*pending.result())
+            searches += 1
             search_policy.load_state_dict(policy.state_dict())
             pending = searcher.submit(
                 start_search(search_policy, search_net, device, envs, cfg, seed=cfg.seed * 1_000_003 + it, stream=search_stream, go=search_go)
@@ -446,6 +464,7 @@ def train(cfg: Config) -> Policy:
             writer.add_scalar(f"loss/{k}", v / n_updates, global_step)
         writer.add_scalar("curriculum/max_floor", max_floor, global_step)
         writer.add_scalar("perf/sps", sps, global_step)
+        writer.add_scalar("perf/searches_per_iter", searches / (it - start_iter + 1), global_step)
         if it % 10 == 0 or it == start_iter:
             win = summary.get("win_rate", float("nan"))
             print(

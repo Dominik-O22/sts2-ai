@@ -160,10 +160,12 @@ once there are a few dozen run fights.
 ## Speed
 
 Measured 2026-09-23 on the RTX 5070 Ti (8-core Ryzen 9850X3D) with 1024
-envs x 32 steps, resuming set-11: plain PPO runs about 173k steps/s. With
-the set-11 search (`--search-states 512`, 128 copies) it is about 86k,
-up from 40k; the rollout takes 60 ms, the update 130 to 180 ms, and the
-search about 300 ms, most of it the sim stepping 65k copies.
+envs x 32 steps, resuming set-11: plain PPO runs about 178k steps/s. With
+the set-11 search (`--search-states 512`, 128 copies) it is about 90k,
+up from 39k on the same machine at the same time; the rollout takes 55
+ms, the update 130 to 180 ms, and the search about 250 ms, most of it
+the sim stepping 65k copies. The search is the critical path: the update
+waits on it.
 
 What the search costs depends on how it shares the machine with the rest
 of the iteration:
@@ -178,9 +180,18 @@ of the iteration:
 - Nothing in the update reads a value back per minibatch, so the update
   does not stall on each GPU round trip.
 - Observations cross to the GPU from pinned buffers.
+- The extension allocates with mimalloc: forks clone combats with every
+  `Vec` at capacity, so their first moves reallocate on all threads at
+  once, and glibc's malloc spent a fifth of the search waiting on locks.
+- A copy is hashed (for the row sharing) inside `Forks::step`, while its
+  state is in cache, skipping the all-zero blocks that make up 97% of an
+  encoding.
+
+To profile the sim, `samply record` works once
+`/proc/sys/kernel/perf_event_paranoid` is 1 or lower.
 
 The search at play time (`advise.py --search`, `searcheval`) gets the
-same row sharing; `searcheval` on set-11 went from 9 s to 5 s.
+same row sharing and allocator; its search on set-11 went from 10 s to 4 s.
 
 ## What to watch
 
