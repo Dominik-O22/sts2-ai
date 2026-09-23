@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 import numpy as np
+import torch
 
 from sts2ai import _sim
 
@@ -84,19 +85,26 @@ class End(NamedTuple):
     reward: float
 
 
+def pinned(shape: tuple[int, ...], dtype: torch.dtype) -> np.ndarray:
+    """A zeroed numpy buffer in pinned memory when there is a GPU, so a
+    non-blocking copy to it does not stage through pageable memory."""
+    return torch.zeros(shape, dtype=dtype, pin_memory=torch.cuda.is_available()).numpy()
+
+
 class Envs:
     """`n` combats stepped together. `floats`, `ids`, and `mask` always hold
-    the current observation; `step` overwrites them in place."""
+    the current observation; `step` overwrites them in place, so a
+    non-blocking copy out of them must be done before the next `step`."""
 
     def __init__(self, n: int, seed: int = 0, **config: int):
         self.sim = _sim.VecEnv(n, seed, **config)
         self.layout = Layout.load()
         self.n = n
-        self.floats = np.zeros((n, self.layout.n_floats), np.float32)
-        self.ids = np.zeros((n, self.layout.n_ids), np.int64)
-        self.mask = np.zeros((n, self.layout.n_actions), np.bool_)
-        self.rewards = np.zeros(n, np.float32)
-        self.dones = np.zeros(n, np.bool_)
+        self.floats = pinned((n, self.layout.n_floats), torch.float32)
+        self.ids = pinned((n, self.layout.n_ids), torch.int64)
+        self.mask = pinned((n, self.layout.n_actions), torch.bool)
+        self.rewards = pinned((n,), torch.float32)
+        self.dones = pinned((n,), torch.bool)
         self.sim.observe(self.floats, self.ids, self.mask)
 
     def step(self, actions: np.ndarray) -> list[End]:

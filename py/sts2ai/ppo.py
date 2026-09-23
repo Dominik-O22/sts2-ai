@@ -315,18 +315,19 @@ def train(cfg: Config) -> Policy:
         policy.eval()
         with torch.no_grad():
             for t in range(cfg.steps):
-                floats = torch.from_numpy(envs.floats).to(device)
-                ids = torch.from_numpy(envs.ids).to(device)
-                mask = torch.from_numpy(envs.mask).to(device)
+                # Non-blocking out of pinned buffers: the sync on the
+                # sampled actions below orders them before `envs.step`.
+                floats = roll.floats[t].copy_(torch.from_numpy(envs.floats), non_blocking=True)
+                ids = roll.ids[t].copy_(torch.from_numpy(envs.ids), non_blocking=True)
+                mask = roll.mask[t].copy_(torch.from_numpy(envs.mask), non_blocking=True)
                 with autocast:
                     logits, value = net(floats, ids)
                 dist = torch.distributions.Categorical(logits=masked_logits(logits.float(), mask), validate_args=False)
                 action = dist.sample()
-                roll.floats[t], roll.ids[t], roll.mask[t] = floats, ids, mask
                 roll.actions[t], roll.logp[t], roll.values[t] = action, dist.log_prob(action), value.float()
                 ends = envs.step(action.cpu().numpy())
-                roll.rewards[t] = torch.from_numpy(envs.rewards).to(device)
-                roll.dones[t] = torch.from_numpy(envs.dones).to(device)
+                roll.rewards[t].copy_(torch.from_numpy(envs.rewards), non_blocking=True)
+                roll.dones[t].copy_(torch.from_numpy(envs.dones), non_blocking=True)
                 stats.add(ends)
             floats = torch.from_numpy(envs.floats).to(device)
             ids = torch.from_numpy(envs.ids).to(device)
