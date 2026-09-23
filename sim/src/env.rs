@@ -6,7 +6,7 @@
 
 use rayon::prelude::*;
 
-use crate::combat::{Combat, Outcome, RoomKind};
+use crate::combat::{After, Combat, Outcome};
 use crate::encode::{self, N_ACTIONS, N_FLOATS, N_IDS};
 use crate::encounter::{Encounter, Kind};
 use crate::gen::{act_floor, encounter_of_kind, generate, generate_against, FightSetup, BOSS_FLOOR, LAST_FLOOR};
@@ -53,8 +53,16 @@ pub struct EpisodeEnd {
 }
 
 /// What a potion kept is worth: about the 16 HP it is worth to the fights
-/// ahead, at `hp_weight`.
+/// ahead, at `hp_weight`. Nothing after the run's last fight.
 const POTION_VALUE: f32 = 0.1;
+
+fn potion_value(c: &Combat) -> f32 {
+    if c.after == After::End {
+        0.0
+    } else {
+        POTION_VALUE
+    }
+}
 
 /// Stopgap terminal reward (DESIGN.md, Decision engine): a win is worth 1
 /// plus the HP fraction kept at `hp_weight` and `POTION_VALUE` per unused
@@ -63,7 +71,7 @@ pub fn terminal_reward(c: &Combat) -> f32 {
     match c.outcome {
         Some(Outcome::Won) => {
             let hp = c.player.creature.hp as f32 / c.player.creature.max_hp.max(1) as f32;
-            1.0 + hp_weight(c) * hp + POTION_VALUE * potions_held(c) as f32
+            1.0 + hp_weight(c) * hp + potion_value(c) * potions_held(c) as f32
         }
         _ => -1.0,
     }
@@ -84,15 +92,17 @@ fn potions_held(c: &Combat) -> usize {
     c.potions.iter().flatten().filter(|&&p| !(free_rocks && p == PotionId::PotionShapedRock)).count()
 }
 
-/// What the HP fraction is worth: half a win, except after an act boss.
-/// The Ancient that opens the next act heals all missing HP, or 80% of it
-/// under Weary Traveler (`AncientEventModel.BeforeEventStarted`), so only
-/// the part it leaves counts.
+/// What the HP fraction is worth: half a win, by what follows the fight.
+/// After an act boss the Ancient that opens the next act heals all missing
+/// HP, or 80% of it under Weary Traveler, so only the part it leaves
+/// counts. Under Double Boss the last act's first boss is followed by the
+/// second with no rest, so its HP counts in full; after the run's last
+/// fight it counts for nothing.
 fn hp_weight(c: &Combat) -> f32 {
-    match c.room {
-        RoomKind::Boss if c.asc.has(AscensionLevel::WearyTraveler) => 0.5 * 0.2,
-        RoomKind::Boss => 0.0,
-        _ => 0.5,
+    match c.after {
+        After::Act | After::Boss => 0.5,
+        After::Ancient if c.asc.has(AscensionLevel::WearyTraveler) => 0.5 * 0.2,
+        After::Ancient | After::End => 0.0,
     }
 }
 
@@ -139,7 +149,7 @@ pub fn potential(c: &Combat, base: Baseline) -> f32 {
     }
     let lost = (base.hp - c.player.creature.hp.max(0)) as f32 / c.player.creature.max_hp.max(1) as f32;
     let potions = potions_held(c) as f32 - base.potions as f32;
-    0.5 * (enemy_hp_taken(c) - base.taken) - hp_weight(c) * lost + POTION_VALUE * potions
+    0.5 * (enemy_hp_taken(c) - base.taken) - hp_weight(c) * lost + potion_value(c) * potions
 }
 
 /// The reward for a transition: the potential change, plus the terminal
@@ -929,6 +939,26 @@ mod tests {
     /// A potion the run gets back next fight is not priced: Petrified
     /// Toad's rock, and anything under Delicate Frond, unless Sozu stops
     /// the refill.
+    /// What a won fight leaves is priced by what follows it: in full before
+    /// the last act's second boss, for nothing after the run's last fight.
+    #[test]
+    fn what_follows_prices_what_is_left() {
+        let mut c = generate(&mut Rng::new(4), 8, Ascension(10)).combat(3);
+        c.relics = vec![];
+        c.potions = vec![Some(PotionId::FirePotion), None];
+        c.player.creature.hp = c.player.creature.max_hp / 2;
+        c.outcome = Some(Outcome::Won);
+        let reward = |c: &mut Combat, after| {
+            c.after = after;
+            terminal_reward(c)
+        };
+        let half = 0.5 * c.player.creature.hp as f32 / c.player.creature.max_hp as f32;
+        assert_eq!(reward(&mut c, After::Act), 1.0 + half + 0.1);
+        assert_eq!(reward(&mut c, After::Boss), 1.0 + half + 0.1, "the second boss follows with no rest");
+        assert_eq!(reward(&mut c, After::Ancient), 1.0 + 0.2 * half + 0.1, "the Ancient heals 80% at A10");
+        assert_eq!(reward(&mut c, After::End), 1.0, "nothing is left to spend");
+    }
+
     #[test]
     fn refilled_potions_are_free() {
         use crate::relic::Relic;

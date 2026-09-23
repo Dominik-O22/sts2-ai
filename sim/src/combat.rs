@@ -142,6 +142,23 @@ pub enum RoomKind {
     Boss,
 }
 
+/// What follows a fight in the run, which sets what the HP and potions it
+/// leaves are worth (`env::terminal_reward`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum After {
+    /// More of the act: what is left carries into it.
+    #[default]
+    Act,
+    /// An act boss: the next act's Ancient heals the missing HP, or 80% of
+    /// it under Weary Traveler (`AncientEventModel.BeforeEventStarted`).
+    Ancient,
+    /// The first of the last act's two bosses under Double Boss (A10): the
+    /// second follows with no rest in between (`RunManager`, `RoomSet`).
+    Boss,
+    /// The run's last fight.
+    End,
+}
+
 /// Everything a combat needs from the run.
 #[derive(Clone, Debug)]
 pub struct Setup<'a> {
@@ -345,6 +362,8 @@ pub struct Combat {
     /// The run's relics, with counters updated in place.
     pub relics: Vec<Relic>,
     pub room: RoomKind,
+    /// What follows the fight; `FightSetup::combat` sets it.
+    pub after: After,
     /// Potion slots. Using a potion empties its slot.
     pub potions: Vec<Option<PotionId>>,
     pub script: Script,
@@ -435,6 +454,7 @@ impl Combat {
             stats: Stats::default(),
             relics: setup.relics.to_vec(),
             room: setup.room,
+            after: After::Act,
             potions: setup.potions.to_vec(),
             script,
             shuffle_log,

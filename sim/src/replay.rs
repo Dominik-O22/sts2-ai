@@ -902,6 +902,7 @@ impl Replayer {
             unscripted_shuffles: 0,
         };
         let mut c = Combat::with_script(&fs.as_setup(seed), script);
+        c.after = fs.after;
         // Enemies that start damaged (the start record is taken at the first decision point).
         for (i, e) in enemies.iter().enumerate() {
             if let (Some(hp), true) = (e["hp"].as_i64(), i < c.enemies.len()) {

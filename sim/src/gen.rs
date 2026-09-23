@@ -7,7 +7,7 @@ use serde_json::Value;
 
 use crate::card::{def, Card, COLORLESS_POOL, IRONCLAD_POOL, UNSUPPORTED_CARDS};
 use crate::enchant::{self, Enchantment};
-use crate::combat::{Combat, EnemySpec, RoomKind, Setup};
+use crate::combat::{After, Combat, EnemySpec, RoomKind, Setup};
 use crate::encounter::{Encounter, Kind};
 use crate::ids::{CardId, MonsterId};
 use crate::potion::{self, PotionId};
@@ -65,6 +65,8 @@ pub struct FightSetup {
     pub enemies: Vec<EnemySpec>,
     pub encounter: Encounter,
     pub room: RoomKind,
+    /// What follows the fight in the run (`after`).
+    pub after: After,
     pub asc: Ascension,
     /// Floor the fight was generated for; 0 for recordings.
     pub floor: u32,
@@ -90,7 +92,9 @@ impl FightSetup {
     }
 
     pub fn combat(&self, seed: u64) -> Combat {
-        Combat::with_setup(&self.as_setup(seed))
+        let mut c = Combat::with_setup(&self.as_setup(seed));
+        c.after = self.after;
+        c
     }
 
     /// Read a recorder file's `start` record, and the first snapshot for
@@ -151,6 +155,10 @@ impl FightSetup {
             Some("Boss") => RoomKind::Boss,
             _ => RoomKind::Monster,
         };
+        // Recordings carry the run's floor since 2026-09-23: the last act's
+        // bosses sit on floors 48 and 49 under Double Boss. One without it
+        // is taken as the run's last fight.
+        let second = start["floor"].as_u64().is_none_or(|f| f >= 49);
         Ok(Self {
             deck,
             hp: hp_of("hp"),
@@ -161,6 +169,7 @@ impl FightSetup {
             enemies: specs_for(encounter, &monsters),
             encounter,
             room,
+            after: after(encounter, asc, second),
             asc,
             floor: 0,
             gold,
@@ -526,6 +535,18 @@ pub fn generate(rng: &mut Rng, floor: u32, asc: Ascension) -> FightSetup {
     generate_against(rng, floor, asc, encounter)
 }
 
+/// What follows a fight against `encounter`. The last act's boss room is
+/// doubled under Double Boss (A10); `second` says it is the second of the
+/// two.
+pub fn after(encounter: Encounter, asc: Ascension, second: bool) -> After {
+    match encounter.kind() {
+        Kind::Boss if encounter.act() != crate::encounter::Act::Glory => After::Ancient,
+        Kind::Boss if asc.has(AscensionLevel::DoubleBoss) && !second => After::Boss,
+        Kind::Boss => After::End,
+        _ => After::Act,
+    }
+}
+
 /// `generate` for a chosen encounter, used to oversample elites and bosses.
 pub fn generate_against(rng: &mut Rng, floor: u32, asc: Ascension, encounter: Encounter) -> FightSetup {
     let floor = floor.clamp(1, LAST_FLOOR);
@@ -592,9 +613,17 @@ pub fn generate_against(rng: &mut Rng, floor: u32, asc: Ascension, encounter: En
         relics.push(Relic::new(ancients.swap_remove(i)));
     }
     let slots = if relics.iter().any(|r| r.id == RelicId::PotionBelt) { 4 } else { 2 };
-    // Played runs carry about one potion into an act 1 fight.
+    // Under Double Boss half the last act's boss fights are the second of
+    // the two, fought with what the first left.
+    let second = encounter.kind() == Kind::Boss
+        && encounter.act() == crate::encounter::Act::Glory
+        && asc.has(AscensionLevel::DoubleBoss)
+        && rng.next_int(2) == 0;
+    // Played runs carry about one potion into an act 1 fight; into a second
+    // boss, whatever the first did not drink.
+    let odds = if second { 4 } else { 2 };
     let potions: Vec<Option<PotionId>> =
-        (0..slots).map(|_| if rng.next_int(2) == 0 { Some(*rng.pick(potion::ALL).unwrap()) } else { None }).collect();
+        (0..slots).map(|_| if rng.next_int(odds) == 0 { Some(*rng.pick(potion::ALL).unwrap()) } else { None }).collect();
 
     let room = match encounter.kind() {
         Kind::Elite => RoomKind::Elite,
@@ -604,8 +633,10 @@ pub fn generate_against(rng: &mut Rng, floor: u32, asc: Ascension, encounter: En
     // Events, relics and Ancients raise max HP by roughly this much an act.
     let max_hp = IRONCLAD_HP + (0..act_floor(floor).0).map(|_| 5 + rng.next_int(8) as i32).sum::<i32>();
     // The floor before the boss is a rest site, so boss fights start
-    // rested. Played runs reach elites and other fights at about 65%.
+    // rested; the second of two starts with what the first left. Played
+    // runs reach elites and other fights at about 65%.
     let (lo, span) = match encounter.kind() {
+        Kind::Boss if second => (0.25, 0.5),
         Kind::Boss => (0.7, 0.3),
         _ if floor == 1 => (1.0, 0.0),
         _ => (0.35, 0.6),
@@ -621,6 +652,7 @@ pub fn generate_against(rng: &mut Rng, floor: u32, asc: Ascension, encounter: En
         enemies: encounter.monsters(rng),
         encounter,
         room,
+        after: after(encounter, asc, second),
         asc,
         floor,
         // Roughly what a run is carrying by this floor, before it spends any.
@@ -631,6 +663,23 @@ pub fn generate_against(rng: &mut Rng, floor: u32, asc: Ascension, encounter: En
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Under Double Boss the last act's boss fights are either the first
+    /// of the two, fought rested, or the second, fought with what the first
+    /// left; recordings tell them apart by floor.
+    #[test]
+    fn the_last_acts_bosses_come_in_two() {
+        let mut rng = Rng::new(9);
+        let setups: Vec<FightSetup> = (0..400).map(|_| generate_against(&mut rng, LAST_FLOOR, Ascension(10), Encounter::QueenBoss)).collect();
+        let second: Vec<&FightSetup> = setups.iter().filter(|s| s.after == After::End).collect();
+        assert!((150..250).contains(&second.len()), "{} of 400 second bosses", second.len());
+        assert!(setups.iter().all(|s| matches!(s.after, After::Boss | After::End)));
+        assert!(second.iter().all(|s| s.hp as f32 <= 0.76 * s.max_hp as f32), "a second boss starts worn");
+        assert_eq!(generate_against(&mut rng, LAST_FLOOR, Ascension(9), Encounter::QueenBoss).after, After::End);
+        assert_eq!(generate_against(&mut rng, BOSS_FLOOR, Ascension(10), Encounter::TheKinBoss).after, After::Ancient);
+        assert_eq!(after(Encounter::QueenBoss, Ascension(10), false), After::Boss);
+        assert_eq!(after(Encounter::QueenBoss, Ascension(10), true), After::End);
+    }
 
     #[test]
     fn generated_setups_run_to_completion() {
