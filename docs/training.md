@@ -222,6 +222,33 @@ To profile the sim, `samply record` works once
 The search at play time (`advise.py --search`, `searcheval`) gets the
 same row sharing and allocator; its search on set-11 went from 10 s to 4 s.
 
+## The run policy
+
+The combat policy plays fights; the run policy makes the decisions
+between them (docs/run-env.md, build order step 3).
+
+```
+uv run python -m sts2ai.runtrain runs/ab-attn/latest.pt --run-dir runs/run-1 --minutes 120
+uv run python -m sts2ai.runplay runs/ab-attn/latest.pt --run-policy runs/run-1/latest.pt --show 8
+uv run python -m sts2ai.runplay runs/ab-attn/latest.pt --choices first     # or random: the baselines
+```
+
+- The combat checkpoint is frozen and plays greedily, with no search.
+- `RunLoop` answers every waiting run decision with the run policy
+  (sampled in training, greedy in `runplay`), then takes one combat step
+  for the batch.
+- A run pays at its end: +1 for a win, else floors cleared / 49 - 1. A
+  run stuck on a fight the sim cannot build pays what the value head
+  expected, so it teaches nothing. Each env's decisions are one
+  trajectory; an update takes every decision whose successor is known and
+  runs GAE (gamma 1, `--lam`) over it, bootstrapped from the value of the
+  env's next decision, which waits for the next batch. PPO otherwise as
+  for combat: clipped ratio, entropy bonus, advantages normalized per
+  batch.
+- `runplay --run-policy` prints what the policy picks at each kind of
+  decision (paths by room type, heal or smith, take or skip a card, shop
+  buys), and `--show N` prints N decisions with the odds for each option.
+
 ## What to watch
 
 `episode/win_rate` and `episode/win_boss` (also `win_elite`) in TensorBoard, and

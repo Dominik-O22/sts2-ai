@@ -1,9 +1,10 @@
 # The run environment
 
-Status: steps 1 and 2 built (the effect layer, direct fights, a forward
-run; runs as a `VecEnv` fight source with random run decisions); of step
-4, Neow, the act ancients, shops and all events but three are built;
-steps 3 and 5 are design. The run layer under it (`game_rng.rs`, `map.rs`,
+Status: steps 1 to 3 built (the effect layer, direct fights, a forward
+run; runs as a `VecEnv` fight source; run decisions exposed to Python as
+tokens and a run policy trained on them with PPO); of step 4, Neow, the
+act ancients, shops and all events but three are built; step 5 is
+design. The run layer under it (`game_rng.rs`, `map.rs`,
 `plan.rs`, `run.rs`, `rewards.rs`, `shop.rs`, `pools.rs`, `events.rs`,
 `ancients.rs`) replays real runs floor for floor; `effects.rs`,
 `rooms.rs` and `forward.rs` make it something a policy plays.
@@ -229,22 +230,41 @@ slot's `k`-th run is seed index `base + slot + k * n`, game seed
 `SIM<index>`. `observe`, `step`, `fork`, `fight` and `combat(i)` carry over
 unchanged, so the combat policy, search and PPO code keep working.
 
-In step 2 the run decisions are made in Rust by `rooms::Random`, on an RNG
+`set_runs` takes who makes the run decisions (`RunChoices`, `use_runs(
+choices=...)` in Python). `Random` is `rooms::Random` in Rust, on an RNG
 seeded from the seed index, never the run's streams: uniform over the
 options, a skip counting as one option for card and bundle rewards and
 optional deck picks; relics are all taken, in random order, and potions
-kept. `EpisodeEnd.run` (`End.run` in Python) carries the run's seed index,
-act, deck size and, on the fight that ended the run, how it ended (won,
-died, or stuck on a fight the sim cannot build). `End.floor` is the run's
-floor in run mode.
+kept. `First` is `rooms::First`. `EpisodeEnd.run` (`End.run` in Python)
+carries the run's seed index, act, floor, deck size and, on the fight that
+ended the run, how it ended (won, died, or stuck on a fight the sim cannot
+build). `End.floor` is the run's floor in run mode.
 
-Between fights the run waits at run decisions. `VecEnv` gains
-`step_run(indices, actions)`, which does no combat work: Python calls it in
-a loop until no env sits at a run decision, then makes one combat step for
-the whole batch. A reward screen is several run decisions in a row (relic,
-potion, card, map step, rest, which card to smith), and none of them costs
-an idle combat step or changes the combat batch's shape under
-`torch.compile`.
+Under `Caller` the run waits at its decisions. `run_waiting` lists the
+envs waiting, `observe_run` encodes their decisions (below), and
+`step_run(envs, options)` answers them, playing each run on to its next
+decision or fight without combat work; a fight reached starts and writes
+its combat row, and a run that ends is returned. Python answers until no
+env waits, then makes one combat step for the whole batch
+(`sts2ai.runtrain.RunLoop`). A reward screen is several run decisions in a
+row (relic, potion, card, map step, rest, which card to smith), and none
+of them costs an idle combat step or changes the combat batch's shape. An
+env that still waits sits a combat step out (reward 0, not done), so the
+loop may also answer one round per step (`--no-drain`).
+
+`Run::next` plays a whole segment between fights and cannot stop halfway:
+the rooms call the chooser from deep inside their flows. So a `Caller`
+slot keeps the run as it stood after the last fight, and each answer plays
+the segment again on a copy with the answers so far (`env::Segment`). At
+the first decision with no answer the chooser encodes it and unwinds
+(`std::panic::resume_unwind`, which skips the panic hook), and the copy is
+dropped; once the answers carry the copy to a fight or the run's end, the
+copy is kept. A run with the same seed and choices plays the same way, so
+the replays agree, and a test plays runs under random caller choices and
+replays each through `forward::play` with the same answers and fights.
+A segment of k decisions costs k replays, a few µs each apart from a new
+act's map (0.4 ms), which the replays of the ancient that opens the act
+repeat. A decision with one option or none is taken without asking.
 
 ### Run decisions
 
@@ -272,24 +292,46 @@ be out of purchases.
 
 ### Observation and scoring
 
-Tokens, shared with the token combat model and the deck-value network
-(`sts2ai.deckvalue` already encodes deck, relics and potions this way):
+`sim::runobs` encodes a decision as tokens, each segment a fixed number of
+fixed-width tokens with a presence flag, so a batch is one array
+(`run_layout()` in Python):
 
-- the run: a token per deck card (id, upgraded, enchantment and amount),
-  relic (id, counter), potion; a global token (HP, max HP, gold, floor, act,
-  ascension, the act's boss, the phase, the four `UnknownOdds`);
-- afterstate scoring for the options whose outcome is a known state (take
-  this card, buy this, smith that, remove that, skip): the run encoder
-  values each resulting state and the policy is a softmax over those
-  values. That is DESIGN.md's "argmax over offered options by value", and
-  it needs no option tokens;
-- option tokens only where the outcome is not known: map steps (each
-  carrying the min and max count of every room type on paths through the
-  point, and the distance to the next rest and shop) and event options.
+- a global token: the decision, the room the player is in, the act, the
+  act's boss and second boss, the event or ancient being played; HP, max
+  HP, gold, floor, ascension, the four `UnknownOdds`, the card rarity
+  offset, the potion drop odds, deck size, potion slots and empty ones,
+  card removals bought;
+- a token per deck card (id, upgraded, enchantment and amount, 64 at
+  most), relic (id, counter, flag, 40 at most) and potion held;
+- a token per option (72 at most: a deck pick lists the deck, and a skip):
+  its kind (`OptionKind`: take a card, skip, keep a potion, heal, smith,
+  buy a relic, remove through a deck pick, leave the shop, and so on), the
+  cards, enchantment, relic or potion it names, the price, and for a map
+  step the point's type, the fewest and most of each point type on paths
+  through it to the boss, and the rows to the nearest rest site and shop.
+  An event option carries its event, page and key hashed into 1024
+  buckets, which stays stable as events are ported, and the items its
+  layout drew.
 
-New closed vocabularies (option kinds, events, room types, encounters as
-the act's boss) go into `vocab.txt` under the append-only rule, like every
-other id, so run checkpoints stay remappable.
+Ids index as the combat model and `sts2ai.deckvalue` do (sim id + 1), and
+the relics the combat sim leaves out come after the sim's (`RUN_RELICS`).
+The run's closed vocabularies (decisions, option kinds, rooms, acts,
+events, bosses, those relics) are appended to `vocab.txt`; tests fail
+when a ported event, a boss or an inert relic is missing from them.
+
+Every option has a token in this first cut, including those whose
+outcome is a known state (take this card, buy this, smith that). Scoring
+those by the value of the state they lead to (afterstates: the run
+encoder values each resulting state and the policy is a softmax over the
+values, DESIGN.md's "argmax over offered options by value") can come
+later; it needs the run value head to be good first.
+
+The run policy (`sts2ai.runmodel`) is a small transformer over the tokens
+(128 wide, 2 layers), a pointer head scoring each option token against
+the global token, and a value head on the global token. Its card
+embedding starts from the combat checkpoint's. A run checkpoint records
+its arch, the run layout and the vocabulary, and refuses to load when
+either moved: there is no remap for run checkpoints yet.
 
 ### Fights
 
@@ -333,8 +375,11 @@ skilled human could know.
   a run's rolls. Training seeds are fresh every run.
 - Any search (combat's turn search, a future run-level one) resamples: the
   combat `Forks` already reshuffle the draw pile and roll their own dice.
-- The run observation gets a test: two runs with different seeds and the
-  same visible state encode identically.
+- The run observation has a test
+  (`runobs::tests::hidden_information_does_not_reach_the_encoding`): two
+  runs with different seeds, streams and plans but the same visible state
+  encode identically at a map step, a card reward, a relic reward and a
+  deck pick.
 
 The exact streams are for checking the port against real runs.
 
@@ -421,8 +466,42 @@ the second they are worth nothing.
      time, and nearly all of that is making maps (Numbers that shape it).
      Without maps the rest of a run between fights costs about 6 µs a
      fight.
-3. Run decisions exposed to Python (`step_run`, token rows), the run policy
-   with afterstate scoring, PPO over run decisions.
+3. Done, but for afterstate scoring and a long training run. Run
+   decisions exposed to Python (`step_run`, token rows), the run policy
+   with option tokens for every decision, PPO over run decisions
+   (`sts2ai.runtrain`). ab-attn greedy plays the fights; 256 envs, each
+   env's first 4 runs (1024), on 2026-09-24:
+
+   | Run decisions | floor mean (p10 / p90) | ended in act 1 / 2 / 3 | act 1 elite / boss won | act 2 elite / boss | deck |
+   |---|---|---|---|---|---|
+   | random (`rooms::Random`) | 12.1 (7 / 17) | 94% / 6% / 0% | 57% / 22% | 42% / 0% | 16.9 |
+   | first option (`rooms::First`) | 14.0 (7 / 24) | 81% / 18% / 0% | 71% / 49% | 45% / 19% | 20.7 |
+   | run policy, untrained, greedy | 11.1 (7 / 17) | 99% / 1% / 0% | 46% / 8% | 25% / - | 17.3 |
+   | run policy after 90 s of PPO (64 envs), greedy | 22.0 (13 / 33) | 49% / 49% / 2% | 91% / 59% | 59% / 14% | 24.1 |
+
+   No run won. Three of 1024 ended stuck on a Splash a transform rolled.
+   The 90-second policy already heals at every rest site, never walks
+   into an elite, takes every card offered, keeps 93% of potions and
+   rarely leaves a shop without buying; most of its gain is HP: act 1
+   elites won 91% against 57% at random. A long training run is still to
+   be done.
+
+   Throughput, same machine, nothing else training (runs this short make
+   the rates rough):
+
+   | Envs | Run decisions | combat steps/s | run decisions/s | runs/hour |
+   |---|---|---|---|---|
+   | 256 | random, in Rust | 110k | - | 3.1M |
+   | 256 | policy, drained before each combat step | 22k | 4.5k | 0.76M |
+   | 256 | policy, one round per combat step | 60k | 10.5k | 1.8M |
+   | 1024 | random, in Rust | 211k | - | 5.4M |
+   | 1024 | policy, drained | 55k | 11.3k | 1.7M |
+   | 1024 | policy, one round per step | 104k | 18.6k | 2.8M |
+
+   Draining costs half the combat rate or more: each drain round is a
+   run-policy forward on a small batch, and a reward screen, shop or deck
+   pick chains several. Answering one round per step leaves about one env
+   in twenty idle for a combat step instead, and plays the same runs.
 4. Shops (prices, removal), Neow and the act ancients' options: done.
    Events: done but Tinker Time, Colorful Philosophers and Crystal
    Sphere.

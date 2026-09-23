@@ -10,8 +10,8 @@ Every env plays runs back to back. The numbers cover each env's first
 `--runs-per-env` runs, so long runs count as often as short ones; the
 envs that finish early keep playing, and those extra runs only count
 toward throughput. With a run policy it also prints what the policy
-picks at each kind of decision, and `--show` prints that many decisions
-with the policy's odds for each option.
+picks at each kind of decision, and `--show` prints that many decisions,
+drawn at random, with the policy's odds for each option.
 """
 
 from __future__ import annotations
@@ -75,6 +75,7 @@ class Picks:
 
     def __init__(self, layout: RunLayout, show: int):
         self.L, self.show = layout, show
+        self.rng = np.random.default_rng(0)
         self.picks: dict[str, Counter[str]] = defaultdict(Counter)
 
     def add(self, floats: np.ndarray, ids: np.ndarray, probs: np.ndarray, options: np.ndarray) -> None:
@@ -84,7 +85,8 @@ class Picks:
             i = L.i_options + o * L.option_ids
             kind = NAMES["option"][ids[k, i]]
             self.picks[decision][f"{kind} {NAMES['room'][ids[k, i + 4 + L.option_cards]]}" if kind == "Path" else kind] += 1
-            if self.show > 0:
+            # One decision in fifty, so the ones shown are not all Neow's.
+            if self.show > 0 and self.rng.random() < 0.02:
                 self.show -= 1
                 present = [j for j in range(L.max_options) if floats[k, L.f_options + j * L.option_floats]]
                 print(row_text(L, floats[k], ids[k]))
