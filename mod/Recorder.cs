@@ -218,6 +218,10 @@ public static class Recorder
         {
             ["t"] = "start",
             ["encounter"] = encounter,
+            // Which run and floor, and whether console lines changed the run.
+            ["seed"] = run?.Rng.StringSeed,
+            ["floor"] = run?.TotalFloor,
+            ["scripted"] = Commands.IsScripted(run?.Rng.StringSeed),
             ["room"] = state.Encounter.RoomType.ToString(),
             ["ascension"] = run?.AscensionLevel ?? 0,
             ["max_energy"] = me.MaxEnergy,

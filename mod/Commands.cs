@@ -9,6 +9,10 @@
 //   sts2ai continue                     load the saved run (the Continue button)
 //   sts2ai new_run ASC [SEED] [ACT1]    a new Ironclad run; ACT1 overgrowth|underdocks
 //   sts2ai menu                         back to the main menu (a dead run's way out)
+//
+// A console line other than these marks the run it lands in as scripted
+// (`scripted_seeds.txt`), so tools that want played runs only
+// (scripts/deckstats.py) can leave it out.
 
 using Godot;
 using MegaCrit.Sts2.Core.DevConsole;
@@ -30,6 +34,24 @@ public static class Commands
     private static string Dir => Path.Combine(OS.GetUserDataDir(), "sts2ai");
     private static string CommandFile => Path.Combine(Dir, "commands.txt");
     private static string LogFile => Path.Combine(Dir, "commands.log");
+    private static string ScriptedFile => Path.Combine(Dir, "scripted_seeds.txt");
+    private static HashSet<string>? _scripted;
+
+    /// Whether a console line has changed the run with this seed. Kept in a
+    /// file, so a run continued after a restart stays marked.
+    public static bool IsScripted(string? seed)
+    {
+        _scripted ??= File.Exists(ScriptedFile) ? File.ReadAllLines(ScriptedFile).ToHashSet() : new HashSet<string>();
+        return seed != null && _scripted.Contains(seed);
+    }
+
+    private static void MarkScripted()
+    {
+        string? seed = RunManager.Instance.DebugOnlyGetState()?.Rng.StringSeed;
+        if (seed == null || IsScripted(seed)) return;
+        _scripted!.Add(seed);
+        try { File.AppendAllText(ScriptedFile, seed + "\n"); } catch (IOException) { }
+    }
 
     public static void Poll()
     {
@@ -58,6 +80,7 @@ public static class Commands
                 }
                 else
                 {
+                    MarkScripted();
                     CmdResult r = _console.ProcessCommand(line);
                     outcome = $"{(r.success ? "ok" : "FAIL")} {line}: {r.msg}";
                 }
