@@ -1671,7 +1671,10 @@ impl Combat {
                 let subs = self.procure_random_potion();
                 self.push_front_all(subs);
             }
-            Effect::GainGold { amount } => self.gold += amount,
+            Effect::GainGold { amount } => {
+                let subs = self.relic_gain_gold(amount);
+                self.push_front_all(subs);
+            }
             // EncounterModel.GetNextSlot: a summon with no slot left is
             // simply skipped, which is how Living Fog stops at five bombs.
             Effect::SpawnMonster { id, flags } => {

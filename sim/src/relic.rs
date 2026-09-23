@@ -1058,6 +1058,19 @@ impl Combat {
         out
     }
 
+    /// `PlayerCmd.GainGold`, then `AfterGoldGained`: Dragon Fruit's max HP.
+    pub(crate) fn relic_gain_gold(&mut self, amount: i32) -> Vec<Effect> {
+        if amount <= 0 {
+            return vec![];
+        }
+        self.gold += amount;
+        if self.has_relic(RelicId::DragonFruit) {
+            vec![Effect::GainMaxHp { target: CreatureRef::Player, amount: 1 }]
+        } else {
+            vec![]
+        }
+    }
+
     /// `AfterPotionProcured`: Belt Buckle takes its Dexterity back while a
     /// potion is carried (`used` is its `DexterityApplied`).
     pub(crate) fn relic_after_potion_procured(&mut self) -> Vec<Effect> {
