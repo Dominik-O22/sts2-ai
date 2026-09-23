@@ -3,6 +3,7 @@
 //! `Commands/CardCmd.cs`, `Commands/PowerCmd.cs`.
 
 use std::collections::VecDeque;
+use std::sync::Arc;
 
 use crate::card::{Affliction, Card, Tag, IRONCLAD_POOL};
 use crate::effect::{AttackTargets, CardFilter, Effect, GenPool, Picked, Pile, Then};
@@ -315,7 +316,8 @@ pub struct Combat {
     pub potions: Vec<Option<PotionId>>,
     pub script: Script,
     /// Every shuffle result this combat, top first (the recorder's view).
-    pub shuffle_log: Vec<Vec<(CardId, bool)>>,
+    /// Only the replay reads it, so clones share it until the next shuffle.
+    pub shuffle_log: Arc<Vec<Vec<(CardId, bool)>>>,
     queue: VecDeque<Effect>,
     next_uid: u32,
     /// False during setup, before the first turn starts.
@@ -371,7 +373,7 @@ impl Combat {
                 c
             })
             .collect();
-        let mut shuffle_log = vec![];
+        let mut shuffle_log = Arc::default();
         shuffle_cards(&mut draw, &mut script, &mut rngs.shuffle, &mut shuffle_log);
         apply_shuffle_order(&mut draw, true);
 
@@ -3537,7 +3539,7 @@ fn apply_shuffle_order(cards: &mut Vec<Card>, initial: bool) {
     *cards = top;
 }
 
-fn shuffle_cards(cards: &mut Vec<Card>, script: &mut Script, rng: &mut crate::rng::Rng, log: &mut Vec<Vec<(CardId, bool)>>) {
+fn shuffle_cards(cards: &mut Vec<Card>, script: &mut Script, rng: &mut crate::rng::Rng, log: &mut Arc<Vec<Vec<(CardId, bool)>>>) {
     cards.sort_by_key(|c| (c.id, c.upgraded));
     match script.shuffles.pop_front() {
         Some(order) => {
@@ -3555,7 +3557,7 @@ fn shuffle_cards(cards: &mut Vec<Card>, script: &mut Script, rng: &mut crate::rn
         }
         None => rng.shuffle(cards),
     }
-    log.push(cards.iter().map(|c| (c.id, c.upgraded)).collect());
+    Arc::make_mut(log).push(cards.iter().map(|c| (c.id, c.upgraded)).collect());
 }
 
 /// The cards a `GenPool` draws from: `CardFactory.FilterForCombat` (can be

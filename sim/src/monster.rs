@@ -3,6 +3,8 @@
 //! ported verbatim from its `GenerateMoveStateMachine`, and each move body
 //! from the matching `*Move` method.
 
+use std::sync::Arc;
+
 use crate::effect::{AttackTargets, Effect, Pile};
 use crate::ids::{CardId, MonsterId, PowerId};
 use crate::rng::Rng;
@@ -250,7 +252,9 @@ pub struct Monster {
     pub id: MonsterId,
     pub flags: Flags,
     pub vars: Vars,
-    states: Vec<State>,
+    /// The move graph, shared between clones until a stun or a death blow
+    /// rewrites it.
+    states: Arc<Vec<State>>,
     initial: usize,
     current: usize,
     /// `MonsterMoveStateMachine.StateLog`, move states only.
@@ -276,7 +280,7 @@ impl Monster {
                 stock: flags.stock.map_or(2, i32::from),
                 ..Vars::default()
             },
-            states,
+            states: Arc::new(states),
             initial,
             current: initial,
             log: vec![],
@@ -564,7 +568,7 @@ impl Monster {
     /// the blast's intent.
     pub fn arm_death_blow(&mut self, damage: i32) {
         self.vars.steam_eruption_damage = damage;
-        for st in &mut self.states {
+        for st in Arc::make_mut(&mut self.states) {
             if let State::Move { name: "EXPLODE_MOVE", intents, .. } = st {
                 *intents = vec![Intent::DeathBlow { damage }];
             }
@@ -590,7 +594,7 @@ impl Monster {
     }
 
     fn force_move(&mut self, name: &'static str, intents: Vec<Intent>, follow_up: Option<usize>) {
-        self.states.push(State::Move { name, intents, follow_up, must_perform_once: true });
+        Arc::make_mut(&mut self.states).push(State::Move { name, intents, follow_up, must_perform_once: true });
         let idx = self.states.len() - 1;
         self.current = idx;
         self.performed_current = false;
