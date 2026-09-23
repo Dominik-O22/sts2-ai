@@ -15,7 +15,9 @@ recorded fight's start and the options are cards to add.
 For each option the changed deck plays `repeats` fights against every
 elite of the act and the boss the map shows, greedy, and the options are
 ranked by the mean fight reward (the training reward: a win, plus HP and
-potions kept) against keeping the deck as it is. Every option faces the same enemies. Elites are fought at the run's
+potions kept) against keeping the deck as it is. A deck that already wins
+95% of those leaves every option tied, so then the next act's elites and
+bosses are added, fought at full HP. Every option faces the same enemies. Elites are fought at the run's
 current HP, bosses at full HP (a rest site comes first). The score looks at
 the deck as it stands: it does not plan for the picks and upgrades ahead.
 At 512 fights per encounter two options closer than about 0.03 in value
@@ -89,19 +91,34 @@ def upcoming(act: str, bosses: list[str] | None = None) -> list[tuple[str, int, 
     ]
 
 
+NEXT_ACT = {"Overgrowth": "Hive", "Underdocks": "Hive", "Hive": "Glory"}
+# A deck that wins this share of its act's fights leaves every option tied
+# there, so the next act's fights are added.
+SATURATED = 0.95
+
+
+def horizon(act: str, bosses: list[str] | None, hp: int, max_hp: int, next_act: bool) -> list[tuple[str, int, int]]:
+    """The fights to price a deck on, as (game name, floor, starting HP):
+    the elites of `act` at `hp` and its bosses at `max_hp` (a rest site
+    comes first), and with `next_act` every elite and boss of the act after
+    at `max_hp` (the Ancient that opens it heals)."""
+    fights = [(name, floor, hp if kind == "Elite" else max_hp) for name, floor, kind in upcoming(act, bosses)]
+    if next_act and act in NEXT_ACT:
+        fights += [(name, floor, max_hp) for name, floor, _ in upcoming(NEXT_ACT[act])]
+    return fights
+
+
 @torch.no_grad()
-def fights(policy: Policy, device: torch.device, start: dict, hp: int, max_hp: int, act: str, repeats: int, seed: int) -> list[End]:
-    """`repeats` greedy fights of the run in `start` against each elite (at
-    `hp`) and boss (at `max_hp`, the ones in `start["bosses"]` if given) of
-    `act`, every env's first fight only."""
+def fights(policy: Policy, device: torch.device, start: dict, max_hp: int, encounters: list[tuple[str, int, int]], repeats: int, seed: int) -> list[End]:
+    """`repeats` greedy fights of the run in `start` against each of
+    `encounters` (game name, floor, starting HP), every env's first fight
+    only."""
     ends: list[End] = []
-    for kind, fight_hp in (("Elite", hp), ("Boss", max_hp)):
-        encounters = [(name, floor) for name, floor, k in upcoming(act, start.get("bosses")) if k == kind]
-        if not encounters:
-            continue
-        n = len(encounters) * repeats
+    for fight_hp in sorted({h for _, _, h in encounters}):
+        group = [(name, floor) for name, floor, h in encounters if h == fight_hp]
+        n = len(group) * repeats
         envs = Envs(n, seed=seed)
-        envs.sim.use_run(json.dumps(start), fight_hp, max_hp, encounters, repeats, seed)
+        envs.sim.use_run(json.dumps(start), fight_hp, max_hp, group, repeats, seed)
         envs.sim.observe(envs.floats, envs.ids, envs.mask)
         done = np.zeros(n, bool)
         while not done.all():
@@ -114,28 +131,39 @@ def fights(policy: Policy, device: torch.device, start: dict, hp: int, max_hp: i
     return ends
 
 
+def verdict(change: Change | None, ends: list[End]) -> Verdict:
+    by_enc: dict[str, list[bool]] = defaultdict(list)
+    for e in ends:
+        by_enc[e.encounter].append(e.won)
+    return Verdict(
+        change=change,
+        value=float(np.mean([e.reward for e in ends])),
+        win=float(np.mean([e.won for e in ends])),
+        win_by_encounter={k: float(np.mean(v)) for k, v in by_enc.items()},
+    )
+
+
 def rank(
     policy: Policy, device: torch.device, start: dict, hp: int, max_hp: int, act: str, changes: list[Change], repeats: int = 512, seed: int = 1
-) -> list[Verdict]:
-    """Every change, and keeping the deck, best first. Changes that do the
-    same thing (upgrading one of five Strikes) are tried once."""
+) -> tuple[list[Verdict], list[str]]:
+    """Every change, and keeping the deck, best first, and the acts they
+    were judged on. Changes that do the same thing (upgrading one of five
+    Strikes) are tried once. When the deck as it is wins `SATURATED` of its
+    act's fights, the next act's fights are added."""
     unique = list({json.dumps([c.kind, c.card], sort_keys=True): c for c in changes}.values())
-    verdicts = []
-    for change in [None, *unique]:
-        run = {**start, "deck": change.apply(start["deck"]) if change else start["deck"]}
-        ends = fights(policy, device, run, hp, max_hp, act, repeats, seed)
-        by_enc: dict[str, list[bool]] = defaultdict(list)
-        for e in ends:
-            by_enc[e.encounter].append(e.won)
-        verdicts.append(
-            Verdict(
-                change=change,
-                value=float(np.mean([e.reward for e in ends])),
-                win=float(np.mean([e.won for e in ends])),
-                win_by_encounter={k: float(np.mean(v)) for k, v in by_enc.items()},
-            )
-        )
-    return sorted(verdicts, key=lambda v: -v.value)
+    bosses = start.get("bosses")
+    encounters = horizon(act, bosses, hp, max_hp, next_act=False)
+    keep = verdict(None, fights(policy, device, start, max_hp, encounters, repeats, seed))
+    acts = [act]
+    if keep.win >= SATURATED and act in NEXT_ACT:
+        encounters = horizon(act, bosses, hp, max_hp, next_act=True)
+        keep = verdict(None, fights(policy, device, start, max_hp, encounters, repeats, seed))
+        acts.append(NEXT_ACT[act])
+    verdicts = [keep]
+    for change in unique:
+        run = {**start, "deck": change.apply(start["deck"])}
+        verdicts.append(verdict(change, fights(policy, device, run, max_hp, encounters, repeats, seed)))
+    return sorted(verdicts, key=lambda v: -v.value), acts
 
 
 def describe(verdicts: list[Verdict]) -> str:
@@ -205,7 +233,10 @@ def watch(policy: Policy, device: torch.device, repeats: int, poll: float = 0.5)
                 print(changes, flush=True)
                 continue
             n = repeats if len(changes) <= 4 else repeats // 2
-            print(describe(rank(policy, device, run, run["hp"], run["max_hp"], run["act"], changes, n)), flush=True)
+            verdicts, acts = rank(policy, device, run, run["hp"], run["max_hp"], run["act"], changes, n)
+            if len(acts) > 1:
+                print(f"{acts[0]} is won {SATURATED:.0%}+ as it stands: {acts[1]} added")
+            print(describe(verdicts), flush=True)
         for what in set(seen) - set(now):
             del seen[what]
         time.sleep(poll)
@@ -230,7 +261,9 @@ def main() -> None:
     act = next(a for name, a, _ in _sim.encounters() if name == start["encounter"])
     changes = [Change("add", {"id": c.rstrip("+"), "up": c.endswith("+")}) for c in args.offer.split(",")]
     print(f"{act}, {snap['hp']}/{snap['max_hp']} HP, {len(start['deck'])} cards")
-    print(describe(rank(policy, device, start, snap["hp"], snap["max_hp"], act, changes, args.repeats)))
+    verdicts, acts = rank(policy, device, start, snap["hp"], snap["max_hp"], act, changes, args.repeats)
+    print(f"judged on {' + '.join(acts)}")
+    print(describe(verdicts))
 
 
 if __name__ == "__main__":
