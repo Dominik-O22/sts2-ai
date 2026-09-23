@@ -143,9 +143,13 @@ def describe(verdicts: list[Verdict]) -> str:
     lines = []
     for v in verdicts:
         name = "keep deck" if v.change is None else v.change.label()
-        worst = min(v.win_by_encounter, key=v.win_by_encounter.get)
+        bosses = {k: w for k, w in v.win_by_encounter.items() if k.endswith("Boss")}
+        elites = {k: w for k, w in v.win_by_encounter.items() if not k.endswith("Boss")}
+        worst = min(elites, key=elites.get) if elites else None
         lines.append(
-            f"{name:32s} value {v.value:+.3f} ({v.value - keep.value:+.3f})  wins {v.win:.0%}  worst {worst} {v.win_by_encounter[worst]:.0%}"
+            f"{name:32s} value {v.value:+.3f} ({v.value - keep.value:+.3f})  wins {v.win:.0%}  "
+            + "  ".join(f"{k.removesuffix('Boss')} {w:.0%}" for k, w in sorted(bosses.items()))
+            + (f"  worst elite {worst.removesuffix('Elite')} {elites[worst]:.0%}" if worst else "")
         )
     return "\n".join(lines)
 
