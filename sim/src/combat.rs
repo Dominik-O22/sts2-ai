@@ -193,6 +193,12 @@ pub struct Script {
 /// The parts of `CombatManager.History` that cards and powers read.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Stats {
+    /// HP the enemies have lost to anything, summed over the fight, and
+    /// their HP when it began. Training's reward shaping reads these: a
+    /// monster that dies and comes back (Test Subject, the Waterfall
+    /// Giant's blast) still counts the HP it lost the first time.
+    pub enemy_hp_lost: i64,
+    pub enemy_start_hp: i64,
     /// Cards dropped into the draw pile at a random depth (Beckon). Nothing
     /// records the depth, so the replay harness adopts it from the recording.
     pub random_draw_inserts: u32,
@@ -378,6 +384,7 @@ impl Combat {
             e.max_hp = hp;
             e.hp = hp;
         }
+        c.stats.enemy_start_hp = c.enemies.iter().map(|e| e.creature.hp as i64).sum();
         c.started = true;
         c.galvanize_deck();
         let pre = c.relic_before_combat_start();
@@ -2266,7 +2273,13 @@ impl Combat {
         // Creature.LoseHpInternal: truncate once.
         let mut lost = unblocked.min(CLAMP) as i32;
         let was_alive = c.alive();
+        let before = c.hp;
         c.hp = (c.hp - lost).max(0);
+        // HP a monster really lost; an unkillable bar (the Giant's blast
+        // turn) is not progress.
+        if target != CreatureRef::Player && before < CLAMP as i32 {
+            self.stats.enemy_hp_lost += (before - self.creature(target).hp) as i64;
+        }
         let mut fairy_used = false;
         // A monster's powered hit that got through, from a Paper Cuts owner.
         let paper_cuts = (target == CreatureRef::Player && through && props.is_powered())

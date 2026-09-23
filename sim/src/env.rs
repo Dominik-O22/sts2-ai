@@ -85,9 +85,13 @@ pub struct Baseline {
     hp: i32,
 }
 
+/// Enemy HP lost so far, as a fraction of what the enemies started with.
+/// Counted, not read off the current HP bars: a monster that revives at
+/// full HP would otherwise make its killing blow cost reward, and the
+/// policy learned to leave the Test Subject at 21 HP rather than kill it.
+/// It can pass 1 in a fight with revives or summons.
 fn enemy_hp_taken(c: &Combat) -> f32 {
-    let (hp, max) = c.enemies.iter().fold((0, 0), |(h, m), e| (h + e.creature.hp.max(0), m + e.creature.max_hp));
-    1.0 - hp as f32 / max.max(1) as f32
+    c.stats.enemy_hp_lost as f32 / c.stats.enemy_start_hp.max(1) as f32
 }
 
 impl Baseline {
@@ -96,8 +100,8 @@ impl Baseline {
     }
 }
 
-/// Potential for reward shaping: half the fraction of enemy HP taken
-/// since the baseline, minus the fraction of the player's HP lost at the
+/// Potential for reward shaping: half the enemy HP taken since the
+/// baseline (`enemy_hp_taken`), minus the fraction of the player's HP lost at the
 /// price the terminal reward puts on it.
 /// Zero at the baseline and, by convention, once the fight is over. Each
 /// step is rewarded the change in potential, so a fight's rewards sum to
@@ -516,6 +520,36 @@ mod tests {
             }
         }
         panic!("some fork never ended its turn");
+    }
+
+    /// Killing a monster that revives at full HP is progress, not a loss.
+    #[test]
+    fn killing_a_reviver_raises_the_potential() {
+        let mut rng = Rng::new(2);
+        for seed in 0..50 {
+            let setup = generate_against(&mut rng, 2 * BOSS_FLOOR + BOSS_FLOOR, Ascension(10), Encounter::TestSubjectBoss);
+            let mut c = setup.combat(seed);
+            let base = Baseline::of(&c);
+            c.enemies[0].creature.hp = 1;
+            c.enemies[0].creature.block = 0;
+            let Some(hit) = c.legal_actions().into_iter().find(|a| matches!(a, crate::combat::Action::PlayCard { target: Some(0), .. })) else {
+                continue;
+            };
+            let before = potential(&c, base);
+            c.step(hit);
+            if c.enemies[0].creature.hp > 0 || c.is_over() {
+                continue;
+            }
+            // It gets back up on its own turn, at full HP.
+            while !c.is_over() && c.legal_actions().contains(&crate::combat::Action::EndTurn) && c.enemies[0].creature.hp == 0 {
+                c.step(crate::combat::Action::EndTurn);
+            }
+            if c.enemies[0].creature.hp > 1 {
+                assert!(potential(&c, base) > before, "the kill cost reward");
+                return;
+            }
+        }
+        panic!("no seed revived the Test Subject");
     }
 
     #[test]
