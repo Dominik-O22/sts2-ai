@@ -91,10 +91,11 @@ def policy_decide(policy: RunPolicy, device: torch.device, greedy: bool) -> Deci
 
     @torch.no_grad()
     def decide(_: list[int], floats: np.ndarray, ids: np.ndarray) -> np.ndarray:
-        logits, _ = policy(torch.from_numpy(floats).to(device), torch.from_numpy(ids).to(device))
+        with torch.autocast(device.type, dtype=torch.bfloat16, enabled=device.type == "cuda"):
+            logits, _ = policy(torch.from_numpy(floats).to(device), torch.from_numpy(ids).to(device))
         if greedy:
             return logits.argmax(1).cpu().numpy()
-        return torch.distributions.Categorical(logits=logits).sample().cpu().numpy()
+        return torch.distributions.Categorical(logits=logits, validate_args=False).sample().cpu().numpy()
 
     return decide
 
@@ -213,8 +214,9 @@ def train(combat_path: Path, run_dir: Path, cfg: Config, resume: Path | None) ->
     @torch.no_grad()
     def decide(waiting: list[int], floats: np.ndarray, ids: np.ndarray) -> np.ndarray:
         f, i = torch.from_numpy(floats).to(device), torch.from_numpy(ids).to(device)
-        logits, values = policy(f, i)
-        dist = torch.distributions.Categorical(logits=logits)
+        with loop.autocast:
+            logits, values = policy(f, i)
+        dist = torch.distributions.Categorical(logits=logits, validate_args=False)
         options = dist.sample()
         logp = dist.log_prob(options).cpu().numpy()
         options, values = options.cpu().numpy(), values.cpu().numpy()
@@ -295,8 +297,9 @@ def update(policy: RunPolicy, opt: torch.optim.Optimizer, cfg: Config, trajs: li
     n = len(options)
     for _ in range(cfg.epochs):
         for idx in torch.randperm(n, device=device).split(cfg.minibatch):
-            logits, v = policy(floats[idx], ids[idx])
-            dist = torch.distributions.Categorical(logits=logits)
+            with torch.autocast(device.type, dtype=torch.bfloat16, enabled=device.type == "cuda"):
+                logits, v = policy(floats[idx], ids[idx])
+            dist = torch.distributions.Categorical(logits=logits, validate_args=False)
             logp = dist.log_prob(options[idx])
             a = adv[idx]
             ratio = (logp - old_logp[idx]).exp()

@@ -115,10 +115,18 @@ class RunPolicy(nn.Module):
         """Masked option logits `[B, max_options]` and values `[B]`."""
         L = self.layout
         tokens, absent = self.tokens(floats, ids)
-        x = self.encoder(tokens, src_key_padding_mask=absent)
-        g, options = x[:, 0], x[:, -L.max_options :]
-        logits = self.score_out(torch.relu(self.score_global(g).unsqueeze(1) + self.score_option(options))).squeeze(2)
-        logits = logits.float().masked_fill(absent[:, -L.max_options :], -1e9)
+        # The slots are sized for the largest deck and option list; a batch
+        # uses a few dozen of them. Only the token positions some row uses
+        # go through the encoder, and option logits go back to their slots.
+        used = ~absent.all(0)
+        x = self.encoder(tokens[:, used], src_key_padding_mask=absent[:, used])
+        options_used = used[-L.max_options :]
+        n = int(options_used.sum())
+        g, options = x[:, 0], x[:, x.shape[1] - n :]
+        scores = self.score_out(torch.relu(self.score_global(g).unsqueeze(1) + self.score_option(options))).squeeze(2).float()
+        logits = torch.full((floats.shape[0], L.max_options), -1e9, device=scores.device)
+        logits[:, options_used] = scores
+        logits = logits.masked_fill(absent[:, -L.max_options :], -1e9)
         return logits, self.v(g).squeeze(1).float()
 
     def seed_cards(self, combat: Policy) -> None:
