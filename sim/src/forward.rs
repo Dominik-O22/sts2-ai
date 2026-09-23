@@ -5,9 +5,8 @@
 //! a death. Every decision goes to a `Chooser` (`rooms.rs`), which is where
 //! a run policy plugs in.
 //!
-//! What the port lacks is counted, not an error: events (entered and left
-//! after what laying them out draws) and relic pickups that come back
-//! `Offered::Unported`.
+//! What the port lacks is counted, not an error: events not ported
+//! (entered and left) and relic pickups that come back `Offered::Unported`.
 //! From the first of them that draws on the Rewards stream the run no
 //! longer rolls what the game would (docs/run-env.md, Exactness).
 
@@ -15,6 +14,8 @@ use std::collections::BTreeMap;
 
 use crate::card::UNSUPPORTED_CARDS;
 use crate::effects::Offered;
+use crate::encounter::Encounter;
+use crate::events::EventFight;
 use crate::gen::FightSetup;
 use crate::map::{ActMap, PointId};
 use crate::plan::{select_acts, Unlocks};
@@ -104,6 +105,14 @@ pub enum Next {
     End(End),
 }
 
+/// A fight handed out and not yet fought: a combat room's, or one an event
+/// started, whose rewards are the event's to give.
+#[derive(Clone, Debug)]
+enum Fighting {
+    Room(RoomType),
+    Event(EventFight),
+}
+
 /// A run in progress, stopped between rooms. `next` plays it to its next
 /// fight and hands the fight out, so whoever plays fights (`play` with a
 /// `Fights`, or a `VecEnv` slot over many steps) owns the loop.
@@ -113,8 +122,7 @@ pub struct Run {
     map: ActMap,
     /// The map point to enter next, or, while `fighting`, the fight's.
     point: PointId,
-    /// The room type of the fight handed out and not yet fought.
-    fighting: Option<RoomType>,
+    fighting: Option<Fighting>,
     /// Fights handed out, won or not.
     pub fights: usize,
     /// What the port lacks that the run met, by what, with how often.
@@ -146,14 +154,19 @@ impl Run {
     pub fn next(&mut self, fought: Option<Fought>, chooser: &mut impl Chooser) -> Next {
         assert_eq!(fought.is_some(), self.fighting(), "a fight's result goes with the fight");
         let mut chooser = Playable(chooser);
-        if let (Some(kind), Some(fought)) = (self.fighting.take(), fought) {
+        if let (Some(fighting), Some(fought)) = (self.fighting.take(), fought) {
             if !fought.won || self.state.hp <= 0 {
                 return Next::End(End::Died);
             }
-            self.state.fight_won(kind);
             let mut log = Vec::new();
-            let rewards = self.state.combat_rewards(kind, fought.gold_proportion);
-            self.state.take_rewards(rewards, &mut chooser, &mut log);
+            match fighting {
+                Fighting::Room(kind) => {
+                    self.state.fight_won(kind);
+                    let rewards = self.state.combat_rewards(kind, fought.gold_proportion);
+                    self.state.take_rewards(rewards, &mut chooser, &mut log);
+                }
+                Fighting::Event(fight) => drop(self.state.event_fight_won(&fight, fought.gold_proportion, &mut chooser, &mut log)),
+            }
             if let Some(end) = self.left(log) {
                 return Next::End(end);
             }
@@ -162,30 +175,41 @@ impl Run {
             }
         }
         loop {
-            match self.state.enter(&self.map, self.point) {
-                Room::Combat(kind, encounter) => {
-                    // Enemies rolled from the run's seed and the floor, not
-                    // on the run's streams.
-                    let mut rng = Rng::new((self.state.rngs.seed as u64) << 8 | self.state.floor as u64);
-                    return match self.state.fight_setup(encounter, encounter.monsters(&mut rng)) {
-                        Ok(setup) => {
-                            self.state.enemies_created(setup.enemies.len());
-                            self.fighting = Some(kind);
-                            self.fights += 1;
-                            Next::Fight(setup)
-                        }
-                        Err(why) => Next::End(End::Stuck(why)),
-                    };
-                }
-                room => {
-                    if let Some(end) = self.room(room, &mut chooser) {
-                        return Next::End(end);
-                    }
-                }
+            let fighting = match self.state.enter(&self.map, self.point) {
+                Room::Combat(kind, encounter) => Some((Fighting::Room(kind), encounter)),
+                room => match self.room(room, &mut chooser) {
+                    Err(end) => return Next::End(end),
+                    Ok(fight) => fight.map(|f| (f.encounter, Fighting::Event(f))).map(|(e, f)| (f, e)),
+                },
+            };
+            if let Some((fighting, encounter)) = fighting {
+                return self.hand_out(fighting, encounter);
             }
             if !self.move_on(&mut chooser) {
                 return Next::End(End::Won);
             }
+        }
+    }
+
+    /// Hands a fight out: its enemies rolled from the run's seed and the
+    /// floor, not on the run's streams, and created on the run's Niche
+    /// stream unless an event's layout created them already.
+    fn hand_out(&mut self, fighting: Fighting, encounter: Encounter) -> Next {
+        let mut rng = Rng::new((self.state.rngs.seed as u64) << 8 | self.state.floor as u64);
+        let enemies = match &fighting {
+            Fighting::Event(fight) => fight.enemies(&mut rng),
+            Fighting::Room(_) => encounter.monsters(&mut rng),
+        };
+        match self.state.fight_setup(encounter, enemies) {
+            Ok(setup) => {
+                if !matches!(&fighting, Fighting::Event(f) if f.created) {
+                    self.state.enemies_created(setup.enemies.len());
+                }
+                self.fighting = Some(fighting);
+                self.fights += 1;
+                Next::Fight(setup)
+            }
+            Err(why) => Next::End(End::Stuck(why)),
         }
     }
 
@@ -220,9 +244,11 @@ impl Run {
         *self.unported.entry(what).or_default() += 1;
     }
 
-    /// Plays a room that is not a fight; `Some` if the run ended there.
-    fn room(&mut self, room: Room, chooser: &mut impl Chooser) -> Option<End> {
+    /// Plays a room that is not a combat room: the run's end if it ended
+    /// there, else the fight an event started, if one did.
+    fn room(&mut self, room: Room, chooser: &mut impl Chooser) -> Result<Option<EventFight>, End> {
         let mut log = Vec::new();
+        let mut fight = None;
         match room {
             Room::Combat(..) => unreachable!("fights are handed out"),
             Room::Treasure => {
@@ -232,15 +258,18 @@ impl Run {
             Room::Shop => {
                 self.state.shop_room(chooser, &mut log);
             }
-            Room::Event(name) => {
-                self.state.event_offer(name);
-                self.count(format!("event {name}"));
-            }
+            Room::Event(name) => match self.state.event(name, chooser, &mut log) {
+                Some(visit) => fight = visit.fight,
+                None => self.count(format!("event {name}")),
+            },
             Room::Ancient(name) => {
                 self.state.ancient(name, chooser, &mut log);
             }
         }
-        self.left(log)
+        match self.left(log) {
+            Some(end) => Err(end),
+            None => Ok(fight),
+        }
     }
 
     /// Counts the unported relics a room's `log` met; `Some` if the player

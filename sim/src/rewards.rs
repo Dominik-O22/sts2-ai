@@ -20,6 +20,7 @@ use crate::encounter::Act;
 use crate::game_rng::{GameRng, PlayerStream};
 use crate::plan::{BagRelic, RelicBag, Unlocks};
 use crate::pools::{PoolCard, PoolPotion, PotionRarity, Rarity, COLORLESS_CARDS, IRONCLAD_CARDS, IRONCLAD_POTIONS, SHARED_POTIONS};
+use crate::events::Extra;
 use crate::run::{DeckCard, RoomType, RunState};
 use crate::types::AscensionLevel::{Poverty, Scarcity};
 use crate::types::{Ascension, CardType, RelicRarity};
@@ -360,8 +361,10 @@ pub fn pull_relic_from_back(player_bag: &mut RelicBag, shared_bag: &mut RelicBag
 pub struct Rewards {
     /// The rolled gold, then any a relic adds (Amethyst Aubergine).
     pub gold: Vec<i32>,
-    pub potion: Option<&'static str>,
-    pub relics: Vec<Pulled>,
+    /// The rolled potion, then any an event's fight adds.
+    pub potions: Vec<&'static str>,
+    /// Relics by game id.
+    pub relics: Vec<String>,
     pub cards: Vec<Vec<Offer>>,
 }
 
@@ -372,11 +375,11 @@ impl Rewards {
         for gold in &self.gold {
             parts.push(format!("gold {gold}"));
         }
-        if let Some(potion) = self.potion {
+        for potion in &self.potions {
             parts.push(format!("potion {potion}"));
         }
         for relic in &self.relics {
-            parts.push(format!("relic {}", relic.game_id()));
+            parts.push(format!("relic {relic}"));
         }
         for cards in &self.cards {
             let ids: Vec<String> = cards.iter().map(|o| format!("{}{}", o.id, if o.upgraded { "+" } else { "" })).collect();
@@ -415,6 +418,14 @@ impl RunState {
     /// monster room scales its gold range by it, and at 0 gives no gold and
     /// draws none. The final act's boss gives nothing.
     pub fn combat_rewards(&mut self, room: RoomType, gold_proportion: f32) -> Rewards {
+        self.fight_rewards(room, gold_proportion, None, &[])
+    }
+
+    /// `combat_rewards` with what an event's fight changes: the gold its
+    /// encounter gives in place of the room's (`gold`, a fixed amount, which
+    /// still draws), and its `CombatRoom.ExtraRewards`, populated after the
+    /// room's own and before the relics' hooks.
+    pub fn fight_rewards(&mut self, room: RoomType, gold_proportion: f32, gold: Option<i32>, extra: &[Extra]) -> Rewards {
         // Lasting Candy's `CombatsSeen` counts this fight.
         if let Some(candy) = self.relic_mut("LASTING_CANDY") {
             candy.counter += 1;
@@ -428,7 +439,7 @@ impl RunState {
         let potion = self.potion_odds.roll(room, forced, self.rngs.player(PlayerStream::Rewards));
 
         // `GenerateWithoutOffering`: `Populate` in list order.
-        let (min, max) = gold_range(room, self.ascension);
+        let (min, max) = gold.map_or_else(|| gold_range(room, self.ascension), |g| (g, g));
         let scale = |g: i32| (g as f32 * gold_proportion).round_ties_even() as i32;
         let range = match room {
             RoomType::Monster if gold_proportion <= 0.0 => None,
@@ -439,12 +450,24 @@ impl RunState {
             rewards.gold.push(self.rngs.player(PlayerStream::Rewards).next_int_in(min, max + 1));
         }
         if potion {
-            rewards.potion = Some(create_potion(self.rngs.player(PlayerStream::Rewards)));
+            rewards.potions.push(create_potion(self.rngs.player(PlayerStream::Rewards)));
         }
         let cards = self.card_reward(&CardOptions::for_room(room));
         rewards.cards.push(cards);
         if room == RoomType::Elite {
-            rewards.relics.push(self.relic_reward());
+            let relic = self.relic_reward().game_id();
+            rewards.relics.push(relic);
+        }
+        for reward in extra {
+            match reward {
+                Extra::Relic => {
+                    let relic = self.relic_reward().game_id();
+                    rewards.relics.push(relic);
+                }
+                Extra::Potion => rewards.potions.push(create_potion(self.rngs.player(PlayerStream::Rewards))),
+                Extra::NamedRelic(relic) => rewards.relics.push(relic.clone()),
+                Extra::Card(id) => rewards.cards.push(vec![Offer::new(id)]),
+            }
         }
 
         // `Hook.ModifyRewards`, over the relics in the order they came.
@@ -459,8 +482,10 @@ impl RunState {
                 "AMETHYST_AUBERGINE" => rewards.gold.push(15),
                 "LAVA_ROCK" if room == RoomType::Boss && self.act == 0 && !self.relic_mut("LAVA_ROCK").unwrap().flag => {
                     self.relic_mut("LAVA_ROCK").unwrap().flag = true;
-                    rewards.relics.push(self.relic_reward());
-                    rewards.relics.push(self.relic_reward());
+                    for _ in 0..2 {
+                        let relic = self.relic_reward().game_id();
+                        rewards.relics.push(relic);
+                    }
                 }
                 _ => {}
             }
@@ -539,7 +564,7 @@ impl RunState {
 /// rewards) in ways not ported yet. Holding or taking one ends what the
 /// port can follow.
 pub const UNPORTED_RELICS: &[&str] = &[
-    "BIG_GAME_HUNTER", "BLACK_STAR", "CALLING_BELL", "CAULDRON", "DELICATE_FROND", "DINGY_RUG", "DREAM_CATCHER",
+    "BIG_GAME_HUNTER", "BLACK_STAR", "CALLING_BELL", "CAULDRON", "DELICATE_FROND", "DINGY_RUG",
     "DRIFTWOOD", "GLASS_EYE", "GLITTER", "KALEIDOSCOPE", "LAVA_LAMP", "MASSIVE_SCROLL",
     "ORRERY", "PAELS_TOOTH", "PAELS_WING", "PRISMATIC_GEM", "SEA_GLASS", "TOY_BOX",
     "VAKUU_CARD_SELECTOR", "WHITE_STAR", "WING_CHARM", "WONGOS_MYSTERY_TICKET",

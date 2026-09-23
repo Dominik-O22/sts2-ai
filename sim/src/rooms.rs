@@ -12,10 +12,11 @@
 
 use crate::ancients::AncientOffer;
 use crate::effects::{DeckAction, DeckPick, Offered, RestOption};
+use crate::events::{EventFight, EventOption};
 use crate::map::PointId;
 use crate::rewards::{Offer, Rewards};
 use crate::rng::Rng;
-use crate::run::{DeckCard, RunState};
+use crate::run::{DeckCard, RoomType, RunState};
 use crate::shop::{Item, Shop, Slot, Ware};
 
 /// One decision, with what it chooses among.
@@ -42,11 +43,20 @@ pub enum Decision<'a> {
     Deck { action: DeckAction, cards: &'a [usize], optional: bool },
     /// A ware to buy; past the end leaves the shop.
     Shop(&'a [Ware]),
+    /// One of the options an event (a class name) lays out, the ones it
+    /// lets the player choose.
+    Event { event: &'static str, options: &'a [EventOption] },
 }
 
 /// Makes the run's decisions: an index into what the decision lists.
 pub trait Chooser {
     fn choose(&mut self, run: &RunState, decision: Decision<'_>) -> usize;
+}
+
+impl<C: Chooser + ?Sized> Chooser for &mut C {
+    fn choose(&mut self, run: &RunState, decision: Decision<'_>) -> usize {
+        (**self).choose(run, decision)
+    }
 }
 
 /// Takes the first option every time: the first path, relic, card, bundle
@@ -79,6 +89,7 @@ impl Chooser for Random {
             Decision::Ancient(relics) => relics.len(),
             Decision::Deck { cards, optional, .. } => cards.len() + optional as usize,
             Decision::Shop(wares) => wares.len() + 1,
+            Decision::Event { options, .. } => options.len(),
         };
         self.0.next_int(options.max(1))
     }
@@ -151,12 +162,11 @@ impl RunState {
     /// automatic.
     pub fn take_rewards(&mut self, rewards: Rewards, chooser: &mut impl Chooser, log: &mut Vec<Offered>) {
         if !rewards.relics.is_empty() {
-            let relics = rewards.relics.iter().map(|r| r.game_id()).collect();
-            self.settle(vec![Offered::Relics(relics)], chooser, log);
+            self.settle(vec![Offered::Relics(rewards.relics)], chooser, log);
         }
         let mut cards = rewards.cards;
         cards.iter_mut().for_each(|c| self.upgrade_by_eggs(c));
-        let potions = rewards.potion.map(|p| Offered::Potions(vec![p.to_string()]));
+        let potions = (!rewards.potions.is_empty()).then(|| Offered::Potions(rewards.potions.iter().map(|p| p.to_string()).collect()));
         self.settle(potions.into_iter().chain(cards.into_iter().map(Offered::Cards)).collect(), chooser, log);
         rewards.gold.into_iter().for_each(|gold| self.gain_gold(gold));
     }
@@ -236,6 +246,31 @@ impl RunState {
             if stocked {
                 let pickup = self.buy(shop, slot, 0);
                 self.settle(pickup, chooser, log);
+            }
+        }
+    }
+
+    /// What winning an event's fight gives (`gold_proportion` as for any
+    /// fight): a monster room's rewards with the event's added
+    /// (`CombatRoom.ExtraRewards`), or, for Battleworn Dummy, which gives
+    /// none, what the event does as it resumes: a potion reward, two random
+    /// upgrades on the event's stream, or a relic off the front of the bag,
+    /// unless the dummy ran out the clock (escaped, so no gold share).
+    /// Returns the gold rolled, if any.
+    pub fn event_fight_won(&mut self, fight: &EventFight, gold_proportion: f32, chooser: &mut impl Chooser, log: &mut Vec<Offered>) -> Option<i32> {
+        self.fight_won(RoomType::Monster);
+        match fight.dummy {
+            None => {
+                let rewards = self.fight_rewards(RoomType::Monster, gold_proportion, fight.gold, &fight.extra);
+                let gold = (!rewards.gold.is_empty()).then(|| rewards.gold.iter().sum());
+                self.take_rewards(rewards, chooser, log);
+                gold
+            }
+            Some(_) if gold_proportion <= 0.0 => None,
+            Some(setting) => {
+                let offered = self.dummy_beaten(setting);
+                self.settle(offered, chooser, log);
+                None
             }
         }
     }

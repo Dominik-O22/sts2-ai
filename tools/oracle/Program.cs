@@ -278,6 +278,211 @@ switch (args[0])
         }
         break;
     }
+    // events: one new singleplayer Ironclad run per stdin line `SEED
+    // ASCENSION ACT EVENT SETUP... : CHOICE...`, fully unlocked, in act ACT
+    // (0-based), set up by SETUP: `+CARD` adds a card (`+CARD+` upgraded),
+    // `-CARD` removes the first of its id, `gold=N`, `hp=N` and `maxhp=N`
+    // set those, `relic=ID` hands a relic over without its pickup and
+    // `potion=ID` puts a potion in the first empty slot. Then the event
+    // begins (`EventModel.BeginEvent`) and each CHOICE, an index into the
+    // open options of the page shown (modulo their count), is chosen;
+    // choices past the last take the first open option. Deck picks and
+    // card screens take from the front, every reward is taken. Prints the
+    // line as a `run` header, each page as `page` and its options' keys
+    // past the event's id (`INITIAL.GORGE`, `!` after a locked one), then
+    // `fight ENCOUNTER EXTRA...` if an option started a fight (which
+    // stops there), then `end` and the player as `obtain` prints it, with
+    // the event's own stream's counter last.
+    case "events":
+    {
+        LoadModelDb();
+        RunOutsideTheGame();
+        CardSelectCmd.PushSelector(new FrontSelector());
+        var harmony = new HarmonyLib.Harmony("oracle-events");
+        harmony.Patch(typeof(EventModel).GetMethod("EnterCombatWithoutExitingEvent", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic, [typeof(EncounterModel), typeof(IReadOnlyList<MegaCrit.Sts2.Core.Rewards.Reward>), typeof(bool)]),
+            prefix: new HarmonyLib.HarmonyMethod(typeof(GodotStubs).GetMethod("RecordFight")));
+        // An option looks its title up in the tables, which are not loaded;
+        // every key counts as there.
+        harmony.Patch(typeof(MegaCrit.Sts2.Core.Localization.LocString).GetMethod("Exists", [typeof(string), typeof(string)]),
+            prefix: new HarmonyLib.HarmonyMethod(typeof(GodotStubs).GetMethod("Yes")));
+        harmony.Patch(typeof(MegaCrit.Sts2.Core.Localization.LocString).GetMethod("GetRawText", Type.EmptyTypes),
+            prefix: new HarmonyLib.HarmonyMethod(typeof(GodotStubs).GetMethod("NoText")));
+        // No player is the local one, so the events skip their Godot nodes.
+        harmony.Patch(typeof(MegaCrit.Sts2.Core.Context.LocalContext).GetMethod("IsMe", [typeof(Player)]),
+            prefix: new HarmonyLib.HarmonyMethod(typeof(GodotStubs).GetMethod("No")));
+        // A few events shake the screen or play a sound without checking
+        // that the game's nodes are there: stand-ins that do nothing.
+        GodotStubs.Game = (MegaCrit.Sts2.Core.Nodes.NGame)System.Runtime.CompilerServices.RuntimeHelpers.GetUninitializedObject(typeof(MegaCrit.Sts2.Core.Nodes.NGame));
+        GodotStubs.Audio = (MegaCrit.Sts2.Core.Audio.Debug.NDebugAudioManager)System.Runtime.CompilerServices.RuntimeHelpers.GetUninitializedObject(typeof(MegaCrit.Sts2.Core.Audio.Debug.NDebugAudioManager));
+        harmony.Patch(typeof(MegaCrit.Sts2.Core.Nodes.NGame).GetProperty("Instance")!.GetGetMethod(), prefix: new HarmonyLib.HarmonyMethod(typeof(GodotStubs).GetMethod("StandInGame")));
+        harmony.Patch(typeof(MegaCrit.Sts2.Core.Audio.Debug.NDebugAudioManager).GetProperty("Instance")!.GetGetMethod(), prefix: new HarmonyLib.HarmonyMethod(typeof(GodotStubs).GetMethod("StandInAudio")));
+        harmony.Patch(typeof(MegaCrit.Sts2.Core.Nodes.NGame).GetProperty("CurrentRunNode")!.GetGetMethod(), prefix: new HarmonyLib.HarmonyMethod(typeof(GodotStubs).GetMethod("NoRunNode")));
+        foreach (var name in new[] { "ScreenShake", "ScreenRumble", "ScreenShakeTrauma" })
+        {
+            harmony.Patch(typeof(MegaCrit.Sts2.Core.Nodes.NGame).GetMethod(name), prefix: new HarmonyLib.HarmonyMethod(typeof(GodotStubs).GetMethod("Skip")));
+        }
+        harmony.Patch(typeof(MegaCrit.Sts2.Core.Audio.Debug.NDebugAudioManager).GetMethod("Play"), prefix: new HarmonyLib.HarmonyMethod(typeof(GodotStubs).GetMethod("NoSound")));
+        harmony.Patch(typeof(MegaCrit.Sts2.Core.Audio.Debug.NDebugAudioManager).GetMethod("Stop"), prefix: new HarmonyLib.HarmonyMethod(typeof(GodotStubs).GetMethod("Skip")));
+        // A purchase tells the other players, of which there are none.
+        GodotStubs.Rewards = (MegaCrit.Sts2.Core.Multiplayer.Game.RewardSynchronizer)System.Runtime.CompilerServices.RuntimeHelpers.GetUninitializedObject(typeof(MegaCrit.Sts2.Core.Multiplayer.Game.RewardSynchronizer));
+        harmony.Patch(typeof(RunManager).GetProperty("RewardSynchronizer")!.GetGetMethod(), prefix: new HarmonyLib.HarmonyMethod(typeof(GodotStubs).GetMethod("StandInRewards")));
+        foreach (var name in new[] { "SyncLocalGoldLost", "SyncLocalObtainedRelic" })
+        {
+            harmony.Patch(typeof(MegaCrit.Sts2.Core.Multiplayer.Game.RewardSynchronizer).GetMethod(name), prefix: new HarmonyLib.HarmonyMethod(typeof(GodotStubs).GetMethod("Skip")));
+        }
+        // Trial's Double Down abandons the run through a popup.
+        harmony.Patch(typeof(MegaCrit.Sts2.Core.Nodes.CommonUi.NAbandonRunConfirmPopup).GetMethod("Create"),
+            prefix: new HarmonyLib.HarmonyMethod(typeof(GodotStubs).GetMethod("Abandon")));
+        // Hover tips load their icons through Godot.
+        foreach (var model in new[] { typeof(EnchantmentModel), typeof(PotionModel), typeof(RelicModel) })
+        {
+            harmony.Patch(model.GetProperty("HoverTip")!.GetGetMethod(), prefix: new HarmonyLib.HarmonyMethod(typeof(GodotStubs).GetMethod("NoTip")));
+        }
+        foreach (var model in new[] { typeof(EnchantmentModel), typeof(RelicModel), typeof(PotionModel), typeof(CardModel) })
+        {
+            harmony.Patch(model.GetProperty("HoverTips")!.GetGetMethod(), prefix: new HarmonyLib.HarmonyMethod(typeof(GodotStubs).GetMethod("NoTips")));
+        }
+        harmony.Patch(typeof(MegaCrit.Sts2.Core.Assets.AssetCache).GetMethod("GetTexture2D"), prefix: new HarmonyLib.HarmonyMethod(typeof(GodotStubs).GetMethod("NoIcon")));
+        foreach (var model in new[] { typeof(PowerModel), typeof(RelicModel) })
+        {
+            harmony.Patch(model.GetProperty("Icon")!.GetGetMethod(), prefix: new HarmonyLib.HarmonyMethod(typeof(GodotStubs).GetMethod("NoIcon")));
+        }
+        // The enchant effect is a Godot node.
+        harmony.Patch(typeof(MegaCrit.Sts2.Core.Nodes.Vfx.NCardEnchantVfx).GetMethod("Create"),
+            prefix: new HarmonyLib.HarmonyMethod(typeof(GodotStubs).GetMethod("NoNode")));
+        string? line;
+        while ((line = Console.ReadLine()) != null)
+        {
+            var halves = line.Split(':');
+            var parts = halves[0].Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length == 0)
+            {
+                continue;
+            }
+            var choices = halves.Length > 1 ? halves[1].Split(' ', StringSplitOptions.RemoveEmptyEntries).Select(int.Parse).ToList() : new List<int>();
+            var (state, player) = NewRun(parts[0], int.Parse(parts[1]));
+            state.CurrentActIndex = int.Parse(parts[2]);
+            foreach (var op in parts.Skip(4))
+            {
+                var (key, value) = op.Contains('=') ? (op[..op.IndexOf('=')], op[(op.IndexOf('=') + 1)..]) : (op[..1], op[1..]);
+                switch (key)
+                {
+                    case "+":
+                        var up = value.EndsWith('+');
+                        var card = state.CreateCard(ModelDb.AllCards.First(c => c.Id.Entry == value.TrimEnd('+')), player);
+                        if (up)
+                        {
+                            card.UpgradeInternal();
+                        }
+                        player.Deck.AddInternal(card);
+                        break;
+                    case "-":
+                        player.Deck.RemoveInternal(player.Deck.Cards.First(c => c.Id.Entry == value));
+                        break;
+                    case "gold":
+                        player.Gold = int.Parse(value);
+                        break;
+                    case "hp":
+                        player.Creature.SetCurrentHpInternal(int.Parse(value));
+                        break;
+                    case "maxhp":
+                        player.Creature.SetMaxHpInternal(int.Parse(value));
+                        break;
+                    case "relic":
+                        player.AddRelicInternal(ModelDb.AllRelics.First(r => r.Id.Entry == value).ToMutable());
+                        break;
+                    case "potion":
+                        player.AddPotionInternal(ModelDb.AllPotions.First(p => p.Id.Entry == value).ToMutable());
+                        break;
+                }
+            }
+            Console.WriteLine($"run {line}");
+            var model = ModelDb.AllEvents.First(e => e.Id.Entry == parts[3]).ToMutable();
+            GodotStubs.Fight = null;
+            model.BeginEvent(player, false).GetAwaiter().GetResult();
+            // A combat layout creates its monsters as the room is entered
+            // (`EventRoom.EnterInternal`).
+            if (model.LayoutType == MegaCrit.Sts2.Core.Events.EventLayoutType.Combat)
+            {
+                model.GenerateInternalCombatState(state);
+            }
+            var prefix = model.Id.Entry + ".pages.";
+            var chosen = 0;
+            // The Fake Merchant lays out no options but a shop: the port asks
+            // whether to throw a Foul Potion first (`page THROW SHOP`), then
+            // buys the first relic it can afford until it can buy none. The
+            // throw's fight is `FoulPotionThrown`'s, spelled out here, as it
+            // needs the event synchronizer.
+            if (model is MegaCrit.Sts2.Core.Models.Events.FakeMerchant fake)
+            {
+                var foul = player.Potions.OfType<MegaCrit.Sts2.Core.Models.Potions.FoulPotion>().FirstOrDefault();
+                Console.WriteLine(foul != null ? "page THROW SHOP" : "page SHOP");
+                var shelf = fake.Inventory.RelicEntries;
+                Console.WriteLine($"shelf {string.Join(" ", shelf.Select(e => $"{e.Model!.Id.Entry}:{e.Cost}"))}");
+                if (foul != null && (choices.Count == 0 || choices[0] % 2 == 0))
+                {
+                    PotionCmd.Discard(foul).GetAwaiter().GetResult();
+                    var stocked = shelf.Where(e => e.IsStocked).Select(e => $" relic:{e.Model!.Id.Entry}");
+                    GodotStubs.Fight = "FAKE_MERCHANT_EVENT_ENCOUNTER relic:FAKE_MERCHANTS_RUG" + string.Concat(stocked);
+                }
+                else
+                {
+                    while (shelf.FirstOrDefault(e => e.IsStocked && e.EnoughGold) is { } entry)
+                    {
+                        entry.OnTryPurchaseWrapper(fake.Inventory).GetAwaiter().GetResult();
+                    }
+                }
+            }
+            // A death out of combat (`CreatureCmd.Kill`) needs the running
+            // game; the run stops there.
+            try
+            {
+            while (!model.IsFinished && GodotStubs.Fight == null && model.CurrentOptions.Count > 0)
+            {
+                var options = model.CurrentOptions.ToList();
+                // An option titled by a relic (the Doll Room's dolls) keeps it
+                // as its history name.
+                string Key(MegaCrit.Sts2.Core.Events.EventOption o) =>
+                    (o.TextKey.StartsWith(prefix) ? o.TextKey[prefix.Length..].Replace(".options.", ".")
+                        : o.TextKey == "" ? o.HistoryName.LocEntryKey.Replace(".title", "") : o.TextKey) + (o.IsLocked ? "!" : "");
+                Console.WriteLine($"page {string.Join(" ", options.Select(Key))}");
+                var open = options.Where(o => !o.IsLocked).ToList();
+                if (open.Count == 0)
+                {
+                    break;
+                }
+                var pick = chosen < choices.Count ? choices[chosen] % open.Count : 0;
+                chosen++;
+                if (chosen > 40)
+                {
+                    throw new OperationCanceledException("the event would not end");
+                }
+                open[pick].Chosen().GetAwaiter().GetResult();
+            }
+            }
+            catch (NullReferenceException) when (player.Creature.CurrentHp <= 0)
+            {
+                Console.WriteLine("error the player died");
+                continue;
+            }
+            catch (OperationCanceledException e)
+            {
+                Console.WriteLine($"error {e.Message}");
+                continue;
+            }
+            if (GodotStubs.Fight != null)
+            {
+                Console.WriteLine($"fight {GodotStubs.Fight}");
+            }
+            string Card(CardModel c) => c.Id.Entry + (c.IsUpgraded ? "+" : "") + (c.Enchantment is { } e ? $":{e.Id.Entry}:{e.Amount}" : "");
+            var deck = string.Join(" ", player.Deck.Cards.Select(Card).OrderBy(c => c, StringComparer.Ordinal));
+            var potions = string.Join(" ", player.PotionSlots.Select(p => p?.Id.Entry ?? "-"));
+            var creature = player.Creature;
+            Console.WriteLine($"end hp {creature.CurrentHp} {creature.MaxHp} gold {player.Gold} deck {deck} relics {string.Join(" ", player.Relics.Select(r => r.Id.Entry))}"
+                + $" potions {potions} counters {player.PlayerRng.Rewards.Counter} {state.Rng.Niche.Counter} {player.PlayerRng.Transformations.Counter} {state.Rng.CombatPotionGeneration.Counter} {model.Rng.Counter}");
+        }
+        break;
+    }
     // map SEED ACT N ASCENSION: act N's map (1-based) as `StandardActMap.CreateFor`
     // builds it for a single player, one point per line: col row type
     // children, children as col,row.
@@ -577,7 +782,97 @@ class FrontSelector : MegaCrit.Sts2.Core.TestSupport.ICardSelector
 
 static class GodotStubs
 {
+    /// The fight an event started, with its extra rewards, as `events`
+    /// prints it.
+    public static string? Fight;
+
+    public static bool RecordFight(EncounterModel mutableEncounter, IReadOnlyList<MegaCrit.Sts2.Core.Rewards.Reward> extraRewards)
+    {
+        string Reward(MegaCrit.Sts2.Core.Rewards.Reward r) => r switch
+        {
+            MegaCrit.Sts2.Core.Rewards.RelicReward rr => "relic" + (rr.Relic is { } relic ? ":" + relic.Id.Entry : ""),
+            MegaCrit.Sts2.Core.Rewards.PotionReward => "potion",
+            MegaCrit.Sts2.Core.Rewards.SpecialCardReward => "card",
+            _ => r.GetType().Name,
+        };
+        Fight = string.Join(" ", extraRewards.Select(Reward).Prepend(mutableEncounter.Id.Entry));
+        return false;
+    }
+
     public static bool Skip() => false;
+
+    public static bool NoTip(ref MegaCrit.Sts2.Core.HoverTips.HoverTip __result)
+    {
+        __result = default;
+        return false;
+    }
+
+    public static MegaCrit.Sts2.Core.Nodes.NGame? Game;
+    public static MegaCrit.Sts2.Core.Audio.Debug.NDebugAudioManager? Audio;
+
+    public static bool StandInGame(ref MegaCrit.Sts2.Core.Nodes.NGame? __result)
+    {
+        __result = Game;
+        return false;
+    }
+
+    public static bool StandInAudio(ref MegaCrit.Sts2.Core.Audio.Debug.NDebugAudioManager? __result)
+    {
+        __result = Audio;
+        return false;
+    }
+
+    public static MegaCrit.Sts2.Core.Multiplayer.Game.RewardSynchronizer? Rewards;
+
+    public static bool StandInRewards(ref MegaCrit.Sts2.Core.Multiplayer.Game.RewardSynchronizer? __result)
+    {
+        __result = Rewards;
+        return false;
+    }
+
+    public static bool NoRunNode(ref MegaCrit.Sts2.Core.Nodes.NRun? __result)
+    {
+        __result = null;
+        return false;
+    }
+
+    public static bool NoSound(ref int __result)
+    {
+        __result = 0;
+        return false;
+    }
+
+    public static bool Abandon() => throw new OperationCanceledException("the run was abandoned");
+
+    public static bool NoIcon(ref Godot.Texture2D? __result)
+    {
+        __result = null;
+        return false;
+    }
+
+    public static bool NoTips(ref IEnumerable<MegaCrit.Sts2.Core.HoverTips.IHoverTip> __result)
+    {
+        __result = [];
+        return false;
+    }
+
+    public static bool NoNode(ref object? __result)
+    {
+        __result = null;
+        return false;
+    }
+
+    public static bool No(ref bool __result)
+    {
+        __result = false;
+        return false;
+    }
+
+    public static bool Yes(ref bool __result)
+    {
+        __result = true;
+        return false;
+    }
 
     public static bool NoAlternatives(ref IReadOnlyList<MegaCrit.Sts2.Core.Entities.CardRewardAlternatives.CardRewardAlternative> __result)
     {
@@ -639,10 +934,11 @@ static class GodotStubs
         return false;
     }
 
-    public static bool RelicOnly(RelicModel relic, string textKey, ref MegaCrit.Sts2.Core.Events.EventOption __result)
+    public static bool RelicOnly(RelicModel relic, Func<System.Threading.Tasks.Task>? onChosen, string textKey, ref MegaCrit.Sts2.Core.Events.EventOption __result)
     {
         var option = (MegaCrit.Sts2.Core.Events.EventOption)System.Runtime.CompilerServices.RuntimeHelpers.GetUninitializedObject(typeof(MegaCrit.Sts2.Core.Events.EventOption));
         typeof(MegaCrit.Sts2.Core.Events.EventOption).GetProperty("TextKey")!.SetValue(option, textKey);
+        typeof(MegaCrit.Sts2.Core.Events.EventOption).GetField("<OnChosen>k__BackingField", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.SetValue(option, onChosen);
         __result = option.WithRelic(relic);
         return false;
     }

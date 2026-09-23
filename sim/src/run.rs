@@ -365,22 +365,30 @@ impl RunState {
         event
     }
 
-    /// `RelicModel.IsTradable` over the relics held: a Common, Uncommon,
-    /// Rare or Shop relic with no pickup effect. Neow's, the events' and the
-    /// ancients' relics are neither. A Lizard Tail is taken as unused.
-    fn tradable_relics(&self) -> usize {
+    /// The relics held that `RelicModel.IsTradable`, as indices in the
+    /// order they came: a Common, Uncommon, Rare or Shop relic with no
+    /// pickup effect that is not used up (Lizard Tail's revive, Maw Bank
+    /// once something is bought, Winged Boots' three flights). Neow's, the
+    /// events' and the ancients' relics are neither rarity.
+    pub(crate) fn tradable_relics(&self) -> Vec<usize> {
         const UPON_PICKUP: &[&str] = &[
             "CALLING_BELL", "CAULDRON", "DOLLYS_MIRROR", "GNARLED_HAMMER", "KIFUDA", "LEES_WAFFLE", "MANGO", "OLD_COIN", "PEAR",
             "POTION_BELT", "PUNCH_DAGGER", "ROYAL_STAMP", "STRAWBERRY", "TOY_BOX", "WAR_PAINT", "WHETSTONE", "ORRERY",
             "SEA_GLASS", "LOST_COFFER",
         ];
         use crate::types::RelicRarity::{Common, Rare, Shop, Uncommon};
-        self.relics
-            .iter()
-            .filter(|r| !UPON_PICKUP.contains(&r.id.as_str()))
-            .filter_map(|r| crate::plan::BagRelic::from_game_id(&r.id))
-            .filter(|r| matches!(r.rarity(), Common | Uncommon | Rare | Shop))
-            .count()
+        let used_up = |r: &RunRelic| match r.id.as_str() {
+            "LIZARD_TAIL" | "MAW_BANK" => r.flag,
+            "WINGED_BOOTS" => r.counter >= 3,
+            _ => false,
+        };
+        (0..self.relics.len())
+            .filter(|&i| {
+                let r = &self.relics[i];
+                let rarity = crate::plan::BagRelic::from_game_id(&r.id).map(|b| b.rarity());
+                !UPON_PICKUP.contains(&r.id.as_str()) && !used_up(r) && matches!(rarity, Some(Common | Uncommon | Rare | Shop))
+            })
+            .collect()
     }
 
     /// `EventModel.IsAllowed` for a singleplayer run. Where it asks whether
@@ -408,7 +416,7 @@ impl RunState {
             "WarHistorianRepy" => false,
             "RoomFullOfCheese" | "BrainLeech" => act < 2,
             "TheFutureOfPotions" => potions >= 2,
-            "RelicTrader" => act > 0 && self.tradable_relics() >= 5,
+            "RelicTrader" => act > 0 && self.tradable_relics().len() >= 5,
             "StoneOfAllTime" => act == 1 && potions > 0,
             "UnrestSite" => hp as f64 <= self.max_hp as f64 * 0.7,
             "ZenWeaver" => gold >= 125,
@@ -419,7 +427,7 @@ impl RunState {
             "WhisperingHollow" => gold >= 44,
             "CrystalSphere" => gold >= 100 && act > 0,
             "LuminousChoir" => gold >= 149,
-            "RanwidTheElder" => act > 0 && self.tradable_relics() > 0 && gold >= 100 && potions > 0,
+            "RanwidTheElder" => act > 0 && !self.tradable_relics().is_empty() && gold >= 100 && potions > 0,
             "EndlessConveyor" => gold >= 120,
             _ => true,
         }

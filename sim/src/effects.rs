@@ -14,7 +14,7 @@
 
 use crate::card::{def, Card};
 use crate::enchant::Enchantment;
-use crate::game_rng::{PlayerStream, RunStream};
+use crate::game_rng::{GameRng, PlayerStream, RunStream};
 use crate::pools::{sim_card, sim_enchantment, PoolCard, Rarity, COLORLESS_CARDS, IRONCLAD_CARDS};
 use crate::rewards::{create_cards, create_potion, create_potions, CardOptions, Offer, UNPORTED_RELICS};
 use crate::run::{DeckCard, Enchant, Room, RoomType, RunRelic, RunState};
@@ -67,15 +67,20 @@ pub enum DeckAction {
     Transform { upgrade: bool },
     /// Claws: each to a Maul (`maul`).
     Maul,
+    /// `CardCmd.TransformTo`: each to a new card of this id (Wood Carvings'
+    /// Peck).
+    TransformInto(&'static str),
 }
 
 /// The stream a transform draws its new card on.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TransformRng {
+#[derive(Debug)]
+pub enum TransformRng<'a> {
     /// The player's Transformations stream (Leafy Poultice).
     Transformations,
     /// The run's Niche stream (New Leaf, Astrolabe, Pandora's Box).
     Niche,
+    /// An event's own stream (`EventModel.Rng`: Symbiote, Trial).
+    Event(&'a mut GameRng),
 }
 
 /// `Entities/RestSite/*RestSiteOption.cs` by `OptionId`, the ones a
@@ -218,9 +223,10 @@ impl DeckCard {
 impl RunState {
     /// `PlayerCmd.GainGold`: `Hook.ModifyGoldGained` (Bowler Hat a quarter
     /// more, Ectoplasm none), truncated, then `AfterGoldGained` (Dragon
-    /// Fruit's max HP).
-    pub fn gain_gold(&mut self, amount: i32) {
-        let mut gold = amount as f64;
+    /// Fruit's max HP). The amount is a `decimal` in the game, which a few
+    /// events leave fractional (Jungle Maze Adventure).
+    pub fn gain_gold(&mut self, amount: impl Into<f64>) {
+        let mut gold = amount.into();
         for relic in &self.relics {
             match relic.id.as_str() {
                 "BOWLER_HAT" => gold *= 1.25,
@@ -262,15 +268,36 @@ impl RunState {
         self.max_hp = max.max(1);
     }
 
-    /// Unblockable damage out of combat (Precarious Shears).
+    /// HP lost out of combat, then, at 0, what prevents the death
+    /// (`CreatureCmd.Kill`, `Hook.ShouldDie` over the relics then the
+    /// potions, `ShouldDieLate` after): the first Fairy in a Bottle is
+    /// drunk for three tenths of max HP, else an unused Lizard Tail heals
+    /// half.
     pub fn lose_hp(&mut self, amount: i32) {
         self.hp = (self.hp - amount).max(0);
+        if self.hp > 0 {
+            return;
+        }
+        if let Some(slot) = self.potions.iter().position(|p| p.as_deref() == Some("FAIRY_IN_A_BOTTLE")) {
+            self.potions[slot] = None;
+            self.heal((self.max_hp * 3 / 10).max(1));
+        } else if let Some(tail) = self.relics.iter_mut().find(|r| r.id == "LIZARD_TAIL" && !r.flag) {
+            tail.flag = true;
+            self.heal((self.max_hp / 2).max(1));
+        }
     }
 
     /// `CardPileCmd.Add` to the deck: `Hook.ModifyCardBeingAddedToDeck`
     /// (the eggs upgrade their type, Fresnel Lens makes a block card
-    /// Nimble), then `AfterCardChangedPiles` (Lucky Fysh's gold).
-    pub fn add_card(&mut self, mut card: DeckCard) {
+    /// Nimble), then `AfterCardChangedPiles` in the order the relics came:
+    /// Lucky Fysh's gold, Darkstone Periapt's max HP for a curse, Bing
+    /// Bong's copy (which itself adds no copy), Book of Five Rings' heal
+    /// every fifth card.
+    pub fn add_card(&mut self, card: DeckCard) {
+        self.add_card_cloned(card, false);
+    }
+
+    fn add_card_cloned(&mut self, mut card: DeckCard, cloned: bool) {
         let kind = card.kind();
         let eggs = [("MOLTEN_EGG", CardType::Attack), ("TOXIC_EGG", CardType::Skill), ("FROZEN_EGG", CardType::Power)];
         for relic in self.relics.iter().map(|r| r.id.as_str()) {
@@ -283,10 +310,49 @@ impl RunState {
                 }
             }
         }
-        self.deck.push(card);
-        if self.has_relic("LUCKY_FYSH") {
-            self.gain_gold(15);
+        self.deck.push(card.clone());
+        for i in 0..self.relics.len() {
+            match self.relics[i].id.as_str() {
+                "LUCKY_FYSH" => self.gain_gold(15),
+                "DARKSTONE_PERIAPT" if kind == Some(CardType::Curse) => self.gain_max_hp(6),
+                // `BingBong`: `RunState.CloneCard`, upgrade and enchantment kept.
+                "BING_BONG" if !cloned => self.add_card_cloned(card.clone(), true),
+                // `BookOfFiveRings.CardsAdded` in the counter.
+                "BOOK_OF_FIVE_RINGS" => {
+                    self.relics[i].counter += 1;
+                    if self.relics[i].counter % 5 == 0 {
+                        self.heal(20);
+                    }
+                }
+                _ => {}
+            }
         }
+    }
+
+    /// `CardCmd.Downgrade` on a deck card: back to its base form, its
+    /// enchantment kept.
+    pub fn downgrade_card(&mut self, i: usize) {
+        self.deck[i].upgraded = false;
+    }
+
+    /// `CreatureCmd.Damage` out of combat, where no block stands in the
+    /// way: each Tungsten Rod takes one off (`ModifyHpLostAfterOsty`).
+    pub fn damage(&mut self, amount: i32) {
+        let rods = self.relics.iter().filter(|r| r.id == "TUNGSTEN_ROD").count() as i32;
+        self.lose_hp((amount - rods).max(0));
+    }
+
+    /// `RelicCmd.Remove`: the first held of the id leaves. None of the
+    /// relics an event can take has an `AfterRemoved`.
+    pub fn remove_relic(&mut self, id: &str) {
+        if let Some(i) = self.relics.iter().position(|r| r.id == id) {
+            self.relics.remove(i);
+        }
+    }
+
+    /// `PotionCmd.Discard` of the potion in `slot`.
+    pub fn discard_potion(&mut self, slot: usize) {
+        self.potions[slot] = None;
     }
 
     /// `CardCmd.Upgrade` on a deck card.
@@ -339,6 +405,7 @@ impl RunState {
                 let mauls: Vec<(usize, DeckCard)> = chosen.iter().map(|&i| (i, maul(&self.deck[i]))).collect();
                 self.transform_to(mauls);
             }
+            DeckAction::TransformInto(id) => self.transform_to(chosen.iter().map(|&i| (i, DeckCard::new(id))).collect()),
         }
     }
 
@@ -360,13 +427,14 @@ impl RunState {
     /// (`CardFactory.CreateRandomCardForTransform`, `transform_options`) and
     /// `upgrade`d if asked; then the originals leave and the new cards join
     /// the deck through `add_card`, in the originals' deck order.
-    pub fn transform(&mut self, cards: &[usize], upgrade: bool, stream: TransformRng) {
+    pub fn transform(&mut self, cards: &[usize], upgrade: bool, mut stream: TransformRng) {
         let mut replaced = Vec::new();
         for &i in cards {
             let Some(options) = transform_options(&self.deck[i]) else { continue };
-            let rng = match stream {
+            let rng = match &mut stream {
                 TransformRng::Transformations => self.rngs.player(PlayerStream::Transformations),
                 TransformRng::Niche => self.rngs.run(RunStream::Niche),
+                TransformRng::Event(rng) => &mut **rng,
             };
             let id = *rng.pick(&options).expect("a card to transform into");
             replaced.push((i, DeckCard { upgraded: upgrade, ..DeckCard::new(id) }));
@@ -385,7 +453,7 @@ impl RunState {
             DeckAction::Duplicate => true,
             DeckAction::Enchant(id, _) => c.can_enchant(id),
             DeckAction::Transform { .. } => c.removable() && transform_options(c).is_some(),
-            DeckAction::Maul => c.removable(),
+            DeckAction::Maul | DeckAction::TransformInto(_) => c.removable(),
         };
         let mut cards: Vec<usize> = (0..self.deck.len()).filter(|&i| ok(&self.deck[i])).collect();
         if action == DeckAction::Remove {
@@ -430,6 +498,12 @@ impl RunState {
             "NUTRITIOUS_OYSTER" => self.gain_max_hp(11),
             "BIG_MUSHROOM" => self.gain_max_hp(20),
             "LOOMING_FRUIT" => self.gain_max_hp(31),
+            // `FragrantMushroom`: 15 damage, then two random upgrades on the
+            // Niche stream.
+            "FRAGRANT_MUSHROOM" => {
+                self.damage(15);
+                self.upgrade_random(2, |_| true);
+            }
             "LEES_WAFFLE" => {
                 self.gain_max_hp(7);
                 self.heal(self.max_hp - self.hp);
@@ -580,10 +654,10 @@ impl RunState {
             "PRECISE_SCISSORS" => offered.push(self.pick(DeckAction::Remove, 1, 1)),
             "EMPTY_CAGE" => offered.push(self.pick(DeckAction::Remove, 2, 2)),
             "BIIIG_HUG" => offered.push(self.pick(DeckAction::Remove, 4, 4)),
-            // `PrecariousShears`: the removal, then 16 unblockable damage.
+            // `PrecariousShears`: the removal, then 16 damage.
             "PRECARIOUS_SHEARS" => {
                 offered.push(self.pick(DeckAction::Remove, 2, 2));
-                self.lose_hp(16);
+                self.damage(16);
             }
             "POMANDER" => offered.push(self.pick(DeckAction::Upgrade, 1, 1)),
             "YUMMY_COOKIE" => offered.push(self.pick(DeckAction::Upgrade, 4, 4)),
@@ -730,7 +804,8 @@ impl RunState {
     /// What entering a room does before anything in it: an ancient's heal
     /// (`AncientEventModel.BeforeEventStarted`: Neow first empties HP, then
     /// the missing HP is healed, four fifths of it at Weary Traveler), then
-    /// the relics' `AfterRoomEntered`, in the order they came.
+    /// the relics' `AfterRoomEntered`. An event runs the hook itself once
+    /// it has laid its options out (`RunState::event`).
     pub fn room_entered(&mut self, room: Room, unknown_point: bool) {
         if let Room::Ancient(name) = room {
             if name == "Neow" {
@@ -740,6 +815,13 @@ impl RunState {
             let amount = if self.ascension.has(AscensionLevel::WearyTraveler) { missing * 8 / 10 } else { missing };
             self.heal(amount);
         }
+        if !matches!(room, Room::Event(_)) {
+            self.relics_entered(room, unknown_point);
+        }
+    }
+
+    /// `Hook.AfterRoomEntered` over the relics, in the order they came.
+    pub fn relics_entered(&mut self, room: Room, unknown_point: bool) {
         for i in 0..self.relics.len() {
             let deck = self.deck.len() as i32;
             match (self.relics[i].id.as_str(), room) {
@@ -813,9 +895,9 @@ impl RunState {
     /// `HealRestSiteOption.ExecuteRestSiteHeal`, which Dense Vegetation
     /// mimics too: three tenths of max HP plus Regal Pillow's 15
     /// (`ModifyRestSiteHealAmount`), Stone Humidifier's max HP
-    /// (`AfterRestSiteHeal`), then the rewards the relics add
-    /// (`ModifyRestSiteHealRewards`): Tiny Mailbox's two potions. Dream
-    /// Catcher's card reward is not ported (`UNPORTED_RELICS`).
+    /// (`AfterRestSiteHeal`), then the rewards the relics add, in the order
+    /// they came (`ModifyRestSiteHealRewards`): Tiny Mailbox's two potions,
+    /// Dream Catcher's card reward, a monster fight's.
     pub fn rest_heal(&mut self) -> Vec<Offered> {
         let pillow = if self.has_relic("REGAL_PILLOW") { 15 } else { 0 };
         self.heal(self.max_hp * 3 / 10 + pillow);
@@ -823,13 +905,41 @@ impl RunState {
             self.gain_max_hp(5);
         }
         let mut offered = Vec::new();
-        if self.has_relic("TINY_MAILBOX") {
-            offered.push(Offered::Potions((0..2).map(|_| create_potion(self.rewards()).to_string()).collect()));
-        }
-        if self.has_relic("DREAM_CATCHER") {
-            offered.push(Offered::Unported("DREAM_CATCHER".into()));
+        for i in 0..self.relics.len() {
+            match self.relics[i].id.as_str() {
+                "TINY_MAILBOX" => offered.push(Offered::Potions((0..2).map(|_| create_potion(self.rewards()).to_string()).collect())),
+                "DREAM_CATCHER" => offered.push(Offered::Cards(self.card_reward(&CardOptions::for_room(RoomType::Monster)))),
+                _ => {}
+            }
         }
         offered
+    }
+}
+
+impl RunState {
+    /// The player as `tools/oracle` prints them after a step: HP, max HP,
+    /// gold, the deck sorted (id, `+` if upgraded, `:ENCHANTMENT:AMOUNT`),
+    /// the relics, the potion slots (`-` for an empty one) and the Rewards,
+    /// Niche, Transformations and CombatPotionGeneration counters.
+    pub fn oracle_text(&mut self) -> String {
+        let card = |c: &DeckCard| {
+            let ench = c.enchantment.as_ref().map_or(String::new(), |e| format!(":{}:{}", e.id, e.amount));
+            format!("{}{}{ench}", c.id, if c.upgraded { "+" } else { "" })
+        };
+        let mut deck: Vec<String> = self.deck.iter().map(card).collect();
+        deck.sort();
+        let relics: Vec<&str> = self.relics.iter().map(|r| r.id.as_str()).collect();
+        let potions: Vec<&str> = self.potions.iter().map(|p| p.as_deref().unwrap_or("-")).collect();
+        let (deck, relics, potions) = (deck.join(" "), relics.join(" "), potions.join(" "));
+        let (hp, max_hp, gold) = (self.hp, self.max_hp, self.gold);
+        let counters = [
+            self.rngs.player(PlayerStream::Rewards).counter,
+            self.rngs.run(RunStream::Niche).counter,
+            self.rngs.player(PlayerStream::Transformations).counter,
+            self.rngs.run(RunStream::CombatPotionGeneration).counter,
+        ];
+        let [a, b, c, d] = counters;
+        format!("hp {hp} {max_hp} gold {gold} deck {deck} relics {relics} potions {potions} counters {a} {b} {c} {d}")
     }
 }
 
@@ -853,33 +963,7 @@ fn obtain_text(header: &str) -> String {
                 run.settle(offered, &mut crate::rooms::First, &mut Vec::new());
             }
         }
-        let card = |c: &DeckCard| {
-            let ench = c.enchantment.as_ref().map_or(String::new(), |e| format!(":{}:{}", e.id, e.amount));
-            format!("{}{}{ench}", c.id, if c.upgraded { "+" } else { "" })
-        };
-        let mut deck: Vec<String> = run.deck.iter().map(card).collect();
-        deck.sort();
-        let relics: Vec<&str> = run.relics.iter().map(|r| r.id.as_str()).collect();
-        let potions: Vec<&str> = run.potions.iter().map(|p| p.as_deref().unwrap_or("-")).collect();
-        let counters = [
-            run.rngs.player(PlayerStream::Rewards).counter,
-            run.rngs.run(RunStream::Niche).counter,
-            run.rngs.player(PlayerStream::Transformations).counter,
-            run.rngs.run(RunStream::CombatPotionGeneration).counter,
-        ];
-        out.push_str(&format!(
-            "{id} hp {} {} gold {} deck {} relics {} potions {} counters {} {} {} {}\n",
-            run.hp,
-            run.max_hp,
-            run.gold,
-            deck.join(" "),
-            relics.join(" "),
-            potions.join(" "),
-            counters[0],
-            counters[1],
-            counters[2],
-            counters[3]
-        ));
+        out.push_str(&format!("{id} {}\n", run.oracle_text()));
     }
     out
 }

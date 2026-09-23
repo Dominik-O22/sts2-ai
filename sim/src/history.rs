@@ -133,6 +133,10 @@ fn model_id(room: Room) -> Option<String> {
     }
 }
 
+/// Events not ported that draw nothing on the Rewards stream, so the
+/// stream is followed past them.
+const DRAWS_NOTHING: &[&str] = &["TinkerTime"];
+
 /// The curses events add to the deck, which a grid check leaves out.
 const CURSES: &[&str] = &["CLUMSY", "DOUBT", "REGRET", "SHAME", "INJURY", "POOR_SLEEP", "DECAY", "WRITHE", "NORMALITY"];
 
@@ -242,7 +246,7 @@ pub fn check(run: &Value, live: bool) -> Report {
                 continue;
             }
             report.effects.checked += 1;
-            if matches!(room, Room::Combat(..)) {
+            if matches!(room, Room::Combat(..)) || rooms.len() > 1 {
                 (state.hp, state.max_hp) = (player.hp, player.max_hp);
             }
             let missing = walked.map(|w| w.missing).unwrap_or_default();
@@ -464,10 +468,26 @@ fn ancient_option(option: &Value) -> String {
     }
 }
 
+/// An `event_choices` title key as the page and key of the option chosen:
+/// `EVENT.pages.PAGE.options.KEY.title`, or `RELIC.title` for an option a
+/// relic titles, which has no page.
+fn event_option(key: &str) -> Option<(String, String)> {
+    let parts: Vec<&str> = key.split('.').collect();
+    match parts[..] {
+        [_, "pages", page, "options", key, "title"] => Some((page.to_string(), key.to_string())),
+        [relic, "title"] => Some((String::new(), relic.to_string())),
+        _ => None,
+    }
+}
+
 /// The potions a floor used or threw away.
 fn used_potions(stats: &Value) -> Vec<String> {
-    let list = |key: &str| stats[key].as_array().cloned().unwrap_or_default();
-    list("potion_used").iter().chain(&list("potion_discarded")).map(|p| game_id(p.as_str().unwrap()).to_string()).collect()
+    names(stats, "potion_used").into_iter().chain(names(stats, "potion_discarded")).collect()
+}
+
+/// The ids a list of `CATEGORY.ID` strings holds.
+fn names(stats: &Value, key: &str) -> Vec<String> {
+    stats[key].as_array().into_iter().flatten().map(|p| game_id(p.as_str().unwrap()).to_string()).collect()
 }
 
 /// The player's choices on one floor as its record lists them, taken as
@@ -486,6 +506,8 @@ struct Recorded {
     transformed: Vec<String>,
     enchanted: Vec<String>,
     ancient: Option<String>,
+    /// `event_choices`, as each option's page and key (`event_option`).
+    events: Vec<(String, String)>,
     /// Where the port did not offer what the record shows: a choice the
     /// record made, or an ancient's options.
     missing: Vec<String>,
@@ -505,6 +527,7 @@ impl Recorded {
             transformed: list("cards_transformed").iter().map(|t| recorded_card(&t["original_card"]).id).collect(),
             enchanted: list("cards_enchanted").iter().map(|e| recorded_card(&e["card"]).id).collect(),
             ancient: list("ancient_choice").iter().find(|o| o["was_chosen"] == true).map(ancient_option),
+            events: list("event_choices").iter().filter_map(|c| event_option(c["title"]["key"].as_str()?)).collect(),
             missing: Vec::new(),
         }
     }
@@ -566,6 +589,23 @@ impl Chooser for Recorded {
                 }
             }
             Decision::Ancient(options) => options.iter().position(|o| Some(o) == self.ancient.as_ref()).unwrap_or(options.len()),
+            // The next option the record chose; an option alone on its page
+            // may be one the record does not keep (`ThatWontSaveToChoiceHistory`).
+            Decision::Event { options, .. } => {
+                let next = self.events.first().and_then(|(page, key)| options.iter().position(|o| o.page == page && o.key == key));
+                match next {
+                    Some(i) => {
+                        self.events.remove(0);
+                        i
+                    }
+                    None if options.len() == 1 => 0,
+                    None => {
+                        let shown: Vec<String> = options.iter().map(|o| format!("{}.{}", o.page, o.key)).collect();
+                        self.missing.push(format!("chose {:?}, the port offered {shown:?}", self.events.first()));
+                        0
+                    }
+                }
+            }
             // What the record bought, relics first, then cards, potions and
             // the removal: the record does not keep the order, which only a
             // discount or an egg bought on the way would show.
@@ -604,7 +644,7 @@ impl Chooser for Recorded {
                     }
                     DeckAction::Enchant(..) => Self::take(&mut self.enchanted, cards, |id, i| deck(i).id == *id),
                     DeckAction::Duplicate => Self::take(&mut self.cards, cards, |c, i| deck(i).id == c.id),
-                    DeckAction::Transform { .. } | DeckAction::Maul => Self::take(&mut self.transformed, cards, |id, i| deck(i).id == *id),
+                    DeckAction::Transform { .. } | DeckAction::Maul | DeckAction::TransformInto(_) => Self::take(&mut self.transformed, cards, |id, i| deck(i).id == *id),
                 }
             }
         }
@@ -641,9 +681,7 @@ fn follow(state: &mut RunState, room: Room, rooms: &[Value], stats: &Value) -> W
         return Walked { stream: Err(stream.unwrap_or(why.clone())), unported: Some(why), missing: Vec::new(), ancient: None };
     }
 
-    let fight = matches!(room, Room::Combat(..)) || rooms.len() > 1;
-    if fight {
-        state.enemies_created(fought(rooms) as usize);
+    if matches!(room, Room::Combat(..)) || rooms.len() > 1 {
         // Petrified Toad hands a Potion-Shaped Rock over as each fight
         // starts (`BeforeCombatStartLate`), which the record lists with the
         // floor's potions.
@@ -652,6 +690,9 @@ fn follow(state: &mut RunState, room: Room, rooms: &[Value], stats: &Value) -> W
                 chooser.potions.remove(i);
             }
         }
+    }
+    if matches!(room, Room::Combat(..)) {
+        state.enemies_created(fought(rooms) as usize);
         let lost = ["gold_stolen", "gold_lost"].iter().map(|k| stats[k].as_i64().unwrap_or(0) as i32).sum();
         state.lose_gold(lost);
         // A card a thief stole, less those it gave back on dying, which the
@@ -674,8 +715,13 @@ fn follow(state: &mut RunState, room: Room, rooms: &[Value], stats: &Value) -> W
     }
     // The player's potion use, from the record; what was not held yet is
     // taken out once the room is done.
+    // The events that throw a potion away themselves (`PotionCmd.Discard`,
+    // the Fake Merchant's Foul Potion) pick it off the potions held, so what
+    // the record used and discarded waits.
     let mut used_later = Vec::new();
-    for potion in used_potions(stats) {
+    let discards_own = matches!(room, Room::Event("RanwidTheElder" | "TheFutureOfPotions" | "StoneOfAllTime" | "FakeMerchant"));
+    let used = if discards_own { names(stats, "potion_used") } else { used_potions(stats) };
+    for potion in used {
         match state.potions.iter().position(|p| p.as_deref() == Some(potion.as_str())) {
             Some(slot) => state.potions[slot] = None,
             None => used_later.push(potion),
@@ -706,70 +752,42 @@ fn follow(state: &mut RunState, room: Room, rooms: &[Value], stats: &Value) -> W
             }
             ancient = Some(if offer.relics == recorded { Ok(()) } else { Err(why) });
         }
-        Room::Event(name) => {
-            unported = Some(format!("event {name}"));
-            let taken = stats["event_choices"].as_array().into_iter().flatten();
-            let taken: Vec<(String, String)> = taken
-                .filter_map(|c| {
-                    let key: Vec<&str> = c["title"]["key"].as_str()?.split('.').collect();
-                    (key.len() == 6).then(|| (key[2].to_string(), key[4].to_string()))
-                })
-                .collect();
-            let layout = state.event_offer(name);
-            match state.event_option(name, &layout, &taken) {
-                Err(why) => {
-                    stream.get_or_insert(why);
+        Room::Event(name) => match state.event(name, &mut chooser, &mut log) {
+            None => {
+                unported = Some(format!("event {name}"));
+                if !DRAWS_NOTHING.contains(&name) {
+                    stream.get_or_insert(format!("event {name} is not ported"));
                 }
-                Ok(offered) => {
-                    for offer in offered {
-                        match offer {
-                            Offered::Cards(cards) => event_cards.extend(cards.iter().map(offer_text)),
-                            Offered::Took(_) | Offered::Potions(_) => log.push(offer),
-                            Offered::Unported(relic) if UNPORTED_RELICS.contains(&relic.as_str()) => {
-                                stream.get_or_insert(format!("{relic} is not ported"));
-                            }
-                            Offered::Unported(_) | Offered::Pick(_) => {}
-                            other => {
-                                stream.get_or_insert(format!("event {name} offered {other:?}"));
-                            }
+            }
+            Some(visit) => {
+                // What the event itself offered; a fight's rewards follow.
+                for offer in std::mem::take(&mut log) {
+                    match offer {
+                        Offered::Cards(cards) => event_cards.extend(cards.iter().map(offer_text)),
+                        other => log.push(other),
+                    }
+                }
+                match (visit.fight, rooms.get(1)) {
+                    (Some(fight), Some(_)) => {
+                        if !fight.created {
+                            state.enemies_created(fought(rooms) as usize);
                         }
+                        gold = state.event_fight_won(&fight, 1.0, &mut chooser, &mut log);
+                    }
+                    (Some(fight), None) => chooser.missing.push(format!("the port fought {:?}, the run did not", fight.encounter)),
+                    (None, Some(room)) => chooser.missing.push(format!("the run fought {}, the port did not", room["model_id"])),
+                    (None, None) => {}
+                }
+                // The relics the record took that the event did not give.
+                let mut took: Vec<String> = log.iter().filter_map(|o| if let Offered::Took(r) = o { Some(r.clone()) } else { None }).flatten().collect();
+                for relic in std::mem::take(&mut chooser.relics) {
+                    match took.iter().position(|t| *t == relic) {
+                        Some(i) => drop(took.remove(i)),
+                        None => chooser.missing.push(format!("the run took {relic}")),
                     }
                 }
             }
-            // A fight the event started, with a fight's rewards.
-            if let Some(fight) = rooms.get(1) {
-                let kind = match fight["room_type"].as_str() {
-                    _ if fight["model_id"] == "ENCOUNTER.FAKE_MERCHANT_EVENT_ENCOUNTER" => None,
-                    Some("monster") => Some(RoomType::Monster),
-                    Some("elite") => Some(RoomType::Elite),
-                    _ => None,
-                };
-                match kind {
-                    None if fight["model_id"] == "ENCOUNTER.FAKE_MERCHANT_EVENT_ENCOUNTER" => {
-                        stream.get_or_insert("the Fake Merchant's fight is not ported".into());
-                    }
-                    None => {
-                        stream.get_or_insert(format!("event {name} led to {}", fight["room_type"]));
-                    }
-                    Some(kind) => {
-                        state.fight_won(kind);
-                        let rewards = state.combat_rewards(kind, 1.0);
-                        gold = (!rewards.gold.is_empty()).then(|| rewards.gold.iter().sum());
-                        state.take_rewards(rewards, &mut chooser, &mut log);
-                    }
-                }
-            }
-            // The relics the event gave that it did not draw, picked up.
-            let mut took: Vec<String> = log.iter().filter_map(|o| if let Offered::Took(r) = o { Some(r.clone()) } else { None }).flatten().collect();
-            for relic in std::mem::take(&mut chooser.relics) {
-                match took.iter().position(|t| *t == relic) {
-                    Some(i) => {
-                        took.remove(i);
-                    }
-                    None => log.extend(state.obtain(&relic)),
-                }
-            }
-        }
+        },
         Room::Treasure => gold = Some(state.treasure_room(&mut chooser, &mut log)),
         Room::Shop => {
             state.shop_room(&mut chooser, &mut log);
@@ -992,15 +1010,16 @@ mod tests {
         }
     }
 
-    /// The same runs with the effects live: every floor whose content is
-    /// ported leaves the player as the record has them (rest heals, Meal
-    /// Ticket, Frozen Egg's upgrades, Potion Belt, Petrified Toad's rocks, a
-    /// thief's card given back, shops bought from at the port's prices, the
-    /// ancients' relics), and the rest are only events and the fight that
-    /// ended the run.
+    /// The same runs with the effects live: every floor leaves the player
+    /// as the record has them (rest heals, Meal Ticket, Frozen Egg's
+    /// upgrades, Potion Belt, Petrified Toad's rocks, a thief's card given
+    /// back, shops bought from at the port's prices, the ancients' relics,
+    /// the events' options, Dense Vegetation's fight), but the fight that
+    /// ended the run and one that drew on the Niche stream after a fight
+    /// with summoners had lost it.
     #[test]
     fn effects_match_real_runs() {
-        for (text, compared) in [(include_str!("../testdata/run-TBL5VNYN4M.run"), 45), (include_str!("../testdata/run-5J5VMZX7UB.run"), 41)] {
+        for (text, compared) in [(include_str!("../testdata/run-TBL5VNYN4M.run"), 49), (include_str!("../testdata/run-5J5VMZX7UB.run"), 47)] {
             let run: Value = serde_json::from_str(text).unwrap();
             let effects = check(&run, true).effects;
             assert_eq!(effects.divergences, Vec::<String>::new());
