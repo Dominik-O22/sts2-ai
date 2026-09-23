@@ -10,7 +10,7 @@
 
 use crate::card::{Card, Tag};
 use crate::combat::{Combat, RoomKind};
-use crate::effect::{AttackTargets, CardFilter, Effect, GenPool, Pile};
+use crate::effect::{AttackTargets, CardFilter, Effect, GenPool, Pile, Then};
 use crate::ids::{CardId, PowerId};
 use crate::types::{CardRarity, CardType, CreatureRef, Keyword, Side, TargetType, ValueProp};
 
@@ -515,6 +515,13 @@ impl Combat {
                     out.push(Effect::OfferRandom { pool: GenPool::Ironclad, count: 5, free: false, retain: true })
                 }
                 Bellows if turn <= 1 => out.push(Effect::UpgradeHand),
+                // GamblingChip: discard any number of cards, then draw as many.
+                GamblingChip if turn <= 1 => out.push(Effect::Choose {
+                    from: Pile::Hand,
+                    filter: CardFilter::Any,
+                    then: Then::DiscardThenDraw { picked: 0 },
+                    can_skip: true,
+                }),
                 _ => {}
             }
         }
