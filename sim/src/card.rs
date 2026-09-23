@@ -180,6 +180,110 @@ defs! {
     Sloth: -1, Status, Special, None, kw = [Unplayable], gen = false;
     WasteAway: -1, Status, Special, None, kw = [Unplayable], gen = false;
     Wither: -1, Status, Special, None, kw = [Unplayable], gen = false;
+    // Scaffolded from each class's constructor; keywords, tags and gen are the porters'.
+    Alchemize: 1, Skill, Rare, Self_;
+    Anointed: 1, Skill, Rare, Self_;
+    Automation: 1, Power, Uncommon, Self_;
+    BeaconOfHope: 1, Power, Rare, Self_;
+    BeatDown: 3, Skill, Rare, RandomEnemy;
+    BelieveInYou: 0, Skill, Uncommon, Self_;
+    Bolas: 0, Attack, Rare, AnyEnemy;
+    Calamity: 3, Power, Rare, Self_;
+    Catastrophe: 2, Skill, Uncommon, Self_;
+    Coordinate: 1, Skill, Uncommon, Self_;
+    DarkShackles: 0, Skill, Uncommon, AnyEnemy;
+    Discovery: 1, Skill, Uncommon, Self_;
+    DramaticEntrance: 0, Attack, Uncommon, AllEnemies;
+    Entropy: 1, Power, Rare, Self_;
+    Equilibrium: 2, Skill, Uncommon, Self_;
+    EternalArmor: 3, Power, Rare, Self_;
+    Fasten: 1, Power, Uncommon, Self_;
+    Finesse: 0, Skill, Uncommon, Self_;
+    Fisticuffs: 1, Attack, Uncommon, AnyEnemy;
+    FlashOfSteel: 0, Attack, Uncommon, AnyEnemy;
+    GangUp: 1, Attack, Uncommon, AnyEnemy;
+    GoldAxe: 1, Attack, Rare, AnyEnemy;
+    HandOfGreed: 2, Attack, Rare, AnyEnemy;
+    HiddenGem: 1, Skill, Rare, Self_;
+    HuddleUp: 1, Skill, Uncommon, Self_;
+    Impatience: 0, Skill, Uncommon, Self_;
+    Intercept: 1, Skill, Uncommon, Self_;
+    JackOfAllTrades: 0, Skill, Uncommon, Self_;
+    Jackpot: 3, Attack, Rare, AnyEnemy;
+    Knockdown: 3, Attack, Rare, AnyEnemy;
+    Lift: 1, Skill, Uncommon, Self_;
+    MasterOfStrategy: 0, Skill, Rare, Self_;
+    Mayhem: 2, Power, Rare, Self_;
+    Mimic: 1, Skill, Rare, Self_;
+    Nostalgia: 1, Power, Rare, Self_;
+    Omnislice: 0, Attack, Uncommon, AnyEnemy;
+    Panache: 0, Power, Uncommon, Self_;
+    PanicButton: 0, Skill, Uncommon, Self_;
+    PrepTime: 1, Power, Uncommon, Self_;
+    Production: 0, Skill, Uncommon, Self_;
+    Prolong: 0, Skill, Uncommon, Self_;
+    Prowess: 1, Power, Uncommon, Self_;
+    Purity: 0, Skill, Uncommon, Self_;
+    Rally: 2, Skill, Rare, Self_;
+    Rend: 2, Attack, Rare, AnyEnemy;
+    Restlessness: 0, Skill, Uncommon, Self_;
+    RollingBoulder: 3, Power, Rare, Self_;
+    Salvo: 1, Attack, Rare, AnyEnemy;
+    Scrawl: 1, Skill, Rare, Self_;
+    SecretTechnique: 0, Skill, Rare, Self_;
+    SecretWeapon: 0, Skill, Rare, Self_;
+    SeekerStrike: 1, Attack, Uncommon, AnyEnemy;
+    Shockwave: 2, Skill, Uncommon, AllEnemies;
+    Splash: 1, Skill, Uncommon, Self_;
+    Stratagem: 1, Power, Uncommon, Self_;
+    TagTeam: 2, Attack, Uncommon, AnyEnemy;
+    TheBomb: 2, Skill, Uncommon, Self_;
+    TheGambit: 0, Skill, Rare, Self_;
+    ThinkingAhead: 0, Skill, Uncommon, Self_;
+    ThrummingHatchet: 1, Attack, Uncommon, AnyEnemy;
+    UltimateDefend: 1, Skill, Uncommon, Self_;
+    UltimateStrike: 1, Attack, Uncommon, AnyEnemy;
+    Volley: -1, Attack, Uncommon, RandomEnemy, x = true;
+    Apotheosis: 2, Skill, Special, Self_;
+    Apparition: 1, Skill, Special, Self_;
+    BrightestFlame: 0, Skill, Special, Self_;
+    ByrdSwoop: 0, Attack, Special, AnyEnemy;
+    Caltrops: 1, Power, Special, Self_;
+    Clash: 0, Attack, Special, AnyEnemy;
+    Distraction: 1, Skill, Special, Self_;
+    DualWield: 1, Skill, Special, Self_;
+    Enlightenment: 0, Skill, Special, Self_;
+    Entrench: 2, Skill, Special, Self_;
+    Exterminate: 1, Attack, Special, AllEnemies;
+    FeedingFrenzy: 0, Skill, Special, Self_;
+    HelloWorld: 1, Power, Special, Self_;
+    MadScience: 1, Attack, Special, AnyEnemy;
+    Maul: 1, Attack, Special, AnyEnemy;
+    Metamorphosis: 2, Skill, Special, Self_;
+    NeowsFury: 1, Attack, Special, AnyEnemy;
+    Outmaneuver: 1, Skill, Special, Self_;
+    Peck: 1, Attack, Special, AnyEnemy;
+    Rebound: 1, Attack, Special, AnyEnemy;
+    Relax: 3, Skill, Special, Self_;
+    RipAndTear: 1, Attack, Special, RandomEnemy;
+    Squash: 1, Attack, Special, AnyEnemy;
+    Stack: 1, Skill, Special, Self_;
+    ToricToughness: 2, Skill, Special, Self_;
+    Whistle: 3, Attack, Special, AnyEnemy;
+    Wish: 0, Skill, Special, Self_;
+    ByrdonisEgg: -1, Curse, Special, None;
+    LanternKey: -1, Curse, Special, Self_;
+    SpoilsMap: -1, Curse, Special, Self_;
+    Debris: 1, Status, Special, None;
+    Void: -1, Status, Special, None;
+    Shiv: 0, Attack, Special, AnyEnemy;
+    Soul: 0, Skill, Special, Self_;
+    Fuel: 0, Skill, Special, Self_;
+    SovereignBlade: 2, Attack, Special, AnyEnemy;
+    MinionDiveBomb: 0, Attack, Special, AnyEnemy;
+    MinionSacrifice: 0, Skill, Special, Self_;
+    MinionStrike: 0, Attack, Special, AnyEnemy;
+    SweepingGaze: 0, Attack, Special, RandomEnemy;
 }
 
 /// The Ironclad card pool in `IroncladCardPool.cs` order, for generation.
@@ -387,6 +491,12 @@ impl Card {
         let picku = |base: u32, upg: u32| if up { upg } else { base };
         let d = Vars::default;
         let mut v = match self.id {
+            // Not ported yet, group A; the porter deletes this arm.
+            Alchemize | Anointed | Automation | BeaconOfHope | BeatDown | BelieveInYou | Bolas | Calamity | Catastrophe | Coordinate | DarkShackles | Discovery | DramaticEntrance | Entropy | Equilibrium | EternalArmor | Fasten | Finesse | Fisticuffs | FlashOfSteel | GangUp | GoldAxe | HandOfGreed | HiddenGem | HuddleUp | Impatience | Intercept | JackOfAllTrades | Jackpot | Knockdown | Lift | MasterOfStrategy | Mayhem | Mimic => d(),
+            // Not ported yet, group B; the porter deletes this arm.
+            Nostalgia | Omnislice | Panache | PanicButton | PrepTime | Production | Prolong | Prowess | Purity | Rally | Rend | Restlessness | RollingBoulder | Salvo | Scrawl | SecretTechnique | SecretWeapon | SeekerStrike | Shockwave | Splash | Stratagem | TagTeam | TheBomb | TheGambit | ThinkingAhead | ThrummingHatchet | UltimateDefend | UltimateStrike | Volley => d(),
+            // Not ported yet, group C; the porter deletes this arm.
+            Apotheosis | Apparition | BrightestFlame | ByrdSwoop | Caltrops | Clash | Distraction | DualWield | Enlightenment | Entrench | Exterminate | FeedingFrenzy | HelloWorld | MadScience | Maul | Metamorphosis | NeowsFury | Outmaneuver | Peck | Rebound | Relax | RipAndTear | Squash | Stack | ToricToughness | Whistle | Wish | ByrdonisEgg | LanternKey | SpoilsMap | Debris | Void | Shiv | Soul | Fuel | SovereignBlade | MinionDiveBomb | MinionSacrifice | MinionStrike | SweepingGaze => d(),
             Aggression | Barricade | Cascade | Havoc | Hellraiser | InfernalBlade | PrimalForce
             | Stoke | Unmovable | Wound | Dazed | AscendersBane | DarkEmbrace | Juggling | Corruption => d(),
             // Curses. Regret reads the hand it ends the turn in, so its
@@ -524,6 +634,12 @@ impl Card {
         let m = v.magic as i32;
 
         match self.id {
+            // Not ported yet, group A; the porter deletes this arm.
+            Alchemize | Anointed | Automation | BeaconOfHope | BeatDown | BelieveInYou | Bolas | Calamity | Catastrophe | Coordinate | DarkShackles | Discovery | DramaticEntrance | Entropy | Equilibrium | EternalArmor | Fasten | Finesse | Fisticuffs | FlashOfSteel | GangUp | GoldAxe | HandOfGreed | HiddenGem | HuddleUp | Impatience | Intercept | JackOfAllTrades | Jackpot | Knockdown | Lift | MasterOfStrategy | Mayhem | Mimic => vec![],
+            // Not ported yet, group B; the porter deletes this arm.
+            Nostalgia | Omnislice | Panache | PanicButton | PrepTime | Production | Prolong | Prowess | Purity | Rally | Rend | Restlessness | RollingBoulder | Salvo | Scrawl | SecretTechnique | SecretWeapon | SeekerStrike | Shockwave | Splash | Stratagem | TagTeam | TheBomb | TheGambit | ThinkingAhead | ThrummingHatchet | UltimateDefend | UltimateStrike | Volley => vec![],
+            // Not ported yet, group C; the porter deletes this arm.
+            Apotheosis | Apparition | BrightestFlame | ByrdSwoop | Caltrops | Clash | Distraction | DualWield | Enlightenment | Entrench | Exterminate | FeedingFrenzy | HelloWorld | MadScience | Maul | Metamorphosis | NeowsFury | Outmaneuver | Peck | Rebound | Relax | RipAndTear | Squash | Stack | ToricToughness | Whistle | Wish | ByrdonisEgg | LanternKey | SpoilsMap | Debris | Void | Shiv | Soul | Fuel | SovereignBlade | MinionDiveBomb | MinionSacrifice | MinionStrike | SweepingGaze => vec![],
             Aggression => vec![self_power(PowerId::Aggression, 1)],
             // Anger.cs: `CreateClone()` into the discard, so an enchanted
             // Anger breeds enchanted Angers.
