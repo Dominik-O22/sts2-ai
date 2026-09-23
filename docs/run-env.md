@@ -1,9 +1,10 @@
 # The run environment
 
-Status: design, not built. The run layer under it (`game_rng.rs`, `map.rs`,
+Status: step 1 built (the effect layer, direct fights, a forward run);
+steps 2 to 5 are design. The run layer under it (`game_rng.rs`, `map.rs`,
 `plan.rs`, `run.rs`, `rewards.rs`, `shop.rs`, `pools.rs`, `events.rs`)
-replays real runs floor for floor; this turns it into something a policy
-plays.
+replays real runs floor for floor; `effects.rs`, `rooms.rs` and
+`forward.rs` make it something a policy plays.
 
 ## What it is for
 
@@ -11,37 +12,72 @@ A whole-run policy: paths, card picks, shops, rest sites, events, Neow. The
 combat policy we already train plays the fights. A run is won by beating the
 last act's bosses (two at A10; 49 floors).
 
-## What the run layer does not do yet
+## The effect layer
 
-It is stream-exact and effect-free: it rolls what the game rolls, and
-`history.rs` then overwrites HP, gold, deck and potions from the recording
-after every floor. Forward play needs the effect layer, which exists nowhere
-yet:
+`effects.rs` is what rooms and relics do to the player between fights:
+gold (Bowler Hat, Ectoplasm, Dragon Fruit), HP and max HP, cards joining
+the deck with the hooks on them (the eggs, Fresnel Lens, Lucky Fysh),
+potions into slots (three, two at Tight Belt), each relic's pickup, the
+rest site options (heal with Regal Pillow and Stone Humidifier, smith,
+Lift, Dig, Kindle, Cook), and what entering a room does (an ancient's heal,
+Meal Ticket, Eternal Feather, Planisphere, Maw Bank). Nothing there asks
+the player: what needs a choice comes back as an `Offered` (cards to take,
+relic rewards, cards to pick from the deck), and a pickup the port lacks
+comes back as `Offered::Unported`, with the relic held and its effect
+skipped.
 
-- relic pickup effects (`AfterObtained`: Strawberry, Old Coin, Potion Belt,
-  Whetstone, War Paint, the `UPON_PICKUP` list in `run.rs`, Neow's), not
-  just the stream draws `obtain()` ports for six relics;
-- rest sites: the 30% heal, Regal Pillow, smith; ancients' heal on entry
-  (`AncientEventModel`, 80% of missing HP at A2+);
-- taking rewards: gold, potions into slots, the card, the relic, and the
-  reward-screen logic that now lives in the checker (Lasting Candy's
-  count, eggs upgrading the open card reward when a relic is taken first,
-  relic pickup order, Lucky Fysh gold, Petrified Toad's rock) moved into
-  `RunState` so the history check and the env share it;
-- shops: prices (drawn and thrown away today), base costs, card removal
-  and its rising price, restocking;
-- event effects: `events.rs` ports the Rewards-stream draws of about 14
-  events, and 33 more are known to draw nothing. No event's effect (HP,
-  gold, curses, transforms) is ported;
-- the map position (`PointId`), which makes the shop blacklist a direct
-  check instead of the checker's path inference.
+`rooms.rs` lays each room out and puts every choice to a `Chooser`: the
+rewards screen, a treasure chest, a rest site, an ancient's relic, and
+what pickups offer on the way. `RunState` holds what a fight needs as the
+fight needs it: relics as `RunRelic` with the sim's `counter` and `flag`
+(Lasting Candy, Silver Crucible and Lava Rock keep their run counts there
+too), potion slots, enchantments with their amount, and the map point, so
+`enter(map, point)` works the shop blacklist out itself.
 
-The room functions take the recorded choice and return what was drawn
-(`event_option`, `rest_option`, `ancient_options`). Forward play needs the
-options before the choice, and some draws happen while options are laid
-out (Wongo's featured item, Darv's tome), so each splits into `offer()`
-(the draws) and `take(choice)` (the effects), the shape `combat_rewards()`
-already has.
+Rooms whose options draw while they are laid out split into the draws and
+the choice: `event_offer` then `event_option` (Wongo's featured item, the
+Relic Trader's relics, the Fake Merchant's prices), `rest_options` then
+`rest`, `ancient_options` then the relic taken in `rooms::ancient`.
+
+Every pool relic's pickup is ported, apart from those whose pickup or
+hooks draw on the Rewards stream in ways not ported (`UNPORTED_RELICS`:
+Cauldron, Orrery, Calling Bell, Toy Box and others). Of Neow's and the
+ancients' relics these are not: Leafy Poultice and New Leaf (transforms),
+Nutritious Soup, Pandora's Box, Beautiful Bracelet, Touch of Orobas,
+Pael's Claw, Growth, Horn and Legion, Archaic Tooth, Astrolabe, Tanx's
+Whistle, Tri-Boomerang, Storybook, Signet Ring, Preserved Fog, Jewelry
+Box, Alchemical Coffer, Claws, Fur Coat, Fragrant Mushroom, Golden
+Compass, Byrdpip, Dusty Tome.
+
+Still not here, and step 4: shops' prices, buying and card removal (a
+forward run stocks the shop, which draws, and leaves); event effects (a
+forward run lays the options out, which draws, and leaves); Neow's and
+the ancients' options, drawn on the event's own stream (a forward run
+takes the heal and leaves).
+
+### Checked against real runs
+
+`history::check(run, live)` walks a real run through the same room flows
+with the player's recorded choices as the `Chooser`, so the checker and
+the forward run share them. It compares what the flows draw with the
+record (unchanged: 395 of 462 floors on the Rewards stream, rooms in all
+23 runs). With `live` it also compares the player the effects leave (HP,
+max HP, gold, deck, relics, potions) with each floor's `player_stats`,
+and sets the player back to the record after a floor it does not
+compare. Fights are not simulated there: what a fight did (gold stolen,
+potions used, Petrified Toad's rock, a card a thief took and gave back)
+comes from the record, and so do HP and max HP after a fight, since the
+record does not split the fight's healing from the rewards'.
+`runcheck --effects` prints it. On the modded profile: 348 floors
+compared (207 fights, 63 rest sites, 27 ancients, 27 treasure rooms, 24
+shops with their purchases read off the record), none differ. Not
+compared: 21 fights that ended a run, 55 events, 10 floors that picked
+up a relic whose pickup is not ported (Leafy Poultice, New Leaf,
+Nutritious Soup, Beautiful Bracelet, Pandora's Box, Dingy Rug), and 28
+floors of one run whose draws follow a Rewards stream already lost.
+
+What no compared floor exercises yet: Whetstone, War Paint and Sand
+Castle's upgrades, which shuffle on the Niche stream.
 
 ## Numbers that shape it
 
@@ -83,16 +119,19 @@ space.
 |---|---|
 | Ancient (Neow, act ancients) | the relic and boon options; heal on entry |
 | Map | the current point's children |
-| Rewards | relics are taken first, in the game's order (eggs then upgrade the open card reward); then the potion if a slot is free; then one of the offered cards or skip. Gold is automatic |
+| Rewards | the relics first, one at a time in the order chosen, or leave them (a relic taken first works on the open card reward: the eggs); then keep or leave the potion; then one of the offered cards or skip. Gold is automatic |
 | Shop | buy a card, relic or potion (with its price), remove a card, leave |
-| Rest | heal, smith, relic options (Dig, Lift, ...) |
+| Rest | heal, smith, relic options (Dig, Lift, Kindle, Cook); more than one with Miniature Tent |
 | Event | the event's options, then any card pick it opens |
-| Treasure | none (take the relic) |
+| Treasure | take the relic or leave it |
 | Deck pick | a card from the deck (upgrade, remove, transform, enchant) |
 | Done | terminal |
 
-Unsupported cards (Splash, Mad Science: `UNSUPPORTED_CARDS`) are masked out
-of offers and purchases.
+`rooms::Decision` is this table in code, and a `Chooser` answers it with
+an index; `rooms::First` takes the first option every time. Unsupported
+cards (Splash, Mad Science: `UNSUPPORTED_CARDS`) are masked out of card
+and bundle offers before the chooser sees them (`forward.rs`), and will
+be out of purchases.
 
 ### Observation and scoring
 
@@ -117,19 +156,24 @@ other id, so run checkpoints stay remappable.
 
 ### Fights
 
-- Built directly from the run state: game ids to sim ids (`pools::sim_card`
-  and friends) into a `FightSetup`. Not through the recorder's `start`
-  format: `RunParts::of` carries a recorder fix that deletes the first
-  Potion-Shaped Rock when Petrified Toad is held, and in forward play that
-  rock is real.
+- `RunState::fight_setup` builds the fight directly from the run state:
+  game ids to sim ids (`pools::sim_card` and friends) into a `FightSetup`,
+  relics the sim leaves out (`gen::INERT_RELICS`) dropped. Not through the
+  recorder's `start` format: `RunParts::of` carries a recorder fix that
+  deletes the first Potion-Shaped Rock when Petrified Toad is held, and in
+  forward play that rock is real. A test builds recorded starts both ways.
 - `RunState` holds what a fight needs as the fight needs it: relics with
   their persistent `counter` and `flag` (Ember Tea and Pumpkin Candle
   charges live there), potion slots with their count (four with Potion
   Belt), enchantments with their amount.
-- Writeback after a fight: HP, max HP, gold (thieves, Hand of Greed, gold
-  relics), potions, the relics whole, and which monsters escaped (the gold
-  reward's proportion). The sim never changes the master deck, and
-  post-victory heals (Burning Blood) already land on the fight's HP.
+- `RunState::end_fight` writes back HP, max HP, gold (thieves, Hand of
+  Greed, gold relics), the potion slots and each relic's counter and flag,
+  and returns the gold reward's proportion from the monsters that escaped.
+  The sim never changes the master deck, and post-victory heals (Burning
+  Blood) already land on the fight's HP.
+- The forward run rolls a fight's enemies from the run's seed and the
+  floor, and hands the setup to a `forward::Fights`: `stub_fight` (won at
+  70% HP) or a closure; step 2 plugs the combat sim in there.
 - Combat uses the combat sim's own RNG. The run streams the game also draws
   in combat are not advanced.
 
@@ -142,11 +186,16 @@ from the game's for the rest of that run (as `history.rs` models with
 
 ### Unported content
 
-An event whose effects are not ported is entered and left with no effect,
-counted per event. A relic whose pickup is not ported returns an `Unported`
-marker, not an error, and is counted. The counts, weighted by how often a
-thing comes up and whether it draws on the Rewards stream, say what to port
-next.
+An event whose effects are not ported is entered and left with no effect
+(after what laying its options out draws, `event_offer`), counted per
+event; so are shops and the ancients' options. A relic whose pickup is not
+ported returns an `Unported` marker, not an error, and is counted. The
+counts, weighted by how often a thing comes up and whether it draws on the
+Rewards stream, say what to port next. `examples/forward.rs` prints them:
+over 200 seeds taking the first option, every run reaches floor 49 in
+about 41 ms (the three maps are most of it), and what it meets unported is
+shops, the ancients' options and events, and The Courier and White Star
+among the relics.
 
 ### Rewards and value
 
@@ -168,13 +217,14 @@ next.
 
 ## Build order
 
-1. Plumbing, no policy: the effect layer for what step 2 needs (relic
+1. Done. Plumbing, no policy: the effect layer for what step 2 needs (relic
    pickups, rest heal and smith, ancient heal, reward taking with the
-   checker's logic moved into `RunState`, map position, offer/take split),
-   the direct `RunState` to `FightSetup` conversion and the writeback. A
-   Rust test drives a seeded run to floor 49 with a stub fight result (won,
-   HP x 0.7) and a fixed choice rule, deterministically. `runcheck` still
-   matches the real runs it matches today.
+   checker's logic moved into shared room flows, map position, offer/take
+   split), the direct `RunState` to `FightSetup` conversion and the
+   writeback. A Rust test drives a seeded run to floor 49 with a stub fight
+   result (won, HP x 0.7) and a fixed choice rule, deterministically.
+   `runcheck` still matches the real runs it matched, and `runcheck
+   --effects` checks the effects against them.
 2. The loop: the `VecEnv` run source, with run decisions made in Rust by a
    random policy, played from Python with the current combat checkpoint
    through the unchanged `Envs` wrapper (episode ends gain the run floor and

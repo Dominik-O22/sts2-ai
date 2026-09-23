@@ -108,9 +108,9 @@ pub fn play(seed: &str, ascension: Ascension, chooser: &mut impl Chooser, fights
     let acts = select_acts(crate::game_rng::RunRngs::new(seed).seed, &unlocks);
     let mut run = Played { state: RunState::new(seed, acts, ascension, &unlocks), end: End::Won, fights: 0, unported: BTreeMap::new() };
     let mut chooser = Playable(chooser);
-    for act in 0..acts.len() {
-        run.state.enter_act(act);
-        let map = ActMap::generate(run.state.rngs.seed, acts[act], ascension);
+    for (i, &act) in acts.iter().enumerate() {
+        run.state.enter_act(i);
+        let map = ActMap::generate(run.state.rngs.seed, act, ascension);
         let mut point = map.start;
         loop {
             if let Some(end) = run.room(&map, point, &mut chooser, fights) {

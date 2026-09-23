@@ -54,12 +54,6 @@ impl Chooser for First {
     }
 }
 
-impl DeckCard {
-    fn of(offer: &Offer) -> Self {
-        DeckCard { id: offer.id.to_string(), upgraded: offer.upgraded, enchantment: None }
-    }
-}
-
 impl RunState {
     /// Resolves what effects offered, in order: each choice put to
     /// `chooser` and applied, a taken relic's pickup resolved in turn.
@@ -69,12 +63,12 @@ impl RunState {
             match offer {
                 Offered::Cards(cards) => {
                     if let Some(card) = cards.get(chooser.choose(self, Decision::Card(&cards))) {
-                        self.add_card(DeckCard::of(card));
+                        self.add_card(DeckCard::from(*card));
                     }
                 }
                 Offered::Bundles(bundles) => {
                     if let Some(bundle) = bundles.get(chooser.choose(self, Decision::Bundle(&bundles))) {
-                        bundle.iter().for_each(|card| self.add_card(DeckCard::of(card)));
+                        bundle.iter().for_each(|&card| self.add_card(DeckCard::from(card)));
                     }
                 }
                 Offered::Relics(relics) => self.take_relics(relics, chooser, log),

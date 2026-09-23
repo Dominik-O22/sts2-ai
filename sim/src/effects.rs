@@ -131,6 +131,12 @@ const MODIFIER_CURSES: &[&str] = &["CLUMSY", "DEBT", "DECAY", "DOUBT", "GUILTY",
 /// Cards with `CardKeyword.Eternal`, which no screen removes.
 const ETERNAL: &[&str] = &["ASCENDERS_BANE", "BAD_LUCK", "CURSE_OF_THE_BELL", "ENTHRALLED", "FOLLY", "FORBIDDEN_GRIMOIRE", "GREED"];
 
+impl From<Offer> for DeckCard {
+    fn from(offer: Offer) -> Self {
+        DeckCard { id: offer.id.to_string(), upgraded: offer.upgraded, enchantment: None }
+    }
+}
+
 impl DeckCard {
     /// Its `CardType`, if the combat sim knows the card.
     pub fn kind(&self) -> Option<CardType> {
@@ -238,7 +244,7 @@ impl RunState {
         }
     }
 
-    /// `CardPotionCmd.TryToProcure`: Sozu refuses it, else the first empty
+    /// `PotionCmd.TryToProcure`: Sozu refuses it, else the first empty
     /// slot takes it. False if it was not kept.
     pub fn add_potion(&mut self, id: &str) -> bool {
         if self.has_relic("SOZU") {
@@ -409,8 +415,8 @@ impl RunState {
             "ARCANE_SCROLL" => {
                 let mut odds = self.card_odds;
                 let cards = create_cards(1, &CardOptions::uniform(Rarity::Rare), &mut odds, &mut self.roll_ctx());
-                for card in &cards {
-                    self.add_card(DeckCard { id: card.id.to_string(), upgraded: card.upgraded, enchantment: None });
+                for &card in &cards {
+                    self.add_card(DeckCard::from(card));
                 }
                 offered.push(Offered::Gained(cards));
             }
@@ -578,10 +584,13 @@ impl RunState {
         if self.has_relic("STONE_HUMIDIFIER") {
             self.gain_max_hp(5);
         }
-        if !self.has_relic("TINY_MAILBOX") {
-            return Vec::new();
+        let mut offered = Vec::new();
+        if self.has_relic("TINY_MAILBOX") {
+            offered.push(Offered::Potions((0..2).map(|_| create_potion(self.rewards()).to_string()).collect()));
         }
-        let potions = (0..2).map(|_| create_potion(self.rewards()).to_string()).collect();
-        vec![Offered::Potions(potions)]
+        if self.has_relic("DREAM_CATCHER") {
+            offered.push(Offered::Unported("DREAM_CATCHER".into()));
+        }
+        offered
     }
 }
