@@ -7,8 +7,10 @@ step t cuts the value bootstrap for step t+1.
 
 from __future__ import annotations
 
+import copy
 import time
 from collections import deque
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -180,14 +182,15 @@ class SearchTargets:
         return self.size if self.full else self.next
 
     def add(self, floats: np.ndarray, ids: np.ndarray, mask: np.ndarray, target: np.ndarray) -> None:
-        for k in range(len(floats)):
-            i = self.next
-            self.floats[i] = torch.from_numpy(floats[k])
-            self.ids[i] = torch.from_numpy(ids[k])
-            self.mask[i] = torch.from_numpy(mask[k])
-            self.target[i] = torch.from_numpy(target[k])
-            self.next = (i + 1) % self.size
-            self.full |= self.next == 0
+        k = len(floats)
+        idx = torch.arange(self.next, self.next + k, device=self.floats.device) % self.size
+        dev = self.floats.device
+        self.floats[idx] = torch.from_numpy(floats).to(dev)
+        self.ids[idx] = torch.from_numpy(ids).to(dev)
+        self.mask[idx] = torch.from_numpy(mask).to(dev)
+        self.target[idx] = torch.from_numpy(target).to(dev)
+        self.full |= self.next + k >= self.size
+        self.next = (self.next + k) % self.size
 
     def sample(self, n: int) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         idx = torch.randint(len(self), (n,), device=self.floats.device)
@@ -195,10 +198,13 @@ class SearchTargets:
 
 
 @torch.no_grad()
-def search_targets(policy: Policy, device: torch.device, envs: Envs, cfg: Config, seed: int):
+@torch.no_grad()
+def start_search(policy: Policy, device: torch.device, envs: Envs, cfg: Config, seed: int):
     """Turn search on `cfg.search_states` random envs with a choice to make.
-    Returns their observations, masks, and the search's distribution over
-    first actions."""
+    Forks them now, while `envs` holds their states, and returns the rest
+    of the work as a function: it plays the copies out and returns the
+    roots' observations, masks, and the search's distribution over first
+    actions, so it can run in a thread while `envs` moves on."""
     choice = np.flatnonzero(envs.mask.sum(axis=1) > 1)
     roots = np.random.choice(choice, min(cfg.search_states, len(choice)), replace=False)
     n = cfg.search_copies
@@ -207,19 +213,24 @@ def search_targets(policy: Policy, device: torch.device, envs: Envs, cfg: Config
     tops = [np.argsort(-logits[r])[: min(cfg.search_top, int(envs.mask[i].sum()))] for r, i in enumerate(roots)]
     forks = envs.sim.fork([int(i) for i in roots], n, seed=seed)
     first = np.concatenate([spread(top, n) for top in tops])
-    score = rollout(policy, device, forks, first)
-    target = np.zeros((len(roots), envs.mask.shape[1]), np.float32)
-    for r in range(len(roots)):
-        f, sc = first[r * n : (r + 1) * n], score[r * n : (r + 1) * n]
-        acts = np.unique(f)
-        q = np.array([sc[f == a].mean() for a in acts])
-        prior = np.exp(logits[r, acts] - logits[r, acts].max())
-        v = float((prior * q).sum() / prior.sum())
-        tilted = logits[r].copy()
-        tilted[acts] += (q - v) / cfg.search_temp
-        p = np.exp(tilted - tilted.max())
-        target[r] = p / p.sum()
-    return envs.floats[roots], envs.ids[roots], envs.mask[roots], target
+    floats, ids, mask = envs.floats[roots], envs.ids[roots], envs.mask[roots]
+
+    def finish():
+        score = rollout(policy, device, forks, first)
+        target = np.zeros((len(roots), mask.shape[1]), np.float32)
+        for r in range(len(roots)):
+            f, sc = first[r * n : (r + 1) * n], score[r * n : (r + 1) * n]
+            acts = np.unique(f)
+            q = np.array([sc[f == a].mean() for a in acts])
+            prior = np.exp(logits[r, acts] - logits[r, acts].max())
+            v = float((prior * q).sum() / prior.sum())
+            tilted = logits[r].copy()
+            tilted[acts] += (q - v) / cfg.search_temp
+            p = np.exp(tilted - tilted.max())
+            target[r] = p / p.sum()
+        return floats, ids, mask, target
+
+    return finish
 
 
 def save_checkpoint(path: Path, policy: Policy, opt: torch.optim.Optimizer, it: int, global_step: int) -> None:
@@ -250,6 +261,13 @@ def train(cfg: Config) -> Policy:
     autocast = torch.autocast(device.type, dtype=torch.bfloat16, enabled=cfg.bf16 and device.type == "cuda")
     roll = Rollout(cfg, envs, device)
     searched = SearchTargets(cfg.search_buffer, envs.layout, device) if cfg.search_states else None
+    # The search runs in a thread on its own copy of the policy, synced
+    # each iteration, while the update trains the original: both mostly
+    # wait on the GPU or on Rust, which release the GIL. Its targets land
+    # an iteration late.
+    searcher = ThreadPoolExecutor(1) if searched is not None else None
+    search_policy = copy.deepcopy(policy).eval() if searched is not None else None
+    pending: Future | None = None
     stats = Stats()
     start_iter, global_step = 1, 0
     if cfg.resume:
@@ -302,7 +320,10 @@ def train(cfg: Config) -> Policy:
             adv, returns = roll.advantages(last_value.float(), cfg.gamma, cfg.lam)
         global_step += cfg.steps * cfg.envs
         if searched is not None:
-            searched.add(*search_targets(policy, device, envs, cfg, seed=cfg.seed * 1_000_003 + it))
+            if pending is not None:
+                searched.add(*pending.result())
+            search_policy.load_state_dict(policy.state_dict())
+            pending = searcher.submit(start_search(search_policy, device, envs, cfg, seed=cfg.seed * 1_000_003 + it))
 
         # Update.
         policy.train()
