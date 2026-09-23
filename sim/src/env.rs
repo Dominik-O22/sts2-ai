@@ -350,18 +350,19 @@ impl VecEnv {
 /// the same hidden draws.
 pub struct Forks {
     combats: Vec<Combat>,
-    /// Per copy: the turn its root was on, and the root's baseline.
+    /// Per copy: the last player turn it plays, and the root's baseline.
     turns: Vec<u32>,
     bases: Vec<Baseline>,
 }
 
 impl Forks {
     pub fn new(root: &Combat, n: usize, groups: usize, seed: u64) -> Self {
-        Self::of(&[root], n, groups, seed)
+        Self::of(&[root], n, groups, seed, 1)
     }
 
-    /// `n` copies of each root, root after root.
-    pub fn of(roots: &[&Combat], n: usize, groups: usize, seed: u64) -> Self {
+    /// `n` copies of each root, root after root, each played for `depth`
+    /// player turns: the rest of the current one, then `depth - 1` more.
+    pub fn of(roots: &[&Combat], n: usize, groups: usize, seed: u64, depth: u32) -> Self {
         let per_group = n.div_ceil(groups.max(1));
         let mut out = Self { combats: vec![], turns: vec![], bases: vec![] };
         for (r, root) in roots.iter().enumerate() {
@@ -373,7 +374,7 @@ impl Forks {
                 c.rngs = CombatRngs::new(seed ^ (i as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15));
                 Rng::new(seed ^ (group as u64 + 1) << 20).shuffle(&mut c.player.draw);
                 out.combats.push(c);
-                out.turns.push(root.player.turn);
+                out.turns.push(root.player.turn + depth.max(1) - 1);
                 out.bases.push(Baseline::of(root));
             }
         }

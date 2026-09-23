@@ -38,7 +38,9 @@ def pick(first: np.ndarray, score: np.ndarray, own: int, mean: bool) -> int:
 
 
 @torch.no_grad()
-def play(policy: Policy, device: torch.device, copies: int, kinds: set[str], acts: int, seed: int, mean: bool) -> dict[str, list[bool]]:
+def play(
+    policy: Policy, device: torch.device, copies: int, kinds: set[str], acts: int, seed: int, mean: bool, depth: int = 1
+) -> dict[str, list[bool]]:
     """One fight per held-out elite and boss setup. Returns wins by encounter."""
     probe = Envs(1, seed=seed)
     n = probe.use_holdout(seed, HOLDOUT_PER_ENCOUNTER, acts)
@@ -56,9 +58,9 @@ def play(policy: Policy, device: torch.device, copies: int, kinds: set[str], act
         actions = masked_logits(logits, mask).argmax(dim=1).cpu().numpy()
         if copies:
             roots = sorted(active)
-            forks = envs.sim.fork(roots, copies, seed=seed + step)
+            forks = envs.sim.fork(roots, copies, seed=seed + step, depth=depth)
             first = np.concatenate([spread(np.flatnonzero(envs.mask[i]), copies) for i in roots])
-            score = rollout(policy, device, forks, first)
+            score = rollout(policy, device, forks, first, depth=depth)
             for r, i in enumerate(roots):
                 part = slice(r * copies, (r + 1) * copies)
                 actions[i] = pick(first[part], score[part], int(actions[i]), mean)
@@ -78,6 +80,7 @@ def main() -> None:
     ap.add_argument("--acts", type=int, default=3)
     ap.add_argument("--seed", type=int, default=12345)
     ap.add_argument("--mean", action="store_true", help="rank first actions by mean copy score, not best copy")
+    ap.add_argument("--depth", type=int, default=1, help="player turns each copy plays (1: the rest of this one)")
     args = ap.parse_args()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     policy = Policy(Layout.load()).to(device)
@@ -87,7 +90,7 @@ def main() -> None:
     t0 = time.time()
     greedy = play(policy, device, 0, kinds, args.acts, args.seed, args.mean)
     t1 = time.time()
-    search = play(policy, device, args.copies, kinds, args.acts, args.seed, args.mean)
+    search = play(policy, device, args.copies, kinds, args.acts, args.seed, args.mean, args.depth)
     t2 = time.time()
     print(f"{'encounter':32s} greedy  search")
     for enc in sorted(greedy):

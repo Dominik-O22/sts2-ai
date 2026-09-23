@@ -17,7 +17,8 @@ import torch
 from sts2ai.env import Layout
 from sts2ai.model import Policy, masked_logits
 
-# A turn is over well within this many actions; a runaway plan is cut here.
+# Actions per player turn searched; a runaway plan is cut after this many
+# per turn.
 MAX_PLAN_STEPS = 40
 # Copies per network call: a search over many fights at once is too big for
 # one batch on the GPU.
@@ -40,8 +41,9 @@ def rollout(
     forks,
     first: np.ndarray,
     on_step: Callable[[np.ndarray, np.ndarray], None] | None = None,
+    depth: int = 1,
 ) -> np.ndarray:
-    """Play every copy in `forks` to the end of its turn, `first[i]` as copy
+    """Play every copy in `forks` (forked with this `depth`) to the end of its turn, `first[i]` as copy
     i's first action. `on_step(actions, live)` sees each step's actions and
     the copies they apply to before it is applied. Returns each copy's
     score."""
@@ -53,7 +55,7 @@ def rollout(
     score = np.zeros(n, np.float32)
     actions = np.ascontiguousarray(first, dtype=np.int64)
     live = np.arange(n)
-    for step in range(MAX_PLAN_STEPS):
+    for step in range(MAX_PLAN_STEPS * depth):
         if step > 0:
             # Only the copies still in their turn, packed: most end it in a
             # few steps.
