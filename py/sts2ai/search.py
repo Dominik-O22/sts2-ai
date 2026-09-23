@@ -5,6 +5,16 @@ Each copy starts with a given first action; the policy samples the rest of
 the turn. A copy's score is the shaped reward it collected plus the value
 head where the next turn starts (a finished fight already paid its
 terminal reward).
+
+An opening scored by the mean of its copies is scored by the policy's
+average continuation, and the player will not play that: they search
+again at the next decision. With `second`, copies that saw the same thing
+after their first action (one hand, one board: `observe_unique`) also try
+every legal second action, and `openings` scores an opening by its best
+second action per thing seen, averaged over those: best over the player's
+choices, mean over chance. A turn-1 Entomancer hand showed why: the policy
+attacks after Defend and feeds Personal Hive, so Defend averaged below
+passing, while Defend then passing was the best line by far.
 """
 
 from __future__ import annotations
@@ -23,6 +33,10 @@ MAX_PLAN_STEPS = 40
 # Copies per network call: a search over many fights at once is too big for
 # one batch on the GPU.
 CHUNK = 16384
+# Copies each second action needs before `second` tries them all for what a
+# first action led to; fewer and the max over them picks luck, so those
+# copies keep the policy's play.
+SECOND_MIN = 8
 
 
 def forward(policy: Policy, device: torch.device, floats: torch.Tensor, ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -63,11 +77,17 @@ def rollout(
     first: np.ndarray,
     on_step: Callable[[np.ndarray, np.ndarray], None] | None = None,
     depth: int = 1,
+    second: tuple[np.ndarray, np.ndarray] | None = None,
 ) -> np.ndarray:
     """Play every copy in `forks` (forked with this `depth`) to the end of its turn, `first[i]` as copy
     i's first action. `on_step(actions, live)` sees each step's actions and
     the copies they apply to before it is applied. Returns each copy's
-    score."""
+    score. With `second = (groups, actions)`, two length-n arrays filled
+    here, copies that saw the same observation after their first action
+    spread their second action over its legal ones when there are
+    `SECOND_MIN` copies for each; `groups[i]` is copy i's observation group,
+    or -1 where the policy played on or the turn was already over, and
+    `actions[i]` its second action."""
     n = len(forks)
     floats, ids, mask = buffers(n, Layout.load())
     inverse = np.empty(n, np.int64)
@@ -90,6 +110,18 @@ def rollout(
             per_copy = masked[torch.from_numpy(inverse[: len(live)]).to(device)]
             actions = np.zeros(n, np.int64)
             actions[live] = torch.distributions.Categorical(logits=per_copy, validate_args=False).sample().cpu().numpy()
+            if step == 1 and second is not None:
+                groups, seconds = second
+                groups[:] = -1
+                seen = inverse[: len(live)]
+                legal_rows = mask[:n_unique].numpy()
+                for g in np.unique(seen):
+                    members = live[seen == g]
+                    legal = np.flatnonzero(legal_rows[g])
+                    if len(members) >= SECOND_MIN * len(legal):
+                        actions[members] = spread(legal, len(members))
+                        groups[members] = g
+                seconds[:] = actions
         if on_step is not None:
             on_step(actions, live)
         forks.step(actions, rewards)
@@ -102,6 +134,40 @@ def rollout(
         _, value = forward(policy, device, floats[:n_unique], ids[:n_unique])
         score[rows] += value.float().cpu().numpy()[inverse[: len(rows)]]
     return score
+
+
+def openings(first: np.ndarray, score: np.ndarray, second: tuple[np.ndarray, np.ndarray]) -> dict[int, tuple[float, int | None]]:
+    """Each first action's value, as `rollout(..., second=...)` left the
+    copies, and its best second action where the copies tried them all:
+    for each observation group it led to, the best second action's mean
+    score (chosen on half the copies, scored on the other half), then the
+    mean over groups by copies; copies with no group count by their own
+    mean. The best second action is the one of the largest group."""
+    groups, actions = second
+    out: dict[int, tuple[float, int | None]] = {}
+    for a in np.unique(first):
+        mine = first == a
+        total = weight = 0.0
+        best, largest = None, 0
+        for g in np.unique(groups[mine]):
+            group = mine & (groups == g)
+            if g < 0:
+                value = float(score[group].mean())
+            else:
+                # The best second action is picked on one half of its copies
+                # and scored on the other, both ways round: picked and scored
+                # on the same copies, the max is partly whichever got lucky.
+                members = {int(b): np.flatnonzero(group & (actions == b)) for b in np.unique(actions[group])}
+                means = [{b: float(score[idx[h::2]].mean()) for b, idx in members.items() if len(idx) > h} for h in (0, 1)]
+                picks = [max(m, key=m.get) for m in means]
+                value = 0.5 * (means[1].get(picks[0], means[0][picks[0]]) + means[0].get(picks[1], means[1][picks[1]]))
+                pick = picks[0]
+                if group.sum() > largest:
+                    best, largest = pick, int(group.sum())
+            total += value * group.sum()
+            weight += group.sum()
+        out[int(a)] = (total / weight, best)
+    return out
 
 
 def spread(legal: np.ndarray, n: int) -> np.ndarray:

@@ -32,7 +32,7 @@ import torch
 from sts2ai import _sim
 from sts2ai.env import DEFAULT_RECORDINGS, Layout
 from sts2ai.model import Policy, load_policy, masked_logits
-from sts2ai.search import rollout, spread
+from sts2ai.search import openings, rollout, spread
 
 ALTERNATIVES = 2
 # Plan scores closer than this are value-head noise: the policy's pick
@@ -168,23 +168,27 @@ class Session:
                 if (what := forks.describe(i, int(actions[i]))) is not None:
                     lines[i].append(what)
 
-        score = rollout(self.policy, self.device, forks, first, record)
-        # Openings ranked by the mean score of their copies (the best copy is
-        # a lucky draw as often as a good line; `searcheval` measured the
-        # mean ahead), grouped by what the play is: two Strikes in hand are
-        # one opening to you. Each prints its best copy as the example line.
+        second = (np.full(n, -1), np.zeros(n, np.int64))
+        score = rollout(self.policy, self.device, forks, first, record, second=second)
+        # Openings ranked by their best line (`search.openings`: the best
+        # second play for what each opening led to, averaged over chance),
+        # grouped by what the play is: two Strikes in hand are one opening
+        # to you. Each prints its best copy along its best second play.
+        value = openings(first, score, second)
         copies: dict[str, list[int]] = {}
         for i in range(n):
             if lines[i]:
                 copies.setdefault(lines[i][0], []).append(i)
-        mean = {what: float(score[idx].mean()) for what, idx in copies.items()}
+        mean = {what: max(value[int(first[i])][0] for i in idx) for what, idx in copies.items()}
         ranked = sorted(copies, key=lambda what: -mean[what])
         if policy_pick in mean and mean[ranked[0]] - mean[policy_pick] < PLAN_MARGIN:
             ranked.remove(policy_pick)
             ranked.insert(0, policy_pick)
         for rank, what in enumerate(ranked[: 1 + ALTERNATIVES]):
             arrow = "=>" if rank == 0 else "  "
-            best = max(copies[what], key=lambda i: score[i])
+            follow = value[int(first[copies[what][0]])][1]
+            along = [i for i in copies[what] if follow is None or second[1][i] == follow]
+            best = max(along or copies[what], key=lambda i: score[i])
             print(f"  {arrow} plan {mean[what]:+.2f}: " + " | ".join(lines[best]))
         return int(first[copies[ranked[0]][0]])
 

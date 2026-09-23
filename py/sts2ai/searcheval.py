@@ -23,14 +23,18 @@ from sts2ai.advise import PLAN_MARGIN
 from sts2ai.env import Envs, Layout
 from sts2ai.evaluate import HOLDOUT_PER_ENCOUNTER
 from sts2ai.model import Policy, load_policy, masked_logits
-from sts2ai.search import rollout, spread
+from sts2ai.search import openings, rollout, spread
 
 
-def pick(first: np.ndarray, score: np.ndarray, own: int, mean: bool) -> int:
-    """The first action whose copies scored best: the best copy (as the
-    advisor prints it) or the mean over copies. The policy's own pick
-    stays unless beaten by `PLAN_MARGIN`."""
-    by_first = {int(a): float(score[first == a].mean() if mean else score[first == a].max()) for a in np.unique(first)}
+def pick(first: np.ndarray, score: np.ndarray, own: int, mean: bool, second: tuple[np.ndarray, np.ndarray] | None = None) -> int:
+    """The first action whose copies scored best: the best copy, the mean
+    over copies, or with `second` its best line (`search.openings`, as the
+    advisor ranks). The policy's own pick stays unless beaten by
+    `PLAN_MARGIN`."""
+    if second is not None:
+        by_first = {a: v for a, (v, _) in openings(first, score, second).items()}
+    else:
+        by_first = {int(a): float(score[first == a].mean() if mean else score[first == a].max()) for a in np.unique(first)}
     best = max(by_first, key=by_first.get)
     if own in by_first and by_first[best] - by_first[own] < PLAN_MARGIN:
         return own
@@ -48,6 +52,7 @@ def play(
     mean: bool,
     depth: int = 1,
     recordings: Path | None = None,
+    two_level: bool = False,
 ) -> dict[str, list[bool]]:
     """One fight per held-out elite and boss setup (or per recording of
     one). Returns wins by encounter."""
@@ -72,10 +77,12 @@ def play(
             roots = sorted(active)
             forks = envs.sim.fork(roots, copies, seed=seed + step, depth=depth)
             first = np.concatenate([spread(np.flatnonzero(envs.mask[i]), copies) for i in roots])
-            score = rollout(policy, device, forks, first, depth=depth)
+            second = (np.full(len(first), -1), np.zeros(len(first), np.int64)) if two_level else None
+            score = rollout(policy, device, forks, first, depth=depth, second=second)
             for r, i in enumerate(roots):
                 part = slice(r * copies, (r + 1) * copies)
-                actions[i] = pick(first[part], score[part], int(actions[i]), mean)
+                own = second and (second[0][part], second[1][part])
+                actions[i] = pick(first[part], score[part], int(actions[i]), mean, own)
         for e in envs.step(actions):
             if e.env in active:
                 active.discard(e.env)
@@ -95,6 +102,7 @@ def main() -> None:
     ap.add_argument("--depth", type=int, default=1, help="player turns each copy plays (1: the rest of this one)")
     ap.add_argument("--recordings", type=Path, default=None, help="real-run recordings instead of the held-out set")
     ap.add_argument("--repeats", type=int, default=1, help="fights per setup, different seeds")
+    ap.add_argument("--two-level", action="store_true", help="rank openings by their best second action (search.openings)")
     args = ap.parse_args()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     policy = Policy(Layout.load()).to(device)
@@ -109,7 +117,7 @@ def main() -> None:
             greedy[enc] += won
     t1 = time.time()
     for r in range(args.repeats):
-        for enc, won in play(policy, device, args.copies, kinds, args.acts, args.seed + r, args.mean, args.depth, args.recordings).items():
+        for enc, won in play(policy, device, args.copies, kinds, args.acts, args.seed + r, args.mean, args.depth, args.recordings, args.two_level).items():
             search[enc] += won
     t2 = time.time()
     print(f"{'encounter':32s} greedy  search")
