@@ -139,14 +139,11 @@ stops comparing Niche draws after a fight whose monsters can summon.
   is where the compute goes, so fights from many runs batch on the GPU as
   `VecEnv` batches them now, and the combat batch should stay full.
 - A run's 1500 combat steps cost 60 to 90 ms of CPU at 130k to 200k steps/s.
-  An act's map costs about 20 ms (`ActMap::generate`), 18.5 of it in
-  `prune_and_repair`, whose segment pruning lists every path of the map
-  again each round. It shows: a map is made on arrival in an act, and
-  with most runs dying in act 1 that is one map per run and 90% of run
-  mode's env time (Build order, step 2).
-  Caching maps by seed does not help, since training seeds are fresh every
-  run. Making the port of the pruning faster, with `mapcheck` holding it to
-  the game's maps, is the lever.
+  An act's map costs about 0.4 ms (`ActMap::generate`): the port walks
+  each path segment once where the game lists every path each pruning
+  round, and `mapcheck` holds it to the game's maps (4800 of 4800). It was
+  20 ms and 90% of run mode's env time, since most runs die in act 1 and
+  need a fresh map; caching cannot help, as training seeds are fresh.
 - Combat plays greedy in the first cut. A search per decision is 10x to 100x
   and would turn ~130 runs/s into a few.
 
@@ -291,7 +288,7 @@ not an error, and is counted. The counts, weighted by how often a thing
 comes up and whether it draws on the Rewards stream, say what to port
 next. `examples/forward.rs` prints them: over 200 seeds taking the first
 option (which now buys the first ware it can in every shop), every run
-reaches floor 49 in about 41 ms (the three maps are most of it). What it
+reaches floor 49. What it
 meets unported is events (56 kinds, 1186 times), then Kaleidoscope (18),
 Glass Eye and Sea Glass (13 each), and a handful of other ancient relics.
 
