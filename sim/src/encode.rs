@@ -14,7 +14,7 @@
 
 use crate::card::Card;
 use crate::combat::{Action, Combat, RoomKind};
-use crate::effect::{Pile, Then};
+use crate::effect::{Picked, Pile, Then};
 use crate::enchant::ALL as ALL_ENCHANTMENTS;
 use crate::ids::{CardId, ALL_CARDS, ALL_MONSTERS, ALL_POWERS};
 use crate::monster::{self, Intent};
@@ -111,6 +111,10 @@ fn then_kind(then: Then) -> usize {
         Then::TakeOffer => 7,
         Then::ExhaustMany => 8,
         Then::DiscardThenDraw { .. } => 9,
+        // Multi-picks share the kinds of their single-pick twins, which
+        // keeps the observation layout.
+        Then::Select { done: Picked::Exhaust, .. } => 8,
+        Then::Select { done: Picked::ToHand, .. } => 2,
     }
 }
 
@@ -401,6 +405,8 @@ fn choice_verb(then: Then) -> &'static str {
         Then::FreeThisCombat => "make free",
         Then::TakeOffer => "take",
         Then::DiscardThenDraw { .. } => "discard",
+        Then::Select { done: Picked::Exhaust, .. } => "exhaust",
+        Then::Select { done: Picked::ToHand, .. } => "take",
     }
 }
 

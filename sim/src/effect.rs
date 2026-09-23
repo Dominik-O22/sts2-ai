@@ -64,6 +64,17 @@ pub enum Then {
     /// Discard it and ask again; on skip, draw one per discarded card
     /// (Gambler's Brew).
     DiscardThenDraw { picked: u32 },
+    /// A selection of up to `left` more cards from `from`, made one pick at
+    /// a time, acted on together once it closes (`CardSelectCmd` with a max
+    /// above 1: Purity, Stratagem). `optional` allows stopping early.
+    Select { from: Pile, filter: CardFilter, left: u8, optional: bool, done: Picked },
+}
+
+/// What a finished `Then::Select` does with every card picked.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Picked {
+    Exhaust,
+    ToHand,
 }
 
 /// What a random generator draws from.
@@ -160,6 +171,9 @@ pub enum Effect {
     /// 0 this turn when `free` (the potions); `retain` gives every offered
     /// card Retain and makes the pick compulsory (Choices Paradox).
     OfferRandom { pool: GenPool, count: u32, free: bool, retain: bool },
+    /// Seeker Strike: pick one of `count` random draw pile cards into hand
+    /// (`StableShuffle(CombatCardSelection).Take(count)`).
+    ChooseFromRandomDraw { count: u32 },
     /// `Then::TakeOffer` for the picked uid.
     TakeOffer { uid: u32 },
     /// `EnergyCost.AddThisCombat`: a card's cost moves for the rest of the
@@ -210,6 +224,18 @@ pub enum Effect {
     /// `CardPileCmd.AutoPlayFromDrawPile`: move `count` cards from the top
     /// to the play pile first, then auto-play them in order.
     AutoPlayFromDrawTop { count: u32, force_exhaust: bool },
+    /// `AutoPlayFromDrawTop` resuming after a shuffle's hooks (Stratagem's
+    /// pick) with `left` cards still to take and `taken` already in play.
+    AutoPlayTake { left: u32, force_exhaust: bool, taken: Vec<u32> },
+    /// `AttackContext` closing: `Hook.AfterAttack` for an attack a card
+    /// made of plain damage calls (Omnislice).
+    EndAttack { dealer: CreatureRef, card: Option<u32>, props: ValueProp },
+    /// The Bomb: a fresh `TheBombPower` counting down `turns`, set to deal
+    /// `damage` (`SetDamage`).
+    ApplyBomb { turns: i32, damage: i32 },
+    /// `CreatureCmd.Kill` without `force`: Lizard Tail and Fairy in a
+    /// Bottle may still save the player (The Gambit).
+    Die { target: CreatureRef },
     /// Auto-play `count` random playable attacks from hand (Stampede).
     AutoPlayRandomAttack,
     /// Aggression: move up to `count` random attacks from discard to hand, upgraded.

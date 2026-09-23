@@ -16,7 +16,8 @@ pub struct Power {
     /// player so it does not tick down the same round it was applied.
     pub skip_next_tick: bool,
     /// Per-power counter: Dark Embrace ethereal count, Juggling attacks this
-    /// turn, Crimson Mantle and Inferno self-damage, Slow cards played.
+    /// turn, Crimson Mantle and Inferno self-damage, Slow cards played,
+    /// Panache's cards left, The Bomb's damage.
     pub data: i32,
     /// `PowerModel.Applier`. Constrict and Shrink vanish when it dies.
     pub applier: Option<CreatureRef>,
@@ -60,8 +61,20 @@ pub fn is_debuff(id: PowerId) -> bool {
             | PowerId::Hex
             | PowerId::Dampen
             | PowerId::ChainsOfBinding
+            | PowerId::NoBlock
+            | PowerId::TagTeam
+            | PowerId::TheGambit
     )
 }
+
+/// `PowerInstanceType.Instanced`: every application is a separate instance
+/// with its own amount and counter, so the combat never stacks these.
+pub fn instanced(id: PowerId) -> bool {
+    matches!(id, PowerId::Panache | PowerId::RollingBoulder | PowerId::TheBomb | PowerId::TagTeam)
+}
+
+/// `PanachePower._baseCardsLeft`.
+const PANACHE_CARDS: i32 = 5;
 
 /// `PowerModel.AllowNegative`.
 pub fn allow_negative(id: PowerId) -> bool {
@@ -170,15 +183,19 @@ impl Power {
     }
 
     /// `ModifyBlockMultiplicative`. `block_plays_this_turn` counts the
-    /// player's card plays that already gained block this turn (Unmovable).
+    /// player's card plays that already gained block this turn (Unmovable);
+    /// `from_card` is whether a card is the source.
     pub fn modify_block_multiplicative(
         &self,
         owner: CreatureRef,
         target: CreatureRef,
         props: ValueProp,
         block_plays_this_turn: usize,
+        from_card: bool,
     ) -> f64 {
         match self.id {
+            // NoBlockPower.cs: no block from cards, unless unpowered.
+            PowerId::NoBlock if target == owner && !props.has(ValueProp::UNPOWERED) && from_card => 0.0,
             // FrailPower.cs
             PowerId::Frail if target == owner && props.is_powered() => 0.75,
             // UnmovablePower.cs: the first `amount` block gains from cards or
@@ -313,6 +330,13 @@ impl Power {
             }],
             // ClarityPower.cs
             PowerId::Clarity => vec![Effect::DecrementPower { target: owner, id: self.id }],
+            // PrepTimePower.cs
+            PowerId::PrepTime => vec![Effect::ApplyPower {
+                target: owner,
+                id: PowerId::Vigor,
+                amount: self.amount,
+                applier: Some(owner),
+            }],
             // PlatingPower.cs: decrement each turn after the first.
             // SandpitPower.AfterSideTurnStartLate: one turn closer to being
             // eaten; its AfterRemoved kills the player outright.
@@ -371,6 +395,10 @@ impl Power {
             ],
             // InfernoPower.cs
             PowerId::Inferno => vec![self_damage()],
+            // RollingBoulderPower.cs: the combat grows it by 5 once this is queued.
+            PowerId::RollingBoulder => {
+                vec![Effect::DamageAllEnemies { amount: self.amount as f64, props: ValueProp::UNPOWERED, dealer: owner }]
+            }
             _ => vec![],
         }
     }
@@ -417,6 +445,15 @@ impl Power {
             // Vulnerable/Weak/Frail: tick at end of the enemy side turn only.
             PowerId::Vulnerable | PowerId::Weak | PowerId::Frail if side == Side::Enemy => {
                 vec![Effect::TickDuration { target: owner, id: self.id }]
+            }
+            // NoBlockPower.cs: plain decrement once the enemy turn is over.
+            PowerId::NoBlock if side == Side::Enemy => vec![Effect::DecrementPower { target: owner, id: self.id }],
+            // PanachePower.cs: the count starts over each turn.
+            PowerId::Panache if own_side => {
+                if self.data != 0 {
+                    self.data = PANACHE_CARDS;
+                }
+                vec![]
             }
             // ColossusPower.cs: plain decrement, no skip flag.
             PowerId::Colossus if side == Side::Enemy => vec![Effect::DecrementPower { target: owner, id: self.id }],
@@ -623,6 +660,20 @@ impl Power {
             return vec![];
         }
         match self.id {
+            // PanachePower.cs: `data` is CardsLeft, 0 until the Panache that
+            // applied it has itself been played (`alreadyApplied`).
+            PowerId::Panache => {
+                if self.data == 0 {
+                    self.data = PANACHE_CARDS;
+                    return vec![];
+                }
+                self.data -= 1;
+                if self.data > 0 {
+                    return vec![];
+                }
+                self.data = PANACHE_CARDS;
+                vec![Effect::DamageAllEnemies { amount: self.amount as f64, props: ValueProp::UNPOWERED, dealer: owner }]
+            }
             // RagePower.cs
             PowerId::Rage if ty == CardType::Attack => {
                 vec![Effect::GainBlock { target: owner, amount: self.amount as f64, props: ValueProp::UNPOWERED, card: None }]
@@ -692,6 +743,10 @@ impl Power {
             // InfernoPower.cs: HP loss on your own turn burns every enemy.
             PowerId::Inferno if unblocked > 0 && own_turn => {
                 vec![Effect::DamageAllEnemies { amount: self.amount as f64, props: ValueProp::UNPOWERED, dealer: owner }]
+            }
+            // TheGambitPower.cs: a powered attack that gets through kills you.
+            PowerId::TheGambit if unblocked > 0 && props.is_powered() => {
+                vec![Effect::RemovePower { target: owner, id: self.id }, Effect::Die { target: owner }]
             }
             // SlipperyPower.cs: one charge per unblocked hit.
             PowerId::Slippery if unblocked >= 1 => vec![Effect::DecrementPower { target: owner, id: self.id }],

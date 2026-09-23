@@ -334,6 +334,15 @@ power Enrage
 power PainfulStabs
 power Nemesis
 power WitheringPresence
+power Nostalgia
+power Panache
+power NoBlock
+power PrepTime
+power RollingBoulder
+power Stratagem
+power TagTeam
+power TheBomb
+power TheGambit
 monster Nibbit
 monster FuzzyWurmCrawler
 monster ShrinkerBeetle

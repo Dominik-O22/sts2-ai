@@ -1148,7 +1148,7 @@ impl Combat {
             (ToastyMittens, 0) => {
                 let mut out = vec![];
                 if self.reshuffle_if_needed() {
-                    out.extend(self.relic_after_shuffle());
+                    out.extend(self.after_shuffle());
                 }
                 out.push(Effect::RelicStep { id, step: 1 });
                 out

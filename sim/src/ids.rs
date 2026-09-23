@@ -497,6 +497,24 @@ pub enum PowerId {
     Nemesis,
     /// A Wither into your hand every sixth card you play (Aeonglass).
     WitheringPresence,
+    /// The first attacks and skills each turn go back on top of the draw pile.
+    Nostalgia,
+    /// Damage to every enemy each fifth card played in a turn. Instanced.
+    Panache,
+    /// Cards grant no block (Panic Button).
+    NoBlock,
+    /// Vigor at the start of each turn.
+    PrepTime,
+    /// Damage to every enemy each turn, growing by 5. Instanced.
+    RollingBoulder,
+    /// Pick cards from the draw pile into hand after each shuffle.
+    Stratagem,
+    /// Other players' attacks on it play twice; inert in single player.
+    TagTeam,
+    /// Counts down, then damages every enemy. Instanced.
+    TheBomb,
+    /// Die to the next attack that gets through.
+    TheGambit,
 }
 
 /// `Models/Monsters/<Name>.cs`.
@@ -950,6 +968,15 @@ pub const ALL_POWERS: &[PowerId] = &[
     PowerId::PainfulStabs,
     PowerId::Nemesis,
     PowerId::WitheringPresence,
+    PowerId::Nostalgia,
+    PowerId::Panache,
+    PowerId::NoBlock,
+    PowerId::PrepTime,
+    PowerId::RollingBoulder,
+    PowerId::Stratagem,
+    PowerId::TagTeam,
+    PowerId::TheBomb,
+    PowerId::TheGambit,
 ];
 
 pub const ALL_MONSTERS: &[MonsterId] = &[
