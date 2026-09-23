@@ -8,6 +8,7 @@ step t cuts the value bootstrap for step t+1.
 from __future__ import annotations
 
 import copy
+import threading
 import time
 from collections import deque
 from collections.abc import Callable
@@ -202,14 +203,24 @@ class SearchTargets:
 
 @torch.no_grad()
 @torch.no_grad()
-def start_search(policy: Policy, net: Callable[[Tensor, Tensor], tuple[Tensor, Tensor]], device: torch.device, envs: Envs, cfg: Config, seed: int, stream: torch.cuda.Stream | None):
+def start_search(
+    policy: Policy,
+    net: Callable[[Tensor, Tensor], tuple[Tensor, Tensor]],
+    device: torch.device,
+    envs: Envs,
+    cfg: Config,
+    seed: int,
+    stream: torch.cuda.Stream | None,
+    go: threading.Event,
+):
     """Turn search on `cfg.search_states` random envs with a choice to make.
     Forks them now, while `envs` holds their states, and returns the rest
     of the work as a function: it plays the copies out and returns the
     roots' observations, masks, and the search's distribution over first
     actions, so it can run in a thread while `envs` moves on. The copies
     play on `net`, `policy` compiled, and their GPU work goes on `stream`,
-    so it does not queue behind the update's."""
+    so it does not queue behind the update's. Each step of theirs waits
+    for `go`."""
     choice = np.flatnonzero(envs.mask.sum(axis=1) > 1)
     roots = np.random.choice(choice, min(cfg.search_states, len(choice)), replace=False)
     n = cfg.search_copies
@@ -228,7 +239,7 @@ def start_search(policy: Policy, net: Callable[[Tensor, Tensor], tuple[Tensor, T
         # searcher's thread enters its own.
         autocast = torch.autocast(device.type, dtype=torch.bfloat16, enabled=cfg.bf16 and device.type == "cuda")
         with torch.cuda.stream(stream), autocast:
-            score = rollout(net, device, forks, first)
+            score = rollout(net, device, forks, first, on_step=lambda *_: go.wait())
         target = np.zeros((len(roots), mask.shape[1]), np.float32)
         for r in range(len(roots)):
             f, sc = first[r * n : (r + 1) * n], score[r * n : (r + 1) * n]
@@ -283,6 +294,12 @@ def train(cfg: Config) -> Policy:
     # Its batches shrink as copies end their turn, hence dynamic.
     search_net = torch.compile(search_policy, dynamic=True) if searched is not None and net is not policy else search_policy
     pending: Future | None = None
+    # Cleared while the training rollout runs, which pauses the search: the
+    # rollout waits on the GPU and the sim every step and ran three to four
+    # times slower beside it, while the update, mostly GPU work, barely
+    # notices.
+    search_go = threading.Event()
+    search_go.set()
     stats = Stats()
     start_iter, global_step = 1, 0
     if cfg.resume:
@@ -312,6 +329,7 @@ def train(cfg: Config) -> Policy:
                 group["lr"] = cfg.lr + (cfg.lr_final - cfg.lr) * frac
 
         # Rollout.
+        search_go.clear()
         policy.eval()
         with torch.no_grad():
             for t in range(cfg.steps):
@@ -334,13 +352,14 @@ def train(cfg: Config) -> Policy:
             with autocast:
                 _, last_value = net(floats, ids)
             adv, returns = roll.advantages(last_value.float(), cfg.gamma, cfg.lam)
+        search_go.set()
         global_step += cfg.steps * cfg.envs
         if searched is not None:
             if pending is not None:
                 searched.add(*pending.result())
             search_policy.load_state_dict(policy.state_dict())
             pending = searcher.submit(
-                start_search(search_policy, search_net, device, envs, cfg, seed=cfg.seed * 1_000_003 + it, stream=search_stream)
+                start_search(search_policy, search_net, device, envs, cfg, seed=cfg.seed * 1_000_003 + it, stream=search_stream, go=search_go)
             )
             if it == start_iter:
                 # The first search compiles the searcher's graphs, and
