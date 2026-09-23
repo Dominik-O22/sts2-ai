@@ -25,6 +25,7 @@ using MegaCrit.Sts2.Core.Entities.Creatures;
 using MegaCrit.Sts2.Core.Entities.Enchantments;
 using MegaCrit.Sts2.Core.Entities.Multiplayer;
 using MegaCrit.Sts2.Core.Entities.Players;
+using MegaCrit.Sts2.Core.GameActions;
 using MegaCrit.Sts2.Core.GameActions.Multiplayer;
 using MegaCrit.Sts2.Core.Modding;
 using MegaCrit.Sts2.Core.Models;
@@ -127,6 +128,11 @@ public static class Recorder
             }
             _choiceOpen = false;
             if (cm.IsExecutingCardOrPotionEffect(me)) return;
+            // PlayCardAction pays the card's energy, awaits, and only then
+            // moves the card and starts its effect (`ExecuteAction`): a
+            // snapshot in between shows the energy spent with the card
+            // still in hand, before the play is logged.
+            if (RunManager.Instance.ActionExecutor.CurrentlyRunningAction is PlayCardAction) return;
             // A played card sits in the play pile until its result-pile move; not a decision point yet.
             if (me.PlayerCombatState == null || me.PlayerCombatState.PlayPile.Cards.Count > 0) return;
             if (_file != null && PotionInFlight(me)) return;
