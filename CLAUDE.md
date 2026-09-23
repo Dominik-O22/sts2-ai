@@ -55,7 +55,8 @@ Most of what it prints comes from the sim, so a newly ported act shows up with
 nothing written by hand. `ADVICE` and `RELIC_FIGHTS` in that file are the
 exception: one line per fight where playing straight would not show the
 mechanic, and the relic jobs. Add one when you port a monster whose
-interesting behaviour needs steering toward, or a relic.
+interesting behaviour needs steering toward, or a relic. `EVENT_STARTS`
+holds the console line for an event fight `fight` cannot build.
 
 `docs/replay.md` has the detail: what the recording holds, what the replay
 forces versus checks, and the dev console commands.

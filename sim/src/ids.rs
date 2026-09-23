@@ -545,6 +545,8 @@ pub enum PowerId {
     Knockdown,
     /// Plays the top card of your draw pile at the start of each turn (Mayhem).
     Mayhem,
+    /// The enemy turns left before the Battleworn Dummy walks off.
+    BattlewornDummyTimeLimit,
 }
 
 /// `Models/Monsters/<Name>.cs`.
@@ -660,6 +662,10 @@ pub enum MonsterId {
     MysteriousKnight,
     /// The merchant's double (Fake Merchant).
     FakeMerchantMonster,
+    /// The Battleworn Dummy at each of its three settings.
+    BattleFriendV1,
+    BattleFriendV2,
+    BattleFriendV3,
 }
 
 /// Every variant, for id lookups by name.
@@ -1026,6 +1032,7 @@ pub const ALL_POWERS: &[PowerId] = &[
     PowerId::Fasten,
     PowerId::Knockdown,
     PowerId::Mayhem,
+    PowerId::BattlewornDummyTimeLimit,
 ];
 
 pub const ALL_MONSTERS: &[MonsterId] = &[
@@ -1133,4 +1140,7 @@ pub const ALL_MONSTERS: &[MonsterId] = &[
     MonsterId::Aeonglass,
     MonsterId::MysteriousKnight,
     MonsterId::FakeMerchantMonster,
+    MonsterId::BattleFriendV1,
+    MonsterId::BattleFriendV2,
+    MonsterId::BattleFriendV3,
 ];

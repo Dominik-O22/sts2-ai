@@ -18,7 +18,7 @@ Terms pick jobs by name or tag; a job needs to match every term. Encounter
 jobs are named after the encounter and tagged with its act and kind; relic
 groups are tagged `relics`. The encounters, acts and monster descriptions
 all come from the sim, so a newly ported act shows up with nothing written
-by hand. Only `ADVICE` and `RELIC_FIGHTS` are hand-written.
+by hand. Only `ADVICE`, `EVENT_STARTS` and `RELIC_FIGHTS` are hand-written.
 
 `--pilot CKPT` lets the policy play the fights through the bridge
 (`sts2ai.play --record`): it samples its moves, and ends a fight with `win`
@@ -219,7 +219,12 @@ ADVICE = {
     "AEONGLASS_BOSS": "Hold Withers through two Increasing Intensity turns, and play six cards in a turn for Withering Presence.",
     "QUEEN_BOSS": "Play a Bound card, then kill the Amalgam while the Queen shows Burn Bright for Me.",
     "TEST_SUBJECT_BOSS": "Kill it three times: it respawns with Painful Stabs, then with Nemesis.",
+    "BATTLEWORN_DUMMY_EVENT_ENCOUNTER": "Take the 300 HP setting and do not kill it: after three turns it walks off.",
 }
+
+# Event fights the console's `fight` cannot build, started from their event
+# instead. The dummy's encounter throws until the event's option sets it up.
+EVENT_STARTS = {"BATTLEWORN_DUMMY_EVENT_ENCOUNTER": "event BATTLEWORN_DUMMY"}
 
 
 @dataclass
@@ -239,9 +244,11 @@ class Say:
 
 @dataclass
 class Fight:
-    """Start an encounter, wait for its recording, replay it."""
+    """Start an encounter, wait for its recording, replay it. `start` is the
+    console line that starts it, `fight ENCOUNTER` unless set."""
 
     encounter: str
+    start: str | None = None
 
 
 Step = Send | Say | Fight
@@ -368,7 +375,7 @@ def encounter_jobs() -> list[Job]:
     `event` for the fights an event starts."""
     return [
         Job(enc.lower(), {act.lower(), kind.lower(), "encounters"} | ({"event"} if enc.endswith("_EVENT_ENCOUNTER") else set()),
-            [Fight(enc)], advice=ADVICE.get(enc))
+            [Fight(enc, EVENT_STARTS.get(enc))], advice=ADVICE.get(enc), human=enc in EVENT_STARTS)
         for enc, act, kind in encounters()
     ]
 
@@ -563,14 +570,14 @@ class Pilot:
             self.proc = None
 
 
-def fight(enc: str, job: Job, pilot: Pilot | None) -> tuple[bool, str, Path | None]:
+def fight(enc: str, start: str | None, job: Job, pilot: Pilot | None) -> tuple[bool, str, Path | None]:
     """One recorded fight: top up, start it, wait for the recording, replay."""
     print(f"    monster: {describe(enc)}")
     before = set(recordings_for(enc))
     send(PER_FIGHT, quiet=True)
     if pilot:
         pilot.stop() if job.human else pilot.start()
-    send([f"fight {enc}"])
+    send([start or f"fight {enc}"])
     path = wait_for_fight(enc, before, pilot is None or job.human)
     if path is None:
         return False, "skipped", None
@@ -607,8 +614,8 @@ def run_job(job: Job, pilot: Pilot | None, run: Run | None) -> list[tuple[bool, 
                     print(f"    you:     {text}")
                     if wait:
                         input("    enter when done: ")
-                case Fight(enc):
-                    ok, line, path = fight(enc, job, pilot)
+                case Fight(enc, start):
+                    ok, line, path = fight(enc, start, job, pilot)
                     results.append((ok, line))
                     log_result(job, enc, ok, line, path)
                     if not ok:

@@ -102,7 +102,8 @@ uv run python scripts/record.py --pilot runs/set-3/latest.pt --queue
 The encounter list, the acts and kinds it tags them with, and the
 description of every fight all come from the sim, so a newly ported act
 appears here with nothing written by hand. Only the one-line "what you have
-to do" advice and the relic jobs are hand-written.
+to do" advice, the relic jobs, and the event that starts a fight `fight`
+cannot build are hand-written.
 
 With `--pilot`, the policy plays through the bridge (`sts2ai.play --record`).
 It samples its moves so repeats differ, and ends a fight with `win` once the

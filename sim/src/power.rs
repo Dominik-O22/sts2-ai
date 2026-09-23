@@ -575,6 +575,14 @@ impl Power {
             }
             PowerId::Hatch if own_side => vec![Effect::DecrementPower { target: owner, id: self.id }],
             PowerId::EscapeArtist if own_side && self.amount > 1 => vec![Effect::DecrementPower { target: owner, id: self.id }],
+            // BattlewornDummyTimeLimitPower.cs: counts down, then the dummy escapes.
+            PowerId::BattlewornDummyTimeLimit if own_side => {
+                if self.amount > 1 {
+                    vec![Effect::DecrementPower { target: owner, id: self.id }]
+                } else {
+                    vec![Effect::Escape { target: owner }]
+                }
+            }
             PowerId::Tainted if side == Side::Enemy => remove(),
             // SlumberPower.AfterSideTurnEnd: the nap runs out on its own and
             // the beetle wakes (WakeUpMove sheds the Plating).

@@ -398,6 +398,9 @@ impl Monster {
             // `MysteriousKnight : FlailKnight`, which keeps its HP and moves.
             FlailKnight | MysteriousKnight => flat(101, 108),
             FakeMerchantMonster => flat(165, 175),
+            BattleFriendV1 => (75, 75),
+            BattleFriendV2 => (150, 150),
+            BattleFriendV3 => (300, 300),
             SpectralKnight => flat(93, 97),
             MagiKnight => flat(82, 89),
             SoulNexus => flat(234, 254),
@@ -462,6 +465,7 @@ impl Monster {
             MechaKnight => vec![(PowerId::Artifact, 3)],
             // MysteriousKnight.AfterAddedToRoom, on top of Flail Knight's none.
             MysteriousKnight => vec![(PowerId::Strength, 6), (PowerId::Plating, 6)],
+            BattleFriendV1 | BattleFriendV2 | BattleFriendV3 => vec![(PowerId::BattlewornDummyTimeLimit, 3)],
             Zapbot => vec![(PowerId::HighVoltage, 2)],
             TorchHeadAmalgam => vec![(PowerId::Minion, 1)],
             TestSubject => vec![(PowerId::Adaptable, 1), (PowerId::Enrage, asc.pick(AscensionLevel::DeadlyEnemies, 3, 2))],
@@ -1280,6 +1284,8 @@ fn moves(id: MonsterId, name: &str, me: CreatureRef, asc: Ascension, vars: &mut 
         (TestSubject, "BURNING_GROWL_MOVE") => {
             statuses(CardId::Burn, d(3, 5) as u32).chain([buff(me, PowerId::Strength, d(2, 3))]).collect()
         }
+
+        (BattleFriendV1 | BattleFriendV2 | BattleFriendV3, "NOTHING_MOVE") => vec![],
 
         (FakeMerchantMonster, "SWIPE_MOVE") => vec![attack(me, d(13, 15), 1)],
         (FakeMerchantMonster, "SPEW_COINS_MOVE") => vec![attack(me, 2, 8)],
@@ -2411,6 +2417,12 @@ fn graph(id: MonsterId, asc: Ascension, flags: Flags) -> (Vec<State>, usize) {
             g.follow(growl, lacerate);
             g.follow(respawn, revive);
             g.done(bite)
+        }
+        // It never acts, and shows no intent.
+        BattleFriendV1 | BattleFriendV2 | BattleFriendV3 => {
+            let nothing = g.mv("NOTHING_MOVE", vec![]);
+            g.follow(nothing, nothing);
+            g.done(nothing)
         }
         // Opens on Swipe. Enrage's branch is `AddBranch(state, 3, CannotRepeat)`,
         // the cooldown overload, so it weighs the same as the others. After

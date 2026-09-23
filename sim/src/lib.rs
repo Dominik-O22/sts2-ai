@@ -329,6 +329,20 @@ mod tests {
         }
     }
 
+    /// The dummy never acts and leaves at the end of the third enemy turn.
+    #[test]
+    fn battleworn_dummy_escapes_after_three_enemy_turns() {
+        let mut c = fight(&[one(MonsterId::BattleFriendV3)], 2);
+        assert_eq!(c.enemies[0].creature.power_amount(PowerId::BattlewornDummyTimeLimit), 3);
+        c.step(Action::EndTurn);
+        c.step(Action::EndTurn);
+        assert!(!c.is_over());
+        assert_eq!(c.player.creature.hp, IRONCLAD_HP);
+        c.step(Action::EndTurn);
+        assert!(c.enemies[0].escaped);
+        assert_eq!(c.outcome, Some(combat::Outcome::Won));
+    }
+
     /// Killing the giant only arms the blast; the fight ends when it lands.
     #[test]
     fn waterfall_giant_explodes_for_its_banked_pressure_instead_of_dying() {

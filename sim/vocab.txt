@@ -357,6 +357,7 @@ power Entropy
 power Fasten
 power Knockdown
 power Mayhem
+power BattlewornDummyTimeLimit
 monster Nibbit
 monster FuzzyWurmCrawler
 monster ShrinkerBeetle
@@ -461,6 +462,9 @@ monster TestSubject
 monster Aeonglass
 monster MysteriousKnight
 monster FakeMerchantMonster
+monster BattleFriendV1
+monster BattleFriendV2
+monster BattleFriendV3
 relic BurningBlood
 relic AmethystAubergine
 relic Anchor
@@ -954,6 +958,7 @@ move EYE_LASERS_MOVE
 move INCREASING_INTENSITY_MOVE
 move SPEW_COINS_MOVE
 move THROW_RELIC_MOVE
+move NOTHING_MOVE
 enchant Adroit
 enchant Clone
 enchant Corrupted

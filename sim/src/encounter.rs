@@ -131,6 +131,7 @@ pub enum Encounter {
     PunchOffEventEncounter,
     MysteriousKnightEventEncounter,
     FakeMerchantEventEncounter,
+    BattlewornDummyEventEncounter,
 }
 
 pub const ALL: &[Encounter] = &[
@@ -218,6 +219,7 @@ pub const ALL: &[Encounter] = &[
     Encounter::PunchOffEventEncounter,
     Encounter::MysteriousKnightEventEncounter,
     Encounter::FakeMerchantEventEncounter,
+    Encounter::BattlewornDummyEventEncounter,
 ];
 
 fn one(id: MonsterId) -> EnemySpec {
@@ -247,7 +249,11 @@ impl Encounter {
         use Encounter::*;
         matches!(
             self,
-            DenseVegetationEventEncounter | PunchOffEventEncounter | MysteriousKnightEventEncounter | FakeMerchantEventEncounter
+            DenseVegetationEventEncounter
+                | PunchOffEventEncounter
+                | MysteriousKnightEventEncounter
+                | FakeMerchantEventEncounter
+                | BattlewornDummyEventEncounter
         )
     }
 
@@ -283,7 +289,9 @@ impl Encounter {
             DevotedSculptorWeak | ScrollsOfBitingWeak | TurretOperatorWeak | AxebotsNormal | ConstructMenagerieNormal
             | FabricatorNormal | FrogKnightNormal | GlobeHeadNormal | OwlMagistrateNormal | ScrollsOfBitingNormal
             | SlimedBerserkerNormal | TheLostAndForgottenNormal | KnightsElite | MechaKnightElite | SoulNexusElite
-            | AeonglassBoss | QueenBoss | TestSubjectBoss => Act::Glory,
+            | AeonglassBoss | QueenBoss | TestSubjectBoss
+            // `Acts/Glory.cs` lists the `BattlewornDummy` event.
+            | BattlewornDummyEventEncounter => Act::Glory,
             CorpseSlugsWeak | SeapunkWeak | SludgeSpinnerWeak | ToadpolesWeak | CorpseSlugsNormal | CultistsNormal
             | FossilStalkerNormal | GremlinMercNormal | HauntedShipNormal | LivingFogNormal | PunchConstructNormal
             | SeapunkNormal | SewerClamNormal | TwoTailedRatsNormal | PhantasmalGardenersElite | SkulkingColonyElite
@@ -497,6 +505,8 @@ impl Encounter {
                 .collect(),
             MysteriousKnightEventEncounter => vec![one(MysteriousKnight)],
             FakeMerchantEventEncounter => vec![one(FakeMerchantMonster)],
+            // The dummy the player's setting picked; the sim rolls the pick.
+            BattlewornDummyEventEncounter => vec![one(*rng.pick(&[BattleFriendV1, BattleFriendV2, BattleFriendV3]).unwrap())],
         }
     }
 }
