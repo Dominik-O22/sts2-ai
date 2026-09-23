@@ -12,5 +12,6 @@
   <ItemGroup>
     <Reference Include="sts2"><HintPath>$(STS2DataDir)/sts2.dll</HintPath></Reference>
     <Reference Include="GodotSharp"><HintPath>$(STS2DataDir)/GodotSharp.dll</HintPath></Reference>
+    <Reference Include="0Harmony"><HintPath>$(STS2DataDir)/0Harmony.dll</HintPath></Reference>
   </ItemGroup>
 </Project>

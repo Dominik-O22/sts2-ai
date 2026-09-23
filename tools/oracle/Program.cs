@@ -15,11 +15,110 @@ using MegaCrit.Sts2.Core.Models.Characters;
 using MegaCrit.Sts2.Core.Models.RelicPools;
 using MegaCrit.Sts2.Core.Timeline;
 using MegaCrit.Sts2.Core.Unlocks;
+using MegaCrit.Sts2.Core.Entities.Players;
+using MegaCrit.Sts2.Core.Rooms;
+using MegaCrit.Sts2.Core.Models.CardPools;
+using MegaCrit.Sts2.Core.Models.PotionPools;
 
 // Runs the game's own code outside the game and prints what it produced, one
 // value per line, for the sim's tests to pin. `dotnet run -- COMMAND ARGS`.
 switch (args[0])
 {
+    // pools: the pools rewards and shops draw from, in the game's order, as
+    // a fully unlocked profile has them: `card POOL ID RARITY TYPE
+    // CONSTRAINT UPGRADABLE` and `potion POOL ID RARITY`.
+    case "pools":
+    {
+        LoadModelDb();
+        foreach (var pool in new CardPoolModel[] { ModelDb.CardPool<IroncladCardPool>(), ModelDb.CardPool<ColorlessCardPool>() })
+        {
+            foreach (var c in pool.AllCards)
+            {
+                Console.WriteLine($"card {pool.Id.Entry} {c.Id.Entry} {c.Rarity} {c.Type} {c.MultiplayerConstraint} {(c.IsUpgradable ? 1 : 0)}");
+            }
+        }
+        foreach (var pool in new PotionPoolModel[] { ModelDb.PotionPool<IroncladPotionPool>(), ModelDb.PotionPool<SharedPotionPool>() })
+        {
+            foreach (var p in pool.AllPotions)
+            {
+                Console.WriteLine($"potion {pool.Id.Entry} {p.Id.Entry} {p.Rarity}");
+            }
+        }
+        break;
+    }
+    // rewards: one new singleplayer Ironclad run per stdin line `SEED
+    // ASCENSION STEP...`, fully unlocked, its grab bags filled the way
+    // `RunManager.InitializeNewRun` fills them, then each step in order:
+    // `M1`, `E1` or `B1` generates the rewards of a monster, elite or boss
+    // room in act 1 (0-based) through `RewardsSet`, as combat ends; `S1`
+    // stocks a merchant (`MerchantInventory.CreateForNormalMerchant`); `?`
+    // rolls an unknown point, `?s` with shops blacklisted; `R` resets the
+    // unknown odds as a new act does. Prints the line as a `run` header,
+    // then one line per step: the rewards in the order the screen lists
+    // them, or the shop's stock, with the player's Rewards counter (and
+    // Shops counter), or the room type rolled.
+    case "rewards":
+    {
+        LoadModelDb();
+        RunOutsideTheGame();
+        string? line;
+        while ((line = Console.ReadLine()) != null)
+        {
+            var parts = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length == 0)
+            {
+                continue;
+            }
+            var (state, player) = NewRun(parts[0], int.Parse(parts[1]));
+            Console.WriteLine($"run {line}");
+            foreach (var step in parts.Skip(2))
+            {
+                if (step.StartsWith('?'))
+                {
+                    var blacklist = step == "?s" ? new[] { RoomType.Shop } : [];
+                    Console.WriteLine($"{step} {state.Odds.UnknownMapPoint.Roll(blacklist, state)}");
+                    continue;
+                }
+                if (step == "R")
+                {
+                    state.Odds.UnknownMapPoint.ResetToBase();
+                    Console.WriteLine("R");
+                    continue;
+                }
+                state.CurrentActIndex = step[1] - '0';
+                if (step[0] == 'S')
+                {
+                    var shop = MegaCrit.Sts2.Core.Entities.Merchant.MerchantInventory.CreateForNormalMerchant(player);
+                    string Card(MegaCrit.Sts2.Core.Entities.Merchant.MerchantCardEntry e) => e.CreationResult!.Card.Id.Entry + (e.CreationResult.Card.IsUpgraded ? "+" : "");
+                    var sale = shop.CharacterCardEntries.Select((e, i) => (e, i)).First(x => x.e.IsOnSale).i;
+                    Console.WriteLine($"{step} cards {string.Join(" ", shop.CharacterCardEntries.Select(Card))} sale {sale}"
+                        + $" colorless {string.Join(" ", shop.ColorlessCardEntries.Select(Card))}"
+                        + $" relics {string.Join(" ", shop.RelicEntries.Select(e => e.Model!.Id.Entry))}"
+                        + $" potions {string.Join(" ", shop.PotionEntries.Select(e => e.Model!.Id.Entry))}"
+                        + $" counter {player.PlayerRng.Rewards.Counter} shops {player.PlayerRng.Shops.Counter}");
+                    continue;
+                }
+                EncounterModel encounter = step[0] switch
+                {
+                    'M' => ModelDb.Encounter<MegaCrit.Sts2.Core.Models.Encounters.NibbitsWeak>(),
+                    'E' => ModelDb.Encounter<MegaCrit.Sts2.Core.Models.Encounters.BygoneEffigyElite>(),
+                    _ => ModelDb.Encounter<MegaCrit.Sts2.Core.Models.Encounters.VantomBoss>(),
+                };
+                var set = new MegaCrit.Sts2.Core.Rewards.RewardsSet(player).WithRewardsFromRoom(new CombatRoom(encounter.ToMutable(), state));
+                set.GenerateWithoutOffering().GetAwaiter().GetResult();
+                var shown = set.Rewards.Select(r => r switch
+                {
+                    MegaCrit.Sts2.Core.Rewards.GoldReward g => $"gold {g.Amount}",
+                    MegaCrit.Sts2.Core.Rewards.PotionReward p => $"potion {p.Potion!.Id.Entry}",
+                    MegaCrit.Sts2.Core.Rewards.CardReward c => "cards " + string.Join(" ", c.Cards.Select(x => x.Id.Entry + (x.IsUpgraded ? "+" : ""))),
+                    MegaCrit.Sts2.Core.Rewards.RelicReward rr => $"relic {rr.Relic!.Id.Entry}",
+                    _ => throw new InvalidOperationException(r.ToString()),
+                });
+                Console.WriteLine($"{step} {string.Join(" ", shown)} counter {player.PlayerRng.Rewards.Counter}".Replace("  ", " "));
+            }
+        }
+        break;
+    }
     // map SEED ACT N ASCENSION: act N's map (1-based) as `StandardActMap.CreateFor`
     // builds it for a single player, one point per line: col row type
     // children, children as col,row.
@@ -227,11 +326,87 @@ static void LoadModelDb()
     }
 }
 
+// What a player, a run and the reward code need that only a running game
+// has, stood in for. None of it draws.
+static void RunOutsideTheGame()
+{
+    // `SaveManager.Instance` builds itself on Godot's file system; players
+    // read their progress from it.
+    var flags = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+    var progress = System.Runtime.CompilerServices.RuntimeHelpers.GetUninitializedObject(typeof(MegaCrit.Sts2.Core.Saves.Managers.ProgressSaveManager));
+    typeof(MegaCrit.Sts2.Core.Saves.Managers.ProgressSaveManager).GetProperty("Progress")!.SetValue(progress, MegaCrit.Sts2.Core.Saves.ProgressState.CreateDefault());
+    var save = (MegaCrit.Sts2.Core.Saves.SaveManager)System.Runtime.CompilerServices.RuntimeHelpers.GetUninitializedObject(typeof(MegaCrit.Sts2.Core.Saves.SaveManager));
+    typeof(MegaCrit.Sts2.Core.Saves.SaveManager).GetField("_progressSaveManager", flags)!.SetValue(save, progress);
+    MegaCrit.Sts2.Core.Saves.SaveManager.MockInstanceForTesting(save);
+    // No mods: the model lists that ask for mod types get none.
+    typeof(MegaCrit.Sts2.Core.Modding.ModManager).GetProperty("State")!.SetValue(null, MegaCrit.Sts2.Core.Modding.ModManagerState.Skipped);
+    typeof(ReflectionHelper).GetField("_modTypes", System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)!.SetValue(null, Array.Empty<Type>());
+    // The rest is patched out with Harmony, which the game ships for mods.
+    var harmony = new HarmonyLib.Harmony("oracle");
+    void Stub(System.Reflection.MethodBase? method, string stub) =>
+        harmony.Patch(method, prefix: new HarmonyLib.HarmonyMethod(typeof(GodotStubs).GetMethod(stub)));
+    // The logger asks Godot for the command line and prints through it.
+    Stub(typeof(Godot.OS).GetMethod("GetCmdlineArgs"), "NoArgs");
+    Stub(typeof(Godot.OS).GetMethod("HasFeature"), "NoFeature");
+    Stub(typeof(MegaCrit.Sts2.Core.Logging.ConsoleLogPrinter).GetMethod("Print"), "Skip");
+    // A card reward lists its skip button, whose hotkey is a Godot input
+    // name.
+    Stub(typeof(MegaCrit.Sts2.Core.Entities.CardRewardAlternatives.CardRewardAlternative).GetMethod("Generate"), "NoAlternatives");
+    // A few relics format localized text into their variables, and there is
+    // no localization loaded.
+    Stub(typeof(MegaCrit.Sts2.Core.Localization.LocString).GetMethod("GetFormattedText", Type.EmptyTypes), "NoText");
+}
+
+// A new singleplayer Ironclad run for a fully unlocked profile, set on
+// `RunManager.Instance` the way `SetUpNewSingleplayer` sets it, less the
+// networking: its state and ascension, then `InitializeNewRun`, which fills
+// the grab bags and applies the ascension.
+static (RunState, Player) NewRun(string seed, int ascension)
+{
+    var flags = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+    var player = Player.CreateForNewRun<Ironclad>(UnlockState.all, 1);
+    var acts = new List<ActModel> { ModelDb.Act<Overgrowth>(), ModelDb.Act<Hive>(), ModelDb.Act<Glory>() }.Select(a => a.ToMutable()).ToList();
+    var state = RunState.CreateForNewRun(new[] { player }, acts, [], GameMode.Standard, ascension, seed);
+    typeof(RunManager).GetProperty("State", flags)!.SetValue(RunManager.Instance, state);
+    typeof(RunManager).GetProperty("AscensionManager")!.SetValue(RunManager.Instance, new AscensionManager(ascension));
+    typeof(RunManager).GetMethod("InitializeNewRun", flags)!.Invoke(RunManager.Instance, null);
+    return (state, player);
+}
+
 // A relic grab bag, one line per rarity in the bag's own order.
 static void PrintBag(string name, RelicGrabBag bag)
 {
     foreach (var (rarity, ids) in bag.ToSerializable().RelicIdLists)
     {
         Console.WriteLine($"{name} {rarity} {string.Join(" ", ids.Select(id => id.Entry))}");
+    }
+}
+
+static class GodotStubs
+{
+    public static bool Skip() => false;
+
+    public static bool NoAlternatives(ref IReadOnlyList<MegaCrit.Sts2.Core.Entities.CardRewardAlternatives.CardRewardAlternative> __result)
+    {
+        __result = [];
+        return false;
+    }
+
+    public static bool NoArgs(ref string[] __result)
+    {
+        __result = [];
+        return false;
+    }
+
+    public static bool NoText(ref string __result)
+    {
+        __result = "";
+        return false;
+    }
+
+    public static bool NoFeature(ref bool __result)
+    {
+        __result = false;
+        return false;
     }
 }
