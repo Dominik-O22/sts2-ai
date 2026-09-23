@@ -9,6 +9,7 @@ pub mod encode;
 pub mod encounter;
 pub mod env;
 pub mod gen;
+pub mod map;
 pub mod ids;
 pub mod monster;
 pub mod potion;
