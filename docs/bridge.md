@@ -20,7 +20,7 @@ them. When the sim cannot follow a fight (a divergence, or an encounter it
 does not model) it says so once and leaves the fight to you. Card choices
 in that fight go to the grid.
 
-## Card rewards, upgrades, removals, shops
+## Card rewards, upgrades, removals, shops, ancients
 
 ```
 uv run python -m sts2ai.cards runs/<run>/latest.pt
@@ -30,9 +30,12 @@ A second process, alongside the player or without it, ranks every deck
 choice the game puts up. The mod writes what is on offer into
 `sts2ai/run.json`: the cards on a reward screen (`card_reward`), a pick
 from the deck outside combat with its prompt (`deck_choice`: `TO_UPGRADE`
-at a rest site or event, `TO_REMOVE` at a shop or event), and a shop's
-cards with their prices (`shop`), along with the act, the bosses the map
-shows and max energy. `sts2ai.cards` plays the deck as each option would
+at a rest site or event, `TO_REMOVE` at a shop or event), a shop's cards
+and relics with their prices (`shop`; what the gold cannot buy is left
+out), and Neow's or an act ancient's relic options (`ancient`), along with
+the act, the bosses the map shows and max energy. A relic is priced by
+what it does in the fights, not its pickup or run-level effects; one the
+combat sim does not play is named and not priced. `sts2ai.cards` plays the deck as each option would
 leave it, and as it is, against every elite of the act and its boss:
 greedy fights, the same enemies for every option, 512 per encounter per
 option (256 when there are more than four). A deck that already wins 95%

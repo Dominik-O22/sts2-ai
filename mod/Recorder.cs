@@ -198,6 +198,8 @@ public static class Recorder
                 ["card_reward"] = CardRewardOptions(),
                 ["deck_choice"] = CombatManager.Instance.IsInProgress ? null : DeckChoice(),
                 ["shop"] = run.CurrentRoom is MerchantRoom room ? Shop(room.GetLocalInventory()) : null,
+                ["ancient"] = run.CurrentRoom is EventRoom events && events.CanonicalEvent is AncientEventModel
+                    ? AncientOptions(events.LocalMutableEvent) : null,
             };
         string json = JsonSerializer.Serialize(state, Json);
         if (json == _lastRunState) return;
@@ -413,8 +415,8 @@ public static class Recorder
         };
     }
 
-    /// The local merchant's cards for sale, with their prices, and what a
-    /// removal costs (null once used).
+    /// The local merchant's cards and relics for sale, with their prices,
+    /// and what a removal costs (null once used).
     private static Dictionary<string, object?> Shop(MerchantInventory inv) => new()
     {
         ["cards"] = inv.CardEntries.Where(e => e.IsStocked).Select(e => new Dictionary<string, object?>
@@ -422,8 +424,18 @@ public static class Recorder
             ["card"] = CardRef(e.CreationResult!.Card),
             ["cost"] = e.Cost,
         }).ToList(),
+        ["relics"] = inv.RelicEntries.Where(e => e.IsStocked).Select(e => new Dictionary<string, object?>
+        {
+            ["id"] = e.Model!.Id.Entry,
+            ["cost"] = e.Cost,
+        }).ToList(),
         ["removal_cost"] = inv.CardRemovalEntry is { IsStocked: true } r ? r.Cost : null,
     };
+
+    /// Neow's or an act ancient's options as the relic each gives
+    /// (`EventOption.Relic`), null for an option that gives none.
+    private static List<string?> AncientOptions(EventModel ancient) =>
+        ancient.CurrentOptions.Select(o => o.Relic?.Id.Entry).ToList();
 
     private static Dictionary<string, object?> CardRef(CardModel c)
     {

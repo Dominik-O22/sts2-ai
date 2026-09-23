@@ -1,5 +1,6 @@
-"""Deck advice: which card to take, upgrade, remove or buy, found by
-playing the act's elites and boss with the trained policy.
+"""Deck advice: which card to take, upgrade, remove or buy, and which relic
+to buy or take from an ancient, found by playing the act's elites and boss
+with the trained policy.
 
     uv run python -m sts2ai.cards runs/<run>/latest.pt              # watch the game, advise each choice
     uv run python -m sts2ai.cards runs/<run>/latest.pt --recording FILE --offer INFLAME,SHRUG_IT_OFF
@@ -8,8 +9,11 @@ Watching, it polls the mod's `run.json` and prints a ranking for each new
 card reward (`card_reward`), deck pick outside combat (`deck_choice`: rest
 site and event upgrades, shop and event removals and transforms, and event
 offers of new cards, where each card is priced alone, so "pick 2" means the
-top two) and
-shop (`shop`, the cards for sale with their prices). A transform is priced
+top two), shop (`shop`, the cards and relics for sale that the gold can
+buy) and ancient (`ancient`, Neow's or an act ancient's relic options). A
+relic is priced by what it does in the fights: its pickup and run-level
+effects (max HP, gold, rest options) are not, and a relic the combat sim
+does not play is named and left alone. A transform is priced
 as the removal plus the average of a sample of the cards it can become.
 Picks from the deck it cannot price are named and left alone. With `--recording`, the run is a
 recorded fight's start and the options are cards to add.
@@ -43,6 +47,8 @@ from sts2ai.env import DEFAULT_RECORDINGS, End, Envs, Layout
 from sts2ai.model import Policy, load_policy, masked_logits
 
 RUN_STATE = DEFAULT_RECORDINGS.parent / "run.json"
+# Relics the fights can price: the ones the combat sim plays.
+SIM_RELICS = set(_sim.game_ids()["relic"])
 BOSS_FLOOR = 16
 # Where in an act the generator puts elites; only the enemy roll reads it.
 ELITE_FLOOR = 10
@@ -50,14 +56,22 @@ ELITE_FLOOR = 10
 
 @dataclass(frozen=True)
 class Change:
-    """One way the deck can change. `card` is as the recorder writes it
+    """One way the run can change. `card` is as the recorder writes it
     (`id`, `up`, maybe `ench`); for `upgrade`, `remove` and `transform` it
     is a card in the deck, and the first copy of it changes. A transform
-    applies as a removal: the random card it brings is priced apart."""
+    applies as a removal: the random card it brings is priced apart. For
+    `relic`, `card` holds the relic's `id`: it joins the relics, priced by
+    what it does in the fights (not its pickup or its run-level effects)."""
 
-    kind: Literal["add", "upgrade", "remove", "transform"]
+    kind: Literal["add", "upgrade", "remove", "transform", "relic"]
     card: dict
     note: str = ""
+
+    def applied(self, run: dict) -> dict:
+        """The run with this change made."""
+        if self.kind == "relic":
+            return {**run, "relics": run["relics"] + [self.card["id"]]}
+        return {**run, "deck": self.apply(run["deck"])}
 
     def apply(self, deck: list[dict]) -> list[dict]:
         if self.kind == "add":
@@ -67,6 +81,8 @@ class Change:
         return rest[:i] + [{**self.card, "up": True}] + rest[i:] if self.kind == "upgrade" else rest
 
     def label(self) -> str:
+        if self.kind == "relic":
+            return f"relic {self.card['id']}{self.note}"
         name = self.card["id"] + ("+" if self.card.get("up") else "")
         return f"{self.kind} {name}{self.note}"
 
@@ -176,8 +192,7 @@ def rank(
 
     verdicts = [keep]
     for change in unique:
-        run = {**start, "deck": change.apply(start["deck"])}
-        v = verdict(change, fights(policy, device, run, max_hp, encounters, repeats, seed))
+        v = verdict(change, fights(policy, device, change.applied(start), max_hp, encounters, repeats, seed))
         if change.kind == "transform":
             v = Verdict(change, v.value + random_card_gain(change.card), v.win)
         verdicts.append(v)
@@ -231,14 +246,28 @@ def choices(run: dict) -> dict[str, list[Change] | str]:
             options = [c for c in options if _sim.transform_options(c["id"]) is not None]
         out[f"deck pick {pick.get('prompt')}"] = [Change(kind, c) for c in options] if kind and options else "not priced"
     if shop := run.get("shop"):
-        if shop["cards"]:
-            out["shop"] = [Change("add", e["card"], f" ({e['cost']}g)") for e in shop["cards"]]
+        # What the gold cannot buy is not priced.
+        gold = run["gold"]
+        wares = [Change("add", e["card"], f" ({e['cost']}g)") for e in shop["cards"] if e["cost"] <= gold]
+        relics = [r for r in shop.get("relics", []) if r["cost"] <= gold]
+        wares += [Change("relic", {"id": r["id"]}, f" ({r['cost']}g)") for r in relics if r["id"] in SIM_RELICS]
+        if wares:
+            out["shop"] = wares
+        if unpriced := [r["id"] for r in relics if r["id"] not in SIM_RELICS]:
+            out["shop relics"] = f"not priced (no combat effect in the sim): {', '.join(unpriced)}"
+    if options := run.get("ancient"):
+        relics = [r for r in options if r]
+        priced = [Change("relic", {"id": r}) for r in relics if r in SIM_RELICS]
+        if priced:
+            out["ancient"] = priced
+        if unpriced := [r for r in relics if r not in SIM_RELICS]:
+            out["ancient relics"] = f"not priced (no combat effect in the sim): {', '.join(unpriced)}"
     return out
 
 
 def watch(policy: Policy, device: torch.device, repeats: int, poll: float = 0.5) -> None:
     """Advise every choice the game shows, until interrupted."""
-    print(f"watching {RUN_STATE} for card rewards, deck picks and shops")
+    print(f"watching {RUN_STATE} for card rewards, deck picks, shops and ancients")
     seen: dict[str, str] = {}
     while True:
         try:
@@ -259,6 +288,8 @@ def watch(policy: Policy, device: torch.device, repeats: int, poll: float = 0.5)
             verdicts, acts, notes = rank(policy, device, run, run["hp"], run["max_hp"], run["act"], changes, n)
             if len(acts) > 1:
                 print(f"{acts[0]} is won {SATURATED:.0%}+ as it stands: {acts[1]} added")
+            if any(c.kind == "relic" for c in changes):
+                notes.append("relics count what they do in fights only: not pickup, gold, shops or rests")
             for note in notes:
                 print(note)
             print(describe(verdicts), flush=True)
