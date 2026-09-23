@@ -64,6 +64,9 @@ pub enum PotionId {
     PotionShapedRock,
     // Shared pool, appended once the colorless cards it offers were ported.
     ColorlessPotion,
+    // Event rarity: events hand them out (Potion Courier, Drowning Beacon).
+    FoulPotion,
+    GlowwaterPotion,
 }
 
 pub const ALL: &[PotionId] = &[
@@ -116,6 +119,8 @@ pub const ALL: &[PotionId] = &[
     PotionId::Ashwater,
     PotionId::PotionShapedRock,
     PotionId::ColorlessPotion,
+    PotionId::FoulPotion,
+    PotionId::GlowwaterPotion,
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -125,6 +130,8 @@ pub enum Rarity {
     Rare,
     /// `PotionRarity.Token`: never in a reward pool.
     Token,
+    /// `PotionRarity.Event`: an event's, never in a reward pool.
+    Event,
 }
 
 /// Who the player picks when throwing it. `TargetType` collapsed to what the
@@ -149,6 +156,7 @@ impl PotionId {
             | FruitJuice | GigantificationPotion | LiquidMemories | LuckyTonic | MazalethsGift | OrobicAcid
             | ShacklingPotion | ShipInABottle | SneckoOil | SoldiersStew => Rarity::Rare,
             PotionShapedRock => Rarity::Token,
+            FoulPotion | GlowwaterPotion => Rarity::Event,
         }
     }
 
@@ -273,6 +281,14 @@ impl PotionId {
             BloodPotion => vec![Effect::Heal { target: me, amount: c.player.creature.max_hp as f64 * 20.0 / 100.0 }],
             SoldiersStew => vec![Effect::StrikeReplay],
             Ashwater => vec![choose(Pile::Hand, CardFilter::Any, Then::ExhaustMany, true)],
+            // FoulPotion.cs: 12 to every creature but pets, the player
+            // (an ally, listed first) too.
+            FoulPotion => vec![
+                Effect::Damage { target: me, amount: 12.0, props: ValueProp::UNPOWERED, dealer: Some(me), card: None },
+                Effect::DamageAllEnemies { amount: 12.0, props: ValueProp::UNPOWERED, dealer: me },
+            ],
+            // GlowwaterPotion.cs: the hand exhausted, then 10 drawn.
+            GlowwaterPotion => vec![Effect::ExhaustHand { filter: CardFilter::Any }, draw(10)],
         }
     }
 }

@@ -696,6 +696,8 @@ potion SoldiersStew
 potion Ashwater
 potion PotionShapedRock
 potion ColorlessPotion
+potion FoulPotion
+potion GlowwaterPotion
 move STUNNED
 move REVIVE_MOVE
 move BUTT_MOVE
