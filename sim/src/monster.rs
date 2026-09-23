@@ -395,7 +395,8 @@ impl Monster {
             TheLost => flat(93, 99),
             TheForgotten => flat(106, 111),
             MechaKnight => flat(300, 320),
-            FlailKnight => flat(101, 108),
+            // `MysteriousKnight : FlailKnight`, which keeps its HP and moves.
+            FlailKnight | MysteriousKnight => flat(101, 108),
             SpectralKnight => flat(93, 97),
             MagiKnight => flat(82, 89),
             SoulNexus => flat(234, 254),
@@ -458,6 +459,8 @@ impl Monster {
             TheLost => vec![(PowerId::PossessStrength, 1)],
             TheForgotten => vec![(PowerId::PossessSpeed, 1)],
             MechaKnight => vec![(PowerId::Artifact, 3)],
+            // MysteriousKnight.AfterAddedToRoom, on top of Flail Knight's none.
+            MysteriousKnight => vec![(PowerId::Strength, 6), (PowerId::Plating, 6)],
             Zapbot => vec![(PowerId::HighVoltage, 2)],
             TorchHeadAmalgam => vec![(PowerId::Minion, 1)],
             TestSubject => vec![(PowerId::Adaptable, 1), (PowerId::Enrage, asc.pick(AscensionLevel::DeadlyEnemies, 3, 2))],
@@ -762,6 +765,7 @@ fn moves(id: MonsterId, name: &str, me: CreatureRef, asc: Ascension, vars: &mut 
     let d = |a: i32, b: i32| asc.pick(D, b, a);
     let t = |a: i32, b: i32| asc.pick(T, b, a);
     match (id, name) {
+        (MysteriousKnight, _) => moves(FlailKnight, name, me, asc, vars),
         (Nibbit, "BUTT_MOVE") => vec![attack(me, d(12, 13), 1)],
         (Nibbit, "SLICE_MOVE") => vec![attack(me, d(6, 7), 1), block(me, asc.pick(T, 6, 5))],
         (Nibbit, "HISS_MOVE") => vec![buff(me, PowerId::Strength, d(2, 3))],
@@ -1353,6 +1357,7 @@ fn graph(id: MonsterId, asc: Ascension, flags: Flags) -> (Vec<State>, usize) {
     let t = |a: i32, b: i32| asc.pick(AscensionLevel::ToughEnemies, b, a);
     let mut g = G::new();
     match id {
+        MysteriousKnight => return graph(FlailKnight, asc, flags),
         // Butt -> Slice -> Hiss -> Butt, entered by front/back/alone.
         Nibbit => {
             let butt = g.mv("BUTT_MOVE", vec![atk(d(12, 13))]);

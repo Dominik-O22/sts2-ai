@@ -459,6 +459,7 @@ monster Queen
 monster TorchHeadAmalgam
 monster TestSubject
 monster Aeonglass
+monster MysteriousKnight
 relic BurningBlood
 relic AmethystAubergine
 relic Anchor

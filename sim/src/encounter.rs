@@ -129,6 +129,7 @@ pub enum Encounter {
     // Event fights: an event's option starts them, never the map.
     DenseVegetationEventEncounter,
     PunchOffEventEncounter,
+    MysteriousKnightEventEncounter,
 }
 
 pub const ALL: &[Encounter] = &[
@@ -214,6 +215,7 @@ pub const ALL: &[Encounter] = &[
     Encounter::TestSubjectBoss,
     Encounter::DenseVegetationEventEncounter,
     Encounter::PunchOffEventEncounter,
+    Encounter::MysteriousKnightEventEncounter,
 ];
 
 fn one(id: MonsterId) -> EnemySpec {
@@ -241,7 +243,7 @@ impl Encounter {
     /// `RoomType`, which is `Monster` for all of them.
     pub fn is_event(self) -> bool {
         use Encounter::*;
-        matches!(self, DenseVegetationEventEncounter | PunchOffEventEncounter)
+        matches!(self, DenseVegetationEventEncounter | PunchOffEventEncounter | MysteriousKnightEventEncounter)
     }
 
     pub fn kind(self) -> Kind {
@@ -270,7 +272,9 @@ impl Encounter {
             BowlbugsNormal | BowlbugsWeak | ChompersNormal | DecimillipedeElite | EntomancerElite
             | ExoskeletonsNormal | ExoskeletonsWeak | HunterKillerNormal | KaiserCrabBoss | InfestedPrismsElite
             | KnowledgeDemonBoss | LouseProgenitorNormal | MytesNormal | OvicopterNormal | SlumberingBeetleNormal
-            | SpinyToadNormal | TheInsatiableBoss | TheObscuraNormal | ThievingHopperWeak | TunnelerWeak => Act::Hive,
+            | SpinyToadNormal | TheInsatiableBoss | TheObscuraNormal | ThievingHopperWeak | TunnelerWeak
+            // `Acts/Hive.cs` lists `TheLanternKey`, whose fight this is.
+            | MysteriousKnightEventEncounter => Act::Hive,
             DevotedSculptorWeak | ScrollsOfBitingWeak | TurretOperatorWeak | AxebotsNormal | ConstructMenagerieNormal
             | FabricatorNormal | FrogKnightNormal | GlobeHeadNormal | OwlMagistrateNormal | ScrollsOfBitingNormal
             | SlimedBerserkerNormal | TheLostAndForgottenNormal | KnightsElite | MechaKnightElite | SoulNexusElite
@@ -484,6 +488,7 @@ impl Encounter {
                     flags: Flags { starter_move, hp_reduction: 2 + rng.next_int(8) as u8, ..Flags::default() },
                 })
                 .collect(),
+            MysteriousKnightEventEncounter => vec![one(MysteriousKnight)],
         }
     }
 }

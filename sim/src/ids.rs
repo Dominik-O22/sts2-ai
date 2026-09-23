@@ -655,6 +655,9 @@ pub enum MonsterId {
     TorchHeadAmalgam,
     TestSubject,
     Aeonglass,
+    // Event fights.
+    /// A Flail Knight that starts stronger (The Lantern Key).
+    MysteriousKnight,
 }
 
 /// Every variant, for id lookups by name.
@@ -1126,4 +1129,5 @@ pub const ALL_MONSTERS: &[MonsterId] = &[
     MonsterId::TorchHeadAmalgam,
     MonsterId::TestSubject,
     MonsterId::Aeonglass,
+    MonsterId::MysteriousKnight,
 ];
