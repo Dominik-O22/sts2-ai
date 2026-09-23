@@ -231,6 +231,7 @@ fn settle(c: &Combat, snap: &Value, depth: u32) -> Result<Combat, String> {
         let mut k = c.clone();
         adopt_random_results(&mut k, snap);
         adopt_gem_pick(&mut k, snap);
+        adopt_replay_copies(&mut k, snap);
         return match diff(snap, &snapshot_of(&k)) {
             None => Ok(k),
             Some(d) => Err(d),
@@ -357,12 +358,59 @@ fn adopt_gem_pick(c: &mut Combat, snap: &Value) {
     }
 }
 
+/// Which copy of a card carries its extra plays is lost when copies are
+/// interchangeable (a reshuffle matches by id). The snapshot shows each
+/// copy's `replay` count, so hand them out again to match it, per card,
+/// but only where the counts agree as a whole: a wrong count stays a diff.
+fn adopt_replay_copies(c: &mut Combat, snap: &Value) {
+    let piles = ["hand", "draw", "discard"];
+    let game: Vec<(String, bool, u32)> = piles
+        .iter()
+        .flat_map(|p| snap[*p].as_array().into_iter().flatten())
+        .filter_map(|r| {
+            Some((r["id"].as_str()?.to_string(), r["up"].as_bool().unwrap_or(false), r["replay"].as_u64().unwrap_or(0) as u32))
+        })
+        .collect();
+    let p = &mut c.player;
+    let mut sim: Vec<&mut Card> = p.hand.iter_mut().chain(p.draw.iter_mut()).chain(p.discard.iter_mut()).collect();
+    if sim.len() != game.len() || !sim.iter().any(|k| k.replay > 0) {
+        return;
+    }
+    let key = |k: &Card| (slug(&format!("{:?}", k.id)), k.upgraded);
+    let mut groups: std::collections::HashMap<(String, bool), Vec<usize>> = Default::default();
+    for (i, k) in sim.iter().enumerate() {
+        groups.entry(key(k)).or_default().push(i);
+    }
+    for (k, idx) in groups {
+        let want: Vec<u32> = game.iter().filter(|(id, up, _)| (id, *up) == (&k.0, k.1)).map(|g| g.2).collect();
+        if want.len() != idx.len() {
+            continue;
+        }
+        let (mut a, mut b) = (want.clone(), idx.iter().map(|&i| sim[i].replay).collect::<Vec<_>>());
+        a.sort();
+        b.sort();
+        if a != b {
+            continue;
+        }
+        // The n-th copy of this card in pile order takes the game's n-th.
+        let positions: Vec<usize> =
+            game.iter().enumerate().filter(|(_, (id, up, _))| (id, *up) == (&k.0, k.1)).map(|(i, _)| i).collect();
+        for (&si, &gi) in idx.iter().zip(&positions) {
+            if si == gi {
+                sim[si].replay = game[gi].2;
+            }
+        }
+    }
+}
+
 fn adopt_random_results(c: &mut Combat, snap: &Value) {
     let transformed = std::mem::take(&mut c.stats.transformed);
+    let carried = std::mem::take(&mut c.stats.transform_carried);
     let procured = std::mem::take(&mut c.stats.procured_potions);
     if transformed.is_empty() && procured.is_empty() {
         return;
     }
+    let is_transformed = |uid: u32| transformed.iter().any(|&(u, _)| u == uid);
     let ids = Ids::new();
     let empty = vec![];
     let key = |k: &Card| (slug(&format!("{:?}", k.id)), k.upgraded);
@@ -374,20 +422,46 @@ fn adopt_random_results(c: &mut Combat, snap: &Value) {
         .iter()
         .filter_map(|r| Some((r["id"].as_str()?.to_string(), r["up"].as_bool().unwrap_or(false))))
         .collect();
-    for k in c.player.hand.iter().filter(|k| !transformed.contains(&k.uid)) {
-        if let Some(i) = unclaimed.iter().position(|u| *u == key(k)) {
-            unclaimed.remove(i);
+    let mut unmatched = vec![];
+    for k in c.player.hand.iter().filter(|k| !is_transformed(k.uid)) {
+        match unclaimed.iter().position(|u| *u == key(k)) {
+            Some(i) => {
+                unclaimed.remove(i);
+            }
+            None => unmatched.push(k.uid),
         }
     }
-    for k in c.player.hand.iter_mut().filter(|k| transformed.contains(&k.uid)) {
+    let mut pending = vec![];
+    for k in c.player.hand.iter_mut().filter(|k| is_transformed(k.uid)) {
+        let was = transformed.iter().find(|&&(u, _)| u == k.uid).map(|&(_, w)| w);
         if let Some(i) = unclaimed.iter().position(|u| *u == key(k)) {
             unclaimed.remove(i);
             continue;
         }
         if let Some(i) = unclaimed.iter().position(|(id, up)| !up && ids.cards.contains_key(id)) {
             k.id = ids.cards[&unclaimed.remove(i).0];
+            // The game transforms one card at a time and a snapshot can
+            // fall between two: a card still showing what it was has its
+            // transform ahead of it, so the next snapshot gets to adopt it.
+            if Some(k.id) == was {
+                pending.push((k.uid, k.id));
+            }
         }
     }
+    // A transform carried from the last snapshot was pinned to a card only
+    // by a guess: if the game instead changed a card the sim left alone,
+    // that card was the pick. Its id is the game's, and the carried guess,
+    // still showing its old id, is matched above as untransformed.
+    if carried {
+        for uid in unmatched {
+            let Some(i) = unclaimed.iter().position(|(id, up)| !up && ids.cards.contains_key(id)) else { break };
+            if let Some(k) = c.player.hand.iter_mut().find(|k| k.uid == uid) {
+                k.id = ids.cards[&unclaimed.remove(i).0];
+            }
+        }
+    }
+    c.stats.transform_carried = !pending.is_empty();
+    c.stats.transformed = pending;
     let slots = snap["potions"].as_array().unwrap_or(&empty);
     for slot in procured {
         if let Some(&id) = slots.get(slot).and_then(Value::as_str).and_then(|name| ids.potions.get(name)) {

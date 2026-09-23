@@ -274,10 +274,13 @@ pub struct Stats {
     pub card_dealt: (u32, i32),
     /// Entropy's picks so far, transformed together once all are in.
     pub transform_picks: Vec<u32>,
-    /// Uids of cards transformed at random, and potion slots filled at
-    /// random, since the last snapshot: the replay adopts what the game
-    /// rolled for them.
-    pub transformed: Vec<u32>,
+    /// Cards transformed at random (new uid, the card it replaced), and
+    /// potion slots filled at random, since the last snapshot: the replay
+    /// adopts what the game rolled for them.
+    pub transformed: Vec<(u32, CardId)>,
+    /// A transform the last snapshot showed not done yet. The snapshot
+    /// could not say which picked card it was, so the replay may move it.
+    pub transform_carried: bool,
     pub procured_potions: Vec<usize>,
     /// The open choice's options were drawn at random from the draw pile
     /// (Seeker Strike); the replay takes the game's instead.
@@ -1641,9 +1644,10 @@ impl Combat {
                 let Some(i) = self.player.hand.iter().position(|c| c.uid == uid) else { return };
                 let options = crate::card::transform_options(self.player.hand[i].id);
                 let Some(&id) = self.rngs.card_selection.pick(&options) else { return };
+                let was = self.player.hand[i].id;
                 let mut card = Card::new(self.new_uid(), id, false);
                 self.card_entered_combat(&mut card);
-                self.stats.transformed.push(card.uid);
+                self.stats.transformed.push((card.uid, was));
                 self.player.hand[i] = card;
             }
             Effect::ProcureRandomPotion => {
