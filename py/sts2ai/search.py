@@ -86,7 +86,7 @@ def rollout(
             logits, _ = forward(policy, device, floats[:k], ids[:k])
             masked = masked_logits(logits.float(), mask[:k].to(device, non_blocking=True))
             actions = np.zeros(n, np.int64)
-            actions[live] = torch.distributions.Categorical(logits=masked).sample().cpu().numpy()
+            actions[live] = torch.distributions.Categorical(logits=masked, validate_args=False).sample().cpu().numpy()
         if on_step is not None:
             on_step(actions, live)
         forks.step(actions, rewards)

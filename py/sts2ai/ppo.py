@@ -10,7 +10,8 @@ from __future__ import annotations
 import copy
 import time
 from collections import deque
-from concurrent.futures import Future, ThreadPoolExecutor
+from collections.abc import Callable
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -193,19 +194,22 @@ class SearchTargets:
         self.next = (self.next + k) % self.size
 
     def sample(self, n: int) -> tuple[Tensor, Tensor, Tensor, Tensor]:
-        idx = torch.randint(len(self), (n,), device=self.floats.device)
+        """`n` rows drawn with replacement. From an empty buffer, the
+        all-zero first row, whose target scores nothing."""
+        idx = torch.randint(max(len(self), 1), (n,), device=self.floats.device)
         return self.floats[idx], self.ids[idx], self.mask[idx], self.target[idx]
 
 
 @torch.no_grad()
 @torch.no_grad()
-def start_search(policy: Policy, device: torch.device, envs: Envs, cfg: Config, seed: int, stream: torch.cuda.Stream | None):
+def start_search(policy: Policy, net: Callable[[Tensor, Tensor], tuple[Tensor, Tensor]], device: torch.device, envs: Envs, cfg: Config, seed: int, stream: torch.cuda.Stream | None):
     """Turn search on `cfg.search_states` random envs with a choice to make.
     Forks them now, while `envs` holds their states, and returns the rest
     of the work as a function: it plays the copies out and returns the
     roots' observations, masks, and the search's distribution over first
-    actions, so it can run in a thread while `envs` moves on. Its GPU work
-    goes on `stream`, so it does not queue behind the update's."""
+    actions, so it can run in a thread while `envs` moves on. The copies
+    play on `net`, `policy` compiled, and their GPU work goes on `stream`,
+    so it does not queue behind the update's."""
     choice = np.flatnonzero(envs.mask.sum(axis=1) > 1)
     roots = np.random.choice(choice, min(cfg.search_states, len(choice)), replace=False)
     n = cfg.search_copies
@@ -224,7 +228,7 @@ def start_search(policy: Policy, device: torch.device, envs: Envs, cfg: Config, 
         # searcher's thread enters its own.
         autocast = torch.autocast(device.type, dtype=torch.bfloat16, enabled=cfg.bf16 and device.type == "cuda")
         with torch.cuda.stream(stream), autocast:
-            score = rollout(policy, device, forks, first)
+            score = rollout(net, device, forks, first)
         target = np.zeros((len(roots), mask.shape[1]), np.float32)
         for r in range(len(roots)):
             f, sc = first[r * n : (r + 1) * n], score[r * n : (r + 1) * n]
@@ -276,6 +280,8 @@ def train(cfg: Config) -> Policy:
     searcher = ThreadPoolExecutor(1) if searched is not None else None
     search_policy = copy.deepcopy(policy).eval() if searched is not None else None
     search_stream = torch.cuda.Stream(device) if searched is not None and device.type == "cuda" else None
+    # Its batches shrink as copies end their turn, hence dynamic.
+    search_net = torch.compile(search_policy, dynamic=True) if searched is not None and net is not policy else search_policy
     pending: Future | None = None
     stats = Stats()
     start_iter, global_step = 1, 0
@@ -314,7 +320,7 @@ def train(cfg: Config) -> Policy:
                 mask = torch.from_numpy(envs.mask).to(device)
                 with autocast:
                     logits, value = net(floats, ids)
-                dist = torch.distributions.Categorical(logits=masked_logits(logits.float(), mask))
+                dist = torch.distributions.Categorical(logits=masked_logits(logits.float(), mask), validate_args=False)
                 action = dist.sample()
                 roll.floats[t], roll.ids[t], roll.mask[t] = floats, ids, mask
                 roll.actions[t], roll.logp[t], roll.values[t] = action, dist.log_prob(action), value.float()
@@ -332,7 +338,13 @@ def train(cfg: Config) -> Policy:
             if pending is not None:
                 searched.add(*pending.result())
             search_policy.load_state_dict(policy.state_dict())
-            pending = searcher.submit(start_search(search_policy, device, envs, cfg, seed=cfg.seed * 1_000_003 + it, stream=search_stream))
+            pending = searcher.submit(
+                start_search(search_policy, search_net, device, envs, cfg, seed=cfg.seed * 1_000_003 + it, stream=search_stream)
+            )
+            if it == start_iter:
+                # The first search compiles the searcher's graphs, and
+                # nothing else may compile meanwhile (see below).
+                wait([pending])
 
         # Update.
         policy.train()
@@ -348,7 +360,11 @@ def train(cfg: Config) -> Policy:
             "returns": returns.reshape(B),
         }
         mb = B // cfg.minibatches
-        losses = {"policy": 0.0, "value": 0.0, "entropy": 0.0, "clipfrac": 0.0, "approx_kl": 0.0, "search": 0.0}
+        # Summed on the GPU and read once after the update: a read per
+        # minibatch waits for the GPU each time, and the update stalls
+        # whenever the search holds the GPU or the CPU. So does
+        # `Categorical`'s argument check, hence `validate_args=False`.
+        losses = {k: torch.zeros((), device=device) for k in ("policy", "value", "entropy", "clipfrac", "approx_kl", "search")}
         n_updates = 0
         for _ in range(cfg.epochs):
             perm = torch.randperm(B, device=device)
@@ -357,7 +373,7 @@ def train(cfg: Config) -> Policy:
                 with autocast:
                     logits, value = net(flat["floats"][idx], flat["ids"][idx])
                 logits, value = logits.float(), value.float()
-                dist = torch.distributions.Categorical(logits=masked_logits(logits, flat["mask"][idx]))
+                dist = torch.distributions.Categorical(logits=masked_logits(logits, flat["mask"][idx]), validate_args=False)
                 logp = dist.log_prob(flat["actions"][idx])
                 ratio = torch.exp(logp - flat["logp"][idx])
                 a = flat["adv"][idx]
@@ -366,25 +382,40 @@ def train(cfg: Config) -> Policy:
                 vl = 0.5 * (value - flat["returns"][idx]).pow(2).mean()
                 ent = dist.entropy().mean()
                 loss = pg + cfg.value_coef * vl - cfg.entropy * ent
-                if searched is not None and len(searched) >= cfg.search_warmup:
-                    s_floats, s_ids, s_mask, s_target = searched.sample(min(len(searched), mb // 8))
+                if searched is not None:
+                    # Runs before the warmup too, weighing nothing, so its
+                    # graph compiles in the first iteration with the rest.
+                    s_floats, s_ids, s_mask, s_target = searched.sample(mb // 8)
                     with autocast:
                         s_logits, _ = net(s_floats, s_ids)
                     logp_all = torch.log_softmax(masked_logits(s_logits.float(), s_mask), dim=1)
                     ce = -(s_target * logp_all).sum(dim=1).mean()
-                    loss = loss + cfg.search_coef * ce
-                    losses["search"] += ce.item()
+                    if len(searched) >= cfg.search_warmup:
+                        loss = loss + cfg.search_coef * ce
+                        losses["search"] += ce.detach()
+                    else:
+                        loss = loss + 0.0 * ce
                 opt.zero_grad(set_to_none=True)
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(policy.parameters(), cfg.max_grad_norm)
                 opt.step()
                 with torch.no_grad():
-                    losses["policy"] += pg.item()
-                    losses["value"] += vl.item()
-                    losses["entropy"] += ent.item()
-                    losses["clipfrac"] += ((ratio - 1).abs() > cfg.clip).float().mean().item()
-                    losses["approx_kl"] += (flat["logp"][idx] - logp).mean().item()
+                    losses["policy"] += pg
+                    losses["value"] += vl
+                    losses["entropy"] += ent
+                    losses["clipfrac"] += ((ratio - 1).abs() > cfg.clip).float().mean()
+                    losses["approx_kl"] += (flat["logp"][idx] - logp).mean()
                 n_updates += 1
+
+        if it == start_iter and net is not policy:
+            # Every graph has compiled: rollout, update, search. Compiling
+            # while the searcher runs is not safe (torch's "is compiling"
+            # is process-wide, and eager code in the other thread takes the
+            # compiled path), so from here a shape nothing compiled for runs
+            # eager instead.
+            torch.compiler.set_stance("eager_on_recompile")
+
+        losses = {k: v.item() for k, v in losses.items()}
 
         # Logging.
         summary = stats.summary()
