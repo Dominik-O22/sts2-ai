@@ -258,6 +258,17 @@ among the relics.
   the shared value function DESIGN.md keeps run and combat state apart
   for.
 
+### Potions need the run value
+
+The combat reward prices every potion alike (`POTION_VALUE`), which is
+wrong both ways: a Fairy in a Bottle kept for a boss is worth more than a
+Block Potion, and Delicate Frond's refills are random, so drinking a strong
+potion under it is a loss the flat price calls free. Rarity tiers are no
+fix; potions are too situational. The run value is: V(run with this
+potion) against V(run with a random refill). The act 3 bosses at A10 need
+it too: HP and potions after the first carry into the second, and after
+the second they are worth nothing.
+
 ## Build order
 
 1. Done. Plumbing, no policy: the effect layer for what step 2 needs (relic
