@@ -198,6 +198,7 @@ pub fn check(run: &Value, live: bool) -> Report {
             }
             let streamed = rewards_live;
             let counter = state.rewards().counter;
+
             let walked = (!ended).then(|| follow(&mut state, room, rooms, stats));
             match walked.as_ref().and_then(|w| w.ancient.as_ref()) {
                 Some(Ok(())) => report.ancients += 1,
@@ -563,7 +564,7 @@ impl Chooser for Recorded {
                     }
                     DeckAction::Enchant(..) => Self::take(&mut self.enchanted, cards, |id, i| deck(i).id == *id),
                     DeckAction::Duplicate => Self::take(&mut self.cards, cards, |c, i| deck(i).id == c.id),
-                    DeckAction::Transform { .. } => Self::take(&mut self.transformed, cards, |id, i| deck(i).id == *id),
+                    DeckAction::Transform { .. } | DeckAction::Maul => Self::take(&mut self.transformed, cards, |id, i| deck(i).id == *id),
                 }
             }
         }
@@ -948,11 +949,12 @@ mod tests {
     /// The same runs with the effects live: every floor whose content is
     /// ported leaves the player as the record has them (rest heals, Meal
     /// Ticket, Frozen Egg's upgrades, Potion Belt, Petrified Toad's rocks, a
-    /// thief's card given back), and the rest are only events, the unported
-    /// ancient relics, and the fight that ended the run.
+    /// thief's card given back, shops bought from at the port's prices, the
+    /// ancients' relics), and the rest are only events and the fight that
+    /// ended the run.
     #[test]
     fn effects_match_real_runs() {
-        for (text, compared) in [(include_str!("../testdata/run-TBL5VNYN4M.run"), 43), (include_str!("../testdata/run-5J5VMZX7UB.run"), 41)] {
+        for (text, compared) in [(include_str!("../testdata/run-TBL5VNYN4M.run"), 45), (include_str!("../testdata/run-5J5VMZX7UB.run"), 41)] {
             let run: Value = serde_json::from_str(text).unwrap();
             let effects = check(&run, true).effects;
             assert_eq!(effects.divergences, Vec::<String>::new());

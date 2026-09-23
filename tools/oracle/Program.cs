@@ -19,6 +19,7 @@ using MegaCrit.Sts2.Core.Entities.Players;
 using MegaCrit.Sts2.Core.Rooms;
 using MegaCrit.Sts2.Core.Models.CardPools;
 using MegaCrit.Sts2.Core.Models.PotionPools;
+using MegaCrit.Sts2.Core.Commands;
 
 // Runs the game's own code outside the game and prints what it produced, one
 // value per line, for the sim's tests to pin. `dotnet run -- COMMAND ARGS`.
@@ -203,6 +204,56 @@ switch (args[0])
             };
             Console.WriteLine($"run {line}");
             Console.WriteLine($"{parts[3]} {string.Join(" ", options.Select(Option))} counter {player.PlayerRng.Rewards.Counter}");
+        }
+        break;
+    }
+    // obtain: one new singleplayer Ironclad run per stdin line `SEED
+    // ASCENSION ACT RELIC...`, fully unlocked, in act ACT (0-based), each
+    // relic obtained in turn through `RelicCmd.Obtain`, its pickup and all.
+    // Every choice takes from the front: a deck pick the first cards it may
+    // (as many as it may), a card screen its first card. Prints the line as
+    // a `run` header, then per relic the player after it: HP, max HP, gold,
+    // the deck (id, `+` if upgraded, `:ENCHANTMENT:AMOUNT`), the relics, the
+    // potion slots (`-` for an empty one) and the Rewards, Niche,
+    // Transformations and CombatPotionGeneration counters; or `error` and
+    // why, where the game's code refuses the relic, and nothing after.
+    case "obtain":
+    {
+        LoadModelDb();
+        RunOutsideTheGame();
+        CardSelectCmd.PushSelector(new FrontSelector());
+        string? line;
+        while ((line = Console.ReadLine()) != null)
+        {
+            var parts = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length == 0)
+            {
+                continue;
+            }
+            var (state, player) = NewRun(parts[0], int.Parse(parts[1]));
+            state.CurrentActIndex = int.Parse(parts[2]);
+            Console.WriteLine($"run {line}");
+            foreach (var id in parts.Skip(3))
+            {
+                var relic = ModelDb.AllRelics.First(r => r.Id.Entry == id).ToMutable();
+                try
+                {
+                    RelicCmd.Obtain(relic, player).GetAwaiter().GetResult();
+                }
+                catch (InvalidOperationException e)
+                {
+                    // The game's own refusal (Leafy Poultice with every basic
+                    // Strike Eternal): the run stops here.
+                    Console.WriteLine($"{id} error {e.Message}");
+                    break;
+                }
+                string Card(CardModel c) => c.Id.Entry + (c.IsUpgraded ? "+" : "") + (c.Enchantment is { } e ? $":{e.Id.Entry}:{e.Amount}" : "");
+                var deck = string.Join(" ", player.Deck.Cards.Select(Card).OrderBy(c => c, StringComparer.Ordinal));
+                var potions = string.Join(" ", player.PotionSlots.Select(p => p?.Id.Entry ?? "-"));
+                var c = player.Creature;
+                Console.WriteLine($"{id} hp {c.CurrentHp} {c.MaxHp} gold {player.Gold} deck {deck} relics {string.Join(" ", player.Relics.Select(r => r.Id.Entry))}"
+                    + $" potions {potions} counters {player.PlayerRng.Rewards.Counter} {state.Rng.Niche.Counter} {player.PlayerRng.Transformations.Counter} {state.Rng.CombatPotionGeneration.Counter}");
+            }
         }
         break;
     }
@@ -442,6 +493,22 @@ static void RunOutsideTheGame()
     // A few relics format localized text into their variables, and there is
     // no localization loaded.
     Stub(typeof(MegaCrit.Sts2.Core.Localization.LocString).GetMethod("GetFormattedText", Type.EmptyTypes), "NoText");
+    // Healing and losing HP play sounds and effects through Godot.
+    foreach (var type in new[] { typeof(MegaCrit.Sts2.Core.Commands.SfxCmd), typeof(MegaCrit.Sts2.Core.Commands.VfxCmd) })
+    {
+        foreach (var method in type.GetMethods(System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Public).Where(m => m.ReturnType == typeof(void) && !m.IsGenericMethod))
+        {
+            Stub(method, "Skip");
+        }
+    }
+    // Waits read the player's speed setting.
+    Stub(typeof(Cmd).GetMethod("CustomScaledWait"), "NoWait");
+    // A relic's rewards (Lost Coffer, Neow's Bones) go to a screen; here
+    // they are generated, and the first card, the potions and the relics
+    // taken.
+    Stub(typeof(MegaCrit.Sts2.Core.Rewards.RewardsSet).GetMethod("Offer"), "TakeRewards");
+    // Scroll Boxes' bundle screen: the first bundle.
+    Stub(typeof(CardSelectCmd).GetMethod("FromChooseABundleScreen"), "FirstBundle");
     // An event option looks its text up in the tables, which are not loaded:
     // a relic's option is its key and relic alone.
     Stub(typeof(MegaCrit.Sts2.Core.Events.EventOption).GetMethod("FromRelic"), "RelicOnly");
@@ -476,6 +543,17 @@ static void PrintBag(string name, RelicGrabBag bag)
     }
 }
 
+// Takes from the front: as many cards as a deck pick allows, a card
+// screen's first card.
+class FrontSelector : MegaCrit.Sts2.Core.TestSupport.ICardSelector
+{
+    public System.Threading.Tasks.Task<IEnumerable<CardModel>> GetSelectedCards(IEnumerable<CardModel> options, int minSelect, int maxSelect) =>
+        System.Threading.Tasks.Task.FromResult(options.Take(maxSelect).ToList().AsEnumerable());
+
+    public MegaCrit.Sts2.Core.TestSupport.CardRewardSelection GetSelectedCardReward(IReadOnlyList<MegaCrit.Sts2.Core.Entities.Cards.CardCreationResult> options, IReadOnlyList<MegaCrit.Sts2.Core.Entities.CardRewardAlternatives.CardRewardAlternative> alternatives) =>
+        new() { card = options.First().Card };
+}
+
 static class GodotStubs
 {
     public static bool Skip() => false;
@@ -495,6 +573,41 @@ static class GodotStubs
     public static bool NoText(ref string __result)
     {
         __result = "";
+        return false;
+    }
+
+    public static bool NoWait(ref System.Threading.Tasks.Task __result)
+    {
+        __result = System.Threading.Tasks.Task.CompletedTask;
+        return false;
+    }
+
+    public static bool FirstBundle(IReadOnlyList<IReadOnlyList<CardModel>> bundles, ref System.Threading.Tasks.Task<IEnumerable<CardModel>> __result)
+    {
+        __result = System.Threading.Tasks.Task.FromResult(bundles[0].AsEnumerable());
+        return false;
+    }
+
+    public static bool TakeRewards(MegaCrit.Sts2.Core.Rewards.RewardsSet __instance, ref System.Threading.Tasks.Task __result)
+    {
+        __instance.GenerateWithoutOffering().GetAwaiter().GetResult();
+        var player = __instance.Player;
+        foreach (var reward in __instance.Rewards.ToList())
+        {
+            switch (reward)
+            {
+                case MegaCrit.Sts2.Core.Rewards.CardReward c:
+                    CardPileCmd.Add(c.Cards.First(), MegaCrit.Sts2.Core.Entities.Cards.PileType.Deck).GetAwaiter().GetResult();
+                    break;
+                case MegaCrit.Sts2.Core.Rewards.PotionReward p:
+                    PotionCmd.TryToProcure(p.Potion!, player).GetAwaiter().GetResult();
+                    break;
+                case MegaCrit.Sts2.Core.Rewards.RelicReward r:
+                    RelicCmd.Obtain(r.Relic!, player).GetAwaiter().GetResult();
+                    break;
+            }
+        }
+        __result = System.Threading.Tasks.Task.CompletedTask;
         return false;
     }
 

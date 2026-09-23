@@ -17,7 +17,7 @@ use crate::enchant::Enchantment;
 use crate::game_rng::{PlayerStream, RunStream};
 use crate::pools::{sim_card, sim_enchantment, PoolCard, Rarity, COLORLESS_CARDS, IRONCLAD_CARDS};
 use crate::rewards::{create_cards, create_potion, create_potions, CardOptions, Offer, UNPORTED_RELICS};
-use crate::run::{DeckCard, Enchant, Room, RoomType, RunState};
+use crate::run::{DeckCard, Enchant, Room, RoomType, RunRelic, RunState};
 use crate::types::{AscensionLevel, CardType};
 
 /// What an effect put in front of the player, or did for them.
@@ -65,6 +65,8 @@ pub enum DeckAction {
     /// New Leaf, Astrolabe: each to a random card on the run's Niche
     /// stream, upgraded with `upgrade` (`transform`).
     Transform { upgrade: bool },
+    /// Claws: each to a Maul (`maul`).
+    Maul,
 }
 
 /// The stream a transform draws its new card on.
@@ -90,6 +92,8 @@ pub enum RestOption {
     Kindle,
     /// Meat Cleaver.
     Cook,
+    /// Pael's Growth.
+    Clone,
 }
 
 impl RestOption {
@@ -102,6 +106,7 @@ impl RestOption {
             "DIG" => RestOption::Dig,
             "KINDLE" => RestOption::Kindle,
             "COOK" => RestOption::Cook,
+            "CLONE" => RestOption::Clone,
             _ => return None,
         })
     }
@@ -157,6 +162,24 @@ fn transform_options(card: &DeckCard) -> Option<Vec<&'static str>> {
     };
     let kept = |c: &&PoolCard| matches!(c.rarity, Rarity::Common | Rarity::Uncommon | Rarity::Rare) && c.id != card.id && !c.multiplayer_only;
     Some(pool.iter().filter(kept).map(|c| c.id).collect())
+}
+
+/// `Claws.CreateMaulFromOriginal`: a Maul, upgraded if the original was,
+/// with the original's enchantment if a Maul can take it.
+fn maul(original: &DeckCard) -> DeckCard {
+    let mut maul = DeckCard { upgraded: original.upgraded, ..DeckCard::new("MAUL") };
+    if let Some(e) = &original.enchantment {
+        if maul.can_enchant(&e.id) {
+            maul.enchantment = Some(e.clone());
+        }
+    }
+    maul
+}
+
+/// `ArchaicTooth.GetTranscendenceTransformedCard`: Bash becomes Break,
+/// upgraded and enchanted as it was.
+fn transcended(bash: &DeckCard) -> DeckCard {
+    DeckCard { id: "BREAK".into(), ..bash.clone() }
 }
 
 impl From<Offer> for DeckCard {
@@ -312,6 +335,23 @@ impl RunState {
                 }
             }
             DeckAction::Transform { upgrade } => self.transform(&chosen, upgrade, TransformRng::Niche),
+            DeckAction::Maul => {
+                let mauls: Vec<(usize, DeckCard)> = chosen.iter().map(|&i| (i, maul(&self.deck[i]))).collect();
+                self.transform_to(mauls);
+            }
+        }
+    }
+
+    /// `CardCmd.Transform` with each replacement given: the originals
+    /// leave, then the new cards join the deck through `add_card`, in the
+    /// originals' deck order.
+    fn transform_to(&mut self, mut replaced: Vec<(usize, DeckCard)>) {
+        replaced.sort_unstable_by_key(|&(i, _)| i);
+        for &(i, _) in replaced.iter().rev() {
+            self.deck.remove(i);
+        }
+        for (_, card) in replaced {
+            self.add_card(card);
         }
     }
 
@@ -321,25 +361,22 @@ impl RunState {
     /// `upgrade`d if asked; then the originals leave and the new cards join
     /// the deck through `add_card`, in the originals' deck order.
     pub fn transform(&mut self, cards: &[usize], upgrade: bool, stream: TransformRng) {
-        let mut replaced: Vec<(usize, &'static str)> = Vec::new();
+        let mut replaced = Vec::new();
         for &i in cards {
             let Some(options) = transform_options(&self.deck[i]) else { continue };
             let rng = match stream {
                 TransformRng::Transformations => self.rngs.player(PlayerStream::Transformations),
                 TransformRng::Niche => self.rngs.run(RunStream::Niche),
             };
-            replaced.push((i, *rng.pick(&options).expect("a card to transform into")));
+            let id = *rng.pick(&options).expect("a card to transform into");
+            replaced.push((i, DeckCard { upgraded: upgrade, ..DeckCard::new(id) }));
         }
-        replaced.sort_unstable();
-        for &(i, _) in replaced.iter().rev() {
-            self.deck.remove(i);
-        }
-        for (_, id) in replaced {
-            self.add_card(DeckCard { upgraded: upgrade, ..DeckCard::new(id) });
-        }
+        self.transform_to(replaced);
     }
 
-    /// The deck indices a pick of `action` may take, in deck order.
+    /// The deck indices a pick of `action` may take, in the order its
+    /// screen shows them: deck order, but curses first on the removal
+    /// screen (`CardSelectCmd.FromDeckForRemoval`).
     pub(crate) fn pickable(&self, action: DeckAction) -> Vec<usize> {
         let ok = |c: &DeckCard| match action {
             DeckAction::Upgrade => c.upgradable(),
@@ -348,8 +385,13 @@ impl RunState {
             DeckAction::Duplicate => true,
             DeckAction::Enchant(id, _) => c.can_enchant(id),
             DeckAction::Transform { .. } => c.removable() && transform_options(c).is_some(),
+            DeckAction::Maul => c.removable(),
         };
-        (0..self.deck.len()).filter(|&i| ok(&self.deck[i])).collect()
+        let mut cards: Vec<usize> = (0..self.deck.len()).filter(|&i| ok(&self.deck[i])).collect();
+        if action == DeckAction::Remove {
+            cards.sort_by_key(|&i| self.deck[i].kind() != Some(CardType::Curse));
+        }
+        cards
     }
 
     fn pick(&self, action: DeckAction, min: usize, max: usize) -> Offered {
@@ -455,6 +497,70 @@ impl RunState {
             // `SilkenTress`: all the gold; its Glam is a card reward hook
             // (`modify_card_reward`).
             "SILKEN_TRESS" => self.lose_gold(self.gold),
+            // `AlchemicalCoffer`: four slots, then four potions on the run's
+            // CombatPotionGeneration stream, one into each new slot.
+            "ALCHEMICAL_COFFER" => {
+                let first = self.potions.len();
+                self.potions.extend([None, None, None, None]);
+                let potions = create_potions(4, self.rngs.run(RunStream::CombatPotionGeneration));
+                if !self.has_relic("SOZU") {
+                    for (i, potion) in potions.into_iter().enumerate() {
+                        self.potions[first + i] = Some(potion.to_string());
+                    }
+                }
+            }
+            // `TouchOfOrobas`: the starter relic replaced, in its place, by
+            // its refinement (Burning Blood's is Black Blood).
+            "TOUCH_OF_OROBAS" => {
+                if let Some(i) = self.relics.iter().position(|r| r.id == "BURNING_BLOOD") {
+                    self.relics[i] = RunRelic::new("BLACK_BLOOD");
+                }
+            }
+            // `ArchaicTooth`: the first Bash transformed to Break.
+            "ARCHAIC_TOOTH" => {
+                if let Some(i) = self.deck.iter().position(|c| c.id == "BASH") {
+                    let card = transcended(&self.deck[i]);
+                    self.transform_to(vec![(i, card)]);
+                }
+            }
+            "ASTROLABE" => offered.push(self.pick(DeckAction::Transform { upgrade: true }, 3, 3)),
+            // `PandorasBox`: every basic Strike and Defend, each new card
+            // drawn on the Niche stream in deck order.
+            "PANDORAS_BOX" => {
+                let basic = |c: &DeckCard| matches!(c.id.as_str(), "STRIKE_IRONCLAD" | "DEFEND_IRONCLAD") && c.removable();
+                let basics: Vec<usize> = (0..self.deck.len()).filter(|&i| basic(&self.deck[i])).collect();
+                self.transform(&basics, false, TransformRng::Niche);
+            }
+            "PAELS_HORN" => (0..2).for_each(|_| self.add_card(DeckCard::new("RELAX"))),
+            // `PaelsClaw`: Goopy on every card that takes it.
+            "PAELS_CLAW" => {
+                for card in self.deck.iter_mut().filter(|c| c.can_enchant("GOOPY")) {
+                    card.enchantment = Some(Enchant { id: "GOOPY".into(), amount: 1 });
+                }
+            }
+            "PAELS_GROWTH" => offered.push(self.pick(DeckAction::Enchant("CLONE", 4), 1, 1)),
+            // `NutritiousSoup`: Tezcatara's Ember on every basic Strike.
+            "NUTRITIOUS_SOUP" => {
+                for card in self.deck.iter_mut().filter(|c| c.id == "STRIKE_IRONCLAD" && c.can_enchant("TEZCATARAS_EMBER")) {
+                    card.enchantment = Some(Enchant { id: "TEZCATARAS_EMBER".into(), amount: 1 });
+                }
+            }
+            "STORYBOOK" => self.add_card(DeckCard::new("BRIGHTEST_FLAME")),
+            "JEWELRY_BOX" => self.add_card(DeckCard::new("APOTHEOSIS")),
+            "TANXS_WHISTLE" => self.add_card(DeckCard::new("WHISTLE")),
+            "SIGNET_RING" => self.gain_gold(999),
+            // `PreservedFog`: three cards out, then Folly.
+            "PRESERVED_FOG" => {
+                offered.push(self.pick(DeckAction::Remove, 3, 3));
+                self.add_card(DeckCard::new("FOLLY"));
+            }
+            "BEAUTIFUL_BRACELET" => offered.push(self.pick(DeckAction::Enchant("SWIFT", 3), 3, 3)),
+            "TRI_BOOMERANG" => offered.push(self.pick(DeckAction::Enchant("INSTINCT", 1), 3, 3)),
+            // `Claws`: up to six cards, each to a Maul.
+            "CLAWS" => offered.push(self.pick(DeckAction::Maul, 0, 6)),
+            // `PaelsLegion` rolls its look on its own stream; the rest is in
+            // combat.
+            "PAELS_LEGION" => {}
             "BLOOD_SOAKED_ROSE" => self.add_card(DeckCard::new("ENTHRALLED")),
             // `SereTalon`: two different curses off the Niche stream, then
             // three Wishes.
@@ -630,6 +736,7 @@ impl RunState {
                 "SHOVEL" => options.push(RestOption::Dig),
                 "PUMPKIN_CANDLE" => options.push(RestOption::Kindle),
                 "MEAT_CLEAVER" => options.push(RestOption::Cook),
+                "PAELS_GROWTH" => options.push(RestOption::Clone),
                 _ => {}
             }
         }
@@ -653,6 +760,13 @@ impl RunState {
             // `PumpkinCandle.Rekindle`.
             RestOption::Kindle => {
                 self.relic_mut("PUMPKIN_CANDLE").expect("Pumpkin Candle").counter += 5;
+                Vec::new()
+            }
+            // `CloneRestSiteOption`: a copy of every card Clone enchants,
+            // enchantment and all.
+            RestOption::Clone => {
+                let clones: Vec<DeckCard> = self.deck.iter().filter(|c| c.enchantment.as_ref().is_some_and(|e| e.id == "CLONE")).cloned().collect();
+                clones.into_iter().for_each(|c| self.add_card(c));
                 Vec::new()
             }
             // `CookRestSiteOption`: two cards out, nine max HP.
@@ -684,5 +798,94 @@ impl RunState {
             offered.push(Offered::Unported("DREAM_CATCHER".into()));
         }
         offered
+    }
+}
+
+/// A `tools/oracle obtain` input line replayed on the port, printed as the
+/// oracle prints it: each relic obtained and what it offers settled by
+/// `rooms::First`, as the oracle's selector takes from the front.
+fn obtain_text(header: &str) -> String {
+    use crate::encounter::Act;
+    let parts: Vec<&str> = header.split_whitespace().collect();
+    let ascension = crate::types::Ascension(parts[1].parse().unwrap());
+    let mut run = RunState::new(parts[0], [Act::Overgrowth, Act::Hive, Act::Glory], ascension, &crate::plan::Unlocks::default());
+    run.act = parts[2].parse().unwrap();
+    let mut out = String::new();
+    for id in &parts[3..] {
+        let offered = run.obtain(id);
+        run.settle(offered, &mut crate::rooms::First, &mut Vec::new());
+        let card = |c: &DeckCard| {
+            let ench = c.enchantment.as_ref().map_or(String::new(), |e| format!(":{}:{}", e.id, e.amount));
+            format!("{}{}{ench}", c.id, if c.upgraded { "+" } else { "" })
+        };
+        let mut deck: Vec<String> = run.deck.iter().map(card).collect();
+        deck.sort();
+        let relics: Vec<&str> = run.relics.iter().map(|r| r.id.as_str()).collect();
+        let potions: Vec<&str> = run.potions.iter().map(|p| p.as_deref().unwrap_or("-")).collect();
+        let counters = [
+            run.rngs.player(PlayerStream::Rewards).counter,
+            run.rngs.run(RunStream::Niche).counter,
+            run.rngs.player(PlayerStream::Transformations).counter,
+            run.rngs.run(RunStream::CombatPotionGeneration).counter,
+        ];
+        out.push_str(&format!(
+            "{id} hp {} {} gold {} deck {} relics {} potions {} counters {} {} {} {}\n",
+            run.hp,
+            run.max_hp,
+            run.gold,
+            deck.join(" "),
+            relics.join(" "),
+            potions.join(" "),
+            counters[0],
+            counters[1],
+            counters[2],
+            counters[3]
+        ));
+    }
+    out
+}
+
+/// Checks `tools/oracle obtain` output against the port: returns how many
+/// runs it held and each one that differs, with the first line that does.
+pub fn diff_oracle(text: &str) -> (usize, Vec<String>) {
+    let mut runs = 0;
+    let mut mismatches = Vec::new();
+    let mut header = "";
+    let mut game = String::new();
+    for line in text.lines().chain(["run end"]) {
+        if let Some(next) = line.strip_prefix("run ") {
+            // A run the game's code refused is not the port's to match.
+            if !header.is_empty() && !game.contains(" error ") {
+                runs += 1;
+                let port = obtain_text(header);
+                if port != game {
+                    let first = port.lines().zip(game.lines()).find(|(p, g)| p != g);
+                    mismatches.push(format!("{header}: {first:?}"));
+                }
+            }
+            header = next;
+            game.clear();
+        } else {
+            game.push_str(line);
+            game.push('\n');
+        }
+    }
+    (runs, mismatches)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `tools/oracle obtain` over every pickup the port has, alone and a few
+    /// at a time beside the relics that change what a pickup does (the
+    /// eggs, Fresnel Lens, Lucky Fysh, Bowler Hat, Sozu, Silver Crucible):
+    /// the player each leaves and the streams it drew on
+    /// (`examples/pickupcheck.rs` makes more).
+    #[test]
+    fn pickups_match_the_game() {
+        let (runs, mismatches) = diff_oracle(include_str!("../testdata/oracle-obtain.txt"));
+        assert!(runs >= 100, "fixture holds {runs} runs");
+        assert!(mismatches.is_empty(), "{} of {runs} differ:\n{}", mismatches.len(), mismatches.join("\n"));
     }
 }
