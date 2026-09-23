@@ -1,7 +1,6 @@
 //! Potions. `Models/PotionModel.cs` plus `Models/Potions/*.cs`: the shared
 //! pool (`SharedPotionPool`) and the three Ironclad potions
-//! (`Ironclad4Epoch`). Colorless Potion is left out until colorless cards
-//! are ported. Potion targeting differs from cards: `Self` and `AnyPlayer`
+//! (`Ironclad4Epoch`), and Colorless Potion. Potion targeting differs from cards: `Self` and `AnyPlayer`
 //! potions receive the player's own creature as the target.
 
 use crate::combat::Combat;
@@ -63,6 +62,8 @@ pub enum PotionId {
     // Token rarity: handed out, never offered as a reward. Named for its
     // class, `PotionShapedRock`, so the recorder's id matches.
     PotionShapedRock,
+    // Shared pool, appended once the colorless cards it offers were ported.
+    ColorlessPotion,
 }
 
 pub const ALL: &[PotionId] = &[
@@ -114,6 +115,7 @@ pub const ALL: &[PotionId] = &[
     PotionId::SoldiersStew,
     PotionId::Ashwater,
     PotionId::PotionShapedRock,
+    PotionId::ColorlessPotion,
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -137,7 +139,7 @@ impl PotionId {
     pub fn rarity(self) -> Rarity {
         use PotionId::*;
         match self {
-            AttackPotion | BlockPotion | BloodPotion | DexterityPotion | EnergyPotion | ExplosiveAmpoule | FirePotion
+            AttackPotion | BlockPotion | BloodPotion | ColorlessPotion | DexterityPotion | EnergyPotion | ExplosiveAmpoule | FirePotion
             | FlexPotion | PowerPotion | SkillPotion | SpeedPotion | StrengthPotion | SwiftPotion | VulnerablePotion
             | WeakPotion => Rarity::Common,
             Ashwater | BlessingOfTheForge | Clarity | CureAll | Duplicator | Fortifier | FyshOil | GamblersBrew
@@ -185,6 +187,9 @@ impl PotionId {
         let offer = |pool: GenPool| Effect::OfferRandom { pool, count: 3, free: true, retain: false };
         match self {
             AttackPotion => vec![offer(GenPool::IroncladAttacks)],
+            // ColorlessPotion.cs: three distinct unlocked colorless cards,
+            // skippable, the pick free this turn.
+            ColorlessPotion => vec![offer(GenPool::ColorlessAll)],
             SkillPotion => vec![offer(GenPool::IroncladSkills)],
             PowerPotion => vec![offer(GenPool::IroncladPowers)],
             BeetleJuice => vec![power(enemy(), PowerId::Shrink, 4)],

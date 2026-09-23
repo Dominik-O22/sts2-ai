@@ -538,6 +538,22 @@ mod tests {
         })
     }
 
+    /// Colorless Potion offers three distinct colorless cards, never one
+    /// only a teammate could use, and the pick is free this turn.
+    #[test]
+    fn colorless_potion_offers_three_colorless_cards() {
+        let mut c = with_potions(&[Some(PotionId::ColorlessPotion), None], &[one(MonsterId::Nibbit)], 1);
+        c.step(Action::UsePotion { slot: 0, target: None });
+        let offer: Vec<_> = c.player.offer.iter().map(|k| k.id).collect();
+        assert_eq!(offer.len(), 3);
+        assert!(offer.iter().all(|id| card::COLORLESS_POOL.contains(id) && !card::MULTIPLAYER_ONLY.contains(id)));
+        assert!(offer.iter().enumerate().all(|(i, id)| !offer[..i].contains(id)));
+        c.step(Action::Choose(0));
+        let taken = c.player.hand.last().unwrap();
+        assert_eq!(taken.id, offer[0]);
+        assert_eq!(c.cost(taken), 0);
+    }
+
     #[test]
     fn fire_potion_ignores_strength_and_empties_its_slot() {
         let mut c = with_potions(&[Some(PotionId::FirePotion), None], &[one(MonsterId::Nibbit)], 1);

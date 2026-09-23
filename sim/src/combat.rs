@@ -3518,7 +3518,7 @@ fn shuffle_cards(cards: &mut Vec<Card>, script: &mut Script, rng: &mut crate::rn
 fn pool_cards(pool: GenPool) -> Vec<CardId> {
     use crate::types::CardRarity::{Common, Rare, Uncommon};
     let source = match pool {
-        GenPool::Colorless => crate::card::COLORLESS_POOL,
+        GenPool::Colorless | GenPool::ColorlessAll => crate::card::COLORLESS_POOL,
         _ => IRONCLAD_POOL,
     };
     source
@@ -3537,6 +3537,7 @@ fn pool_cards(pool: GenPool) -> Vec<CardId> {
                     GenPool::IroncladCommon => d.rarity == crate::types::CardRarity::Common,
                     GenPool::IroncladZeroCost => d.cost == 0 && !d.x_cost,
                     GenPool::Colorless => *id != CardId::JackOfAllTrades,
+                    GenPool::ColorlessAll => true,
                 }
         })
         .collect()

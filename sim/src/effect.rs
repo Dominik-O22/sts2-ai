@@ -103,6 +103,8 @@ pub enum GenPool {
     /// The colorless pool less Jack of All Trades, the one card drawing
     /// from it.
     Colorless,
+    /// The whole colorless pool (Colorless Potion).
+    ColorlessAll,
 }
 
 #[derive(Clone, Debug, PartialEq)]

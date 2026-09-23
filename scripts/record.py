@@ -403,8 +403,7 @@ def run_state() -> dict:
 def blocker(starting: bool = True) -> str | None:
     """Why fights cannot be set up from the run as it stands: no run, a dead
     one, a fight in progress, or something the sim cannot play (a card in
-    `UNSUPPORTED_CARDS`, a relic it does not know, a potion like Colorless
-    Potion), which would make every fight fail on the setup rather than on
+    `UNSUPPORTED_CARDS`, a relic or potion it does not know), which would make every fight fail on the setup rather than on
     the rules. Cards and relics come off with `remove_card` and `relic
     remove`; a potion has no remove command, so it has to be used up."""
     from sts2ai import _sim
