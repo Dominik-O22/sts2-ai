@@ -180,6 +180,9 @@ public static class Recorder
                 ["potions"] = me.PotionSlots.Select(p => p?.Id.Entry).ToList(),
                 ["max_energy"] = me.MaxEnergy,
                 ["act"] = run.Act.GetType().Name,
+                // Shown on the map; a second one only in Double Boss (A10).
+                ["bosses"] = new[] { run.Act.BossEncounter, run.Act.SecondBossEncounter }
+                    .Where(b => b != null).Select(b => b!.Id.Entry).ToList(),
                 ["card_reward"] = CardRewardOptions(),
             };
         string json = JsonSerializer.Serialize(state, Json);

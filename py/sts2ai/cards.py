@@ -9,7 +9,7 @@ reward screen while it is open (`card_reward`), and prints a ranking for
 each new reward. With `--recording`, the run is a recorded fight's start.
 
 For each option the deck (with the card added) plays `repeats` fights
-against every elite and boss of the act, greedy, and the options are ranked
+against every elite of the act and the boss the map shows, greedy, and the options are ranked
 by the mean fight reward (the training reward: a win, plus HP and potions
 kept). Every option faces the same enemies. Elites are fought at the run's
 current HP, bosses at full HP (a rest site comes first). The score looks at
@@ -50,24 +50,26 @@ class Verdict:
     win_by_encounter: dict[str, float]
 
 
-def upcoming(act: str) -> list[tuple[str, int, str]]:
-    """The elites and bosses of `act` (the sim's act name, "Overgrowth" to
-    "Glory"), as (game name, floor, kind)."""
+def upcoming(act: str, bosses: list[str] | None = None) -> list[tuple[str, int, str]]:
+    """The elites of `act` (the sim's act name, "Overgrowth" to "Glory") and
+    its bosses, as (game name, floor, kind). `bosses` are the ones the map
+    shows (game names); without them, every boss of the act."""
     index = {"Overgrowth": 0, "Underdocks": 0, "Hive": 1, "Glory": 2}[act]
     return [
         (name, index * BOSS_FLOOR + (BOSS_FLOOR if kind == "Boss" else ELITE_FLOOR), kind)
         for name, enc_act, kind in _sim.encounters()
-        if enc_act == act and kind in ("Elite", "Boss")
+        if enc_act == act and (kind == "Elite" or (kind == "Boss" and (not bosses or name in bosses)))
     ]
 
 
 @torch.no_grad()
 def fights(policy: Policy, device: torch.device, start: dict, hp: int, max_hp: int, act: str, repeats: int, seed: int) -> list[End]:
     """`repeats` greedy fights of the run in `start` against each elite (at
-    `hp`) and boss (at `max_hp`) of `act`, every env's first fight only."""
+    `hp`) and boss (at `max_hp`, the ones in `start["bosses"]` if given) of
+    `act`, every env's first fight only."""
     ends: list[End] = []
     for kind, fight_hp in (("Elite", hp), ("Boss", max_hp)):
-        encounters = [(name, floor) for name, floor, k in upcoming(act) if k == kind]
+        encounters = [(name, floor) for name, floor, k in upcoming(act, start.get("bosses")) if k == kind]
         if not encounters:
             continue
         n = len(encounters) * repeats

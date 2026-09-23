@@ -28,9 +28,9 @@ uv run python -m sts2ai.cards runs/<run>/latest.pt
 
 A second process, alongside the player or without it, ranks each card
 reward while its screen is open. The mod writes the offered cards into
-`sts2ai/run.json` (`card_reward`, with the act and max energy), and
-`sts2ai.cards` plays the deck with each card added, and without one,
-against every elite and boss of the act: 512 greedy fights per encounter
+`sts2ai/run.json` (`card_reward`, with the act, the bosses the map shows
+and max energy), and `sts2ai.cards` plays the deck with each card added,
+and without one, against every elite of the act and its boss: 512 greedy fights per encounter
 per option, the same enemies for every option. It prints the options best
 first, each against skipping, with the win rate and the worst encounter.
 Values closer than about 0.03 are a tie. It judges the deck as it stands,
