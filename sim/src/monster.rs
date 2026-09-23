@@ -204,8 +204,12 @@ pub struct Flags {
     /// 1-based slot number for monsters whose behaviour depends on it.
     pub slot: u8,
     /// `CorpseSlug.StarterMoveIdx` / `TwoTailedRat.StarterMoveIndex`: which
-    /// move of three the monster opens on. Also `DecimillipedeSegment.StarterMoveIdx`.
+    /// move of three the monster opens on. Also `DecimillipedeSegment.StarterMoveIdx`,
+    /// and `PunchConstruct.StartsWithFastPunch` as 1.
     pub starter_move: u8,
+    /// `PunchConstruct.StartingHpReduction`: current HP taken off once it is
+    /// in the room, never below 1.
+    pub hp_reduction: u8,
     /// `Chomper.ScreamFirst`: the second chomper opens on Screech.
     pub scream_first: bool,
     /// `Axebot._stockOverrideAmount`: set on an Axebot its Stock respawned,
@@ -1742,7 +1746,7 @@ fn graph(id: MonsterId, asc: Ascension, flags: Flags) -> (Vec<State>, usize) {
             g.follow(ready, fast);
             g.follow(fast, strong);
             g.follow(strong, ready);
-            g.done(ready)
+            g.done(if flags.starter_move == 1 { fast } else { ready })
         }
         Seapunk => {
             let kick = g.mv("SEA_KICK_MOVE", vec![atk(d(11, 13))]);

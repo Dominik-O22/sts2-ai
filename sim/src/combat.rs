@@ -464,7 +464,7 @@ impl Combat {
     fn spawn(&mut self, id: MonsterId, flags: Flags) {
         let (lo, hi) = Monster::hp_range(id, self.asc);
         let hp = roll_unique_hp(lo, hi, &self.enemies, &mut self.rngs.niche);
-        let mut creature = Creature { hp, max_hp: hp, block: 0, powers: vec![] };
+        let mut creature = Creature { hp: (hp - i32::from(flags.hp_reduction)).max(1), max_hp: hp, block: 0, powers: vec![] };
         let me = CreatureRef::Enemy(self.enemies.len());
         for (pid, amount) in Monster::innate_powers(id, self.asc) {
             let mut p = Power::new(pid, amount);

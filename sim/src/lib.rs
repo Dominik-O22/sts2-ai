@@ -313,6 +313,22 @@ mod tests {
         assert_eq!(c.enemies[2].monster.next_move_name(), Some("WRIGGLE_MOVE"));
     }
 
+    /// A replay forces opening moves and HP from the log, so only this pins
+    /// what `PunchOffEventEncounter` sets up.
+    #[test]
+    fn punch_off_constructs_start_hurt_and_one_opens_on_fast_punch() {
+        for seed in 0..20 {
+            let specs = encounter::Encounter::PunchOffEventEncounter.monsters(&mut rng::Rng::new(seed));
+            let c = fight(&specs, seed);
+            let moves: Vec<_> = c.enemies.iter().map(|e| e.monster.next_move_name().unwrap()).collect();
+            assert_eq!(moves, ["FAST_PUNCH_MOVE", "READY_MOVE"]);
+            for e in &c.enemies {
+                let down = e.creature.max_hp - e.creature.hp;
+                assert!((2..=9).contains(&down), "seed {seed}: down {down}");
+            }
+        }
+    }
+
     /// Killing the giant only arms the blast; the fight ends when it lands.
     #[test]
     fn waterfall_giant_explodes_for_its_banked_pressure_instead_of_dying() {

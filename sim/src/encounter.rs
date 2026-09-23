@@ -128,6 +128,7 @@ pub enum Encounter {
     TestSubjectBoss,
     // Event fights: an event's option starts them, never the map.
     DenseVegetationEventEncounter,
+    PunchOffEventEncounter,
 }
 
 pub const ALL: &[Encounter] = &[
@@ -212,6 +213,7 @@ pub const ALL: &[Encounter] = &[
     Encounter::QueenBoss,
     Encounter::TestSubjectBoss,
     Encounter::DenseVegetationEventEncounter,
+    Encounter::PunchOffEventEncounter,
 ];
 
 fn one(id: MonsterId) -> EnemySpec {
@@ -238,7 +240,8 @@ impl Encounter {
     /// never rolled for a map room. `kind` still follows the encounter's
     /// `RoomType`, which is `Monster` for all of them.
     pub fn is_event(self) -> bool {
-        matches!(self, Encounter::DenseVegetationEventEncounter)
+        use Encounter::*;
+        matches!(self, DenseVegetationEventEncounter | PunchOffEventEncounter)
     }
 
     pub fn kind(self) -> Kind {
@@ -275,7 +278,9 @@ impl Encounter {
             CorpseSlugsWeak | SeapunkWeak | SludgeSpinnerWeak | ToadpolesWeak | CorpseSlugsNormal | CultistsNormal
             | FossilStalkerNormal | GremlinMercNormal | HauntedShipNormal | LivingFogNormal | PunchConstructNormal
             | SeapunkNormal | SewerClamNormal | TwoTailedRatsNormal | PhantasmalGardenersElite | SkulkingColonyElite
-            | TerrorEelElite | LagavulinMatriarchBoss | SoulFyshBoss | WaterfallGiantBoss => Act::Underdocks,
+            | TerrorEelElite | LagavulinMatriarchBoss | SoulFyshBoss | WaterfallGiantBoss
+            // `Acts/Underdocks.cs` lists the `PunchOff` event.
+            | PunchOffEventEncounter => Act::Underdocks,
             // `Acts/Overgrowth.cs` lists the `DenseVegetation` event.
             _ => Act::Overgrowth,
         }
@@ -470,6 +475,15 @@ impl Encounter {
             // `DenseVegetationEventEncounter`: a Wriggler in each of
             // wriggler1..4, none of them stunned, so each opens on its slot's move.
             DenseVegetationEventEncounter => (1..=4).map(|slot| in_slot(Wriggler, slot)).collect(),
+            // `PunchOffEventEncounter`: two constructs, the first opening on
+            // Fast Punch, each down 2 to 9 HP (`Rng.NextInt(2, 10)`).
+            PunchOffEventEncounter => [1, 0]
+                .into_iter()
+                .map(|starter_move| EnemySpec {
+                    id: PunchConstruct,
+                    flags: Flags { starter_move, hp_reduction: 2 + rng.next_int(8) as u8, ..Flags::default() },
+                })
+                .collect(),
         }
     }
 }
