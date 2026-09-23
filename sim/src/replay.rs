@@ -229,6 +229,14 @@ fn diff(recorded: &Value, sim: &Value) -> Option<String> {
 fn settle(c: &Combat, snap: &Value, depth: u32) -> Result<Combat, String> {
     if c.pending.is_none() {
         let mut k = c.clone();
+        // The first decision point. Turn 1's start is over here, including
+        // a choice it opened (Gambling Chip), so what the first snapshot
+        // settles can be read off by position now and not before.
+        if let Some(hp) = k.script.player_hp.take() {
+            k.player.creature.hp = hp;
+            adopt_layout(&mut k, snap, true);
+            adopt_cracked(&mut k, snap);
+        }
         adopt_random_results(&mut k, snap);
         adopt_gem_pick(&mut k, snap);
         adopt_replay_copies(&mut k, snap);
@@ -851,14 +859,14 @@ impl Replayer {
             }
         }
         // Records from before the first decision point (`early`): cards
-        // made (Crossbow's turn 1 attack) and cards exhausted (True Grit
-        // under Whispering Earring). Only cards random generation could have
-        // rolled are forced; Luminesce and the Dazed are placed by name.
+        // made (Crossbow's turn 1 attack), cards exhausted (True Grit under
+        // Whispering Earring), and a choice opened on the way (Gambling
+        // Chip) with the picks that answered it. Only cards random
+        // generation could have rolled are forced; Luminesce and the Dazed
+        // are placed by name.
+        let early_records = start["early"].as_array().cloned().unwrap_or_default();
         let early = |t: &str| -> Vec<(CardId, bool)> {
-            start["early"]
-                .as_array()
-                .map(|a| a.iter().filter(|v| v["t"] == t).filter_map(|v| card_ref(&ids, v).ok()).collect())
-                .unwrap_or_default()
+            early_records.iter().filter(|v| v["t"] == t).filter_map(|v| card_ref(&ids, v).ok()).collect()
         };
         let generated = early("gen")
             .into_iter()
@@ -866,9 +874,17 @@ impl Replayer {
             .filter(|&id| IRONCLAD_POOL.contains(&id) && crate::card::def(id).generatable)
             .collect();
         let random_exhausts = early("exhaust");
+        // The sim's setup stops at the same choice. Fed like any other
+        // record, ahead of the first snapshot, it takes the game's answer.
+        let early_choices: VecDeque<(usize, Value)> = early_records
+            .iter()
+            .filter(|v| matches!(v["t"].as_str(), Some("choice" | "picked")))
+            .map(|v| (0, v.clone()))
+            .collect();
         let script = Script {
             shuffles: VecDeque::from(vec![opening]),
             enemy_hp: enemies.iter().map(|e| e["max_hp"].as_i64().unwrap_or(1) as i32).collect(),
+            player_hp: Some(fs.hp),
             random_targets: VecDeque::new(),
             generated,
             random_exhausts,
@@ -885,12 +901,6 @@ impl Replayer {
                 c.enemies[i].creature.hp = hp as i32;
             }
         }
-        // The player's HP is read from that same first decision point, after
-        // turn 1 has healed (Blood Vial) or hurt (Royal Poison), so the sim
-        // having just done so again is undone.
-        c.player.creature.hp = fs.hp;
-        adopt_layout(&mut c, first_snap, true);
-        adopt_cracked(&mut c, first_snap);
 
         let report = Report { snapshots: 0, actions: 0, divergence: None, reseeds: 0, forced_end: false };
         let known_enemies = c.enemies.len();
@@ -913,7 +923,7 @@ impl Replayer {
             pre_potion: None,
             pre_ended: false,
             gate: Gate::default(),
-            queue: VecDeque::new(),
+            queue: early_choices,
             since: vec![],
             tries: 0,
             // Record 0 is the start record this was built from.
@@ -1062,7 +1072,11 @@ impl Replayer {
                 adopt_confused_costs(&mut self.c, rec);
                 adopt_copy_costs(&mut self.c, rec);
                 adopt_offer(&mut self.c, rec);
-                adopt_layout(&mut self.c, rec, false);
+                // The opening layout is settled on the matching branch, where
+                // any choice turn 1's start opened has been answered.
+                if self.c.script.player_hp.is_none() {
+                    adopt_layout(&mut self.c, rec, false);
+                }
                 if let Err(e) = adopt_spawn_hp(&mut self.c, rec, self.known_enemies) {
                     return Ok(Applied::Diverged(e));
                 }

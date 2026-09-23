@@ -40,7 +40,8 @@ One JSON object per line:
   any of them fires. `opening` is the draw pile the opening shuffle made,
   and `early` holds the records written between setup and the first
   decision point (Crossbow's turn 1 card, Whispering Earring's plays and
-  what they exhaust), which the file would otherwise miss.
+  what they exhaust, Gambling Chip's choice and what was picked), which
+  the file would otherwise miss.
 - `snapshot`: the full state at each point the player could act, written by
   a per-frame poll while it is the play phase and nothing is resolving.
   Includes hand with costs, draw pile in order, discard, exhaust, powers,
