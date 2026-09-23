@@ -263,8 +263,9 @@ fn settle(c: &Combat, snap: &Value, depth: u32) -> Result<Combat, String> {
 }
 
 /// Enemies spawned since the last snapshot rolled their HP in the sim; the
-/// recording only shows the game's roll now. Adopt it while they are still
-/// undamaged, which is when the roll is the only difference.
+/// recording only shows the game's roll now. The roll only sets max HP, so
+/// adopt the game's bar when the sim's lost HP matches: undamaged, or hit
+/// alike since the spawn (Mr. Struggles at the start of the next turn).
 /// A hatched Tough Egg re-rolls its HP the same way, so it is adopted too,
 /// minus the range check, which is the egg's and not the hatchling's.
 fn adopt_spawn_hp(c: &mut Combat, snap: &Value, known: usize) -> Result<(), String> {
@@ -275,8 +276,9 @@ fn adopt_spawn_hp(c: &mut Combat, snap: &Value, known: usize) -> Result<(), Stri
         let asc = c.asc;
         let fresh = i >= known;
         let cr = &mut c.enemies[i].creature;
-        if (fresh || rerolled.contains(&i)) && cr.hp == cr.max_hp {
-            if let (Some(hp), Some(max)) = (e["hp"].as_i64(), e["max_hp"].as_i64()) {
+        if fresh || rerolled.contains(&i) {
+            let (Some(hp), Some(max)) = (e["hp"].as_i64(), e["max_hp"].as_i64()) else { continue };
+            if cr.max_hp - cr.hp == (max - hp) as i32 {
                 if fresh {
                     check_hp_range(c.enemies[i].monster.id, max as i32, asc)?;
                 }
