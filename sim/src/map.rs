@@ -157,7 +157,7 @@ const SHOPS: usize = 3;
 
 /// `ActModel.GetNumberOfRooms` for one player: each act's
 /// `BaseNumberOfRooms`, the boss and the start excluded.
-fn rooms(act: Act) -> usize {
+pub(crate) fn rooms(act: Act) -> usize {
     match act {
         Act::Overgrowth | Act::Underdocks => 15,
         Act::Hive => 14,

@@ -33,6 +33,26 @@ impl Act {
     }
 }
 
+/// `Entities/Encounters/EncounterTag.cs`. Two encounters that share one are
+/// not rolled back to back (`ActModel.AddWithoutRepeatingTags`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tag {
+    Burrower,
+    Chomper,
+    Nibbit,
+    Shrinker,
+    Slimes,
+    Thieves,
+    Workers,
+    Crawler,
+    Mushroom,
+    Knights,
+    Scrolls,
+    Seapunk,
+    Slugs,
+    Exoskeletons,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
     Weak,
@@ -303,6 +323,35 @@ impl Encounter {
             // every act; it sits here because an encounter names one.
             _ => Act::Overgrowth,
         }
+    }
+
+    /// `EncounterModel.Tags`, from each encounter's class.
+    pub fn tags(self) -> &'static [Tag] {
+        use Encounter::*;
+        match self {
+            FlyconidNormal => &[Tag::Mushroom, Tag::Slimes],
+            FuzzyWurmCrawlerWeak => &[Tag::Crawler],
+            NibbitsWeak => &[Tag::Nibbit],
+            OvergrowthCrawlers => &[Tag::Shrinker, Tag::Crawler],
+            ShrinkerBeetleWeak => &[Tag::Shrinker],
+            SlimesNormal | SlimesWeak => &[Tag::Slimes],
+            SnappingJaxfruitNormal => &[Tag::Mushroom],
+            CorpseSlugsNormal | CorpseSlugsWeak => &[Tag::Slugs],
+            SeapunkNormal | SeapunkWeak => &[Tag::Seapunk],
+            BowlbugsNormal | BowlbugsWeak | SlumberingBeetleNormal => &[Tag::Workers],
+            ChompersNormal => &[Tag::Chomper],
+            ExoskeletonsNormal | ExoskeletonsWeak => &[Tag::Exoskeletons],
+            ThievingHopperWeak => &[Tag::Thieves],
+            TunnelerWeak => &[Tag::Burrower],
+            KnightsElite => &[Tag::Knights],
+            ScrollsOfBitingNormal | ScrollsOfBitingWeak => &[Tag::Scrolls],
+            _ => &[],
+        }
+    }
+
+    /// `EncounterModel.SharesTagsWith`.
+    pub fn shares_tags_with(self, other: Encounter) -> bool {
+        self.tags().iter().any(|tag| other.tags().contains(tag))
     }
 
     /// `EncounterModel.GenerateMonsters`. `rng` stands in for the
