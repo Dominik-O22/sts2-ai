@@ -65,6 +65,8 @@ pub struct RunFight {
     pub seed: u64,
     /// The act, 0-based.
     pub act: u32,
+    /// Cards in the deck the fight was fought with.
+    pub deck: u32,
     /// How the run ended, when it ended with this fight: the fight lost,
     /// the last boss beaten, or the next fight one the sim cannot build.
     pub end: Option<forward::End>,
@@ -221,13 +223,14 @@ impl RunSlot {
             won: combat.outcome == Some(Outcome::Won),
             gold_proportion: self.run.state.end_fight(setup, combat),
         });
-        let mut report = fought.map(|_| RunFight { seed: self.seed, act: self.run.state.act as u32, end: None });
+        let mut report = fought.map(|_| RunFight { seed: self.seed, act: self.run.state.act as u32, deck: setup.deck.len() as u32, end: None });
         loop {
-            let with_fight = fought.is_some();
             match self.run.next(fought.take(), &mut self.chooser) {
                 Next::Fight(setup) => return (setup, report),
                 Next::End(end) => {
-                    if let Some(report) = report.as_mut().filter(|_| with_fight) {
+                    // The first end is the finished fight's run's; later
+                    // ones are fresh runs that ended before a fight.
+                    if let Some(report) = report.as_mut().filter(|r| r.end.is_none()) {
                         report.end = Some(end);
                     }
                     self.seed = self.base + index as u64 + self.started * n as u64;

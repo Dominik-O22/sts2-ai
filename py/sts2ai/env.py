@@ -75,6 +75,7 @@ class RunFight(NamedTuple):
 
     seed: int
     act: int  # 0-based
+    deck: int  # cards in the deck the fight was fought with
     # How the run ended with this fight: "won", "died", "stuck: <why>".
     end: str | None
 

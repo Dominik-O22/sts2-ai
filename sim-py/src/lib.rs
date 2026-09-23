@@ -30,9 +30,9 @@ struct VecEnv {
 /// One finished fight: (env, won, hp_frac, hp_lost, potions_used, steps, floor, encounter, kind, reward, run).
 type End = (usize, bool, f32, f32, u32, u32, u32, String, String, f32, Option<RunFight>);
 
-/// A run fight's place in its run: (seed index, act, how the run ended
-/// with it: "won", "died", "stuck: <why>", or None).
-type RunFight = (u64, u32, Option<String>);
+/// A run fight's place in its run: (seed index, act, deck size, how the
+/// run ended with it: "won", "died", "stuck: <why>", or None).
+type RunFight = (u64, u32, u32, Option<String>);
 
 fn run_fight(r: sim::env::RunFight) -> RunFight {
     use sim::forward::End;
@@ -41,7 +41,7 @@ fn run_fight(r: sim::env::RunFight) -> RunFight {
         End::Died => "died".into(),
         End::Stuck(why) => format!("stuck: {why}"),
     });
-    (r.seed, r.act, end)
+    (r.seed, r.act, r.deck, end)
 }
 
 impl VecEnv {
