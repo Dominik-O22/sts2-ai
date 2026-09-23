@@ -486,6 +486,8 @@ impl RunState {
             enemies,
             encounter,
             room,
+            // The plan drew the last act's second boss apart from its first.
+            after: crate::gen::after(encounter, self.ascension, self.plan.acts[self.act].second_boss == Some(encounter)),
             asc: self.ascension,
             floor: self.floor as u32,
             gold: self.gold,
