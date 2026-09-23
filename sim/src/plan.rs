@@ -169,6 +169,34 @@ impl BagRelic {
             BagRelic::Game(name) => slug(name),
         }
     }
+
+    /// Its class's `Rarity`.
+    pub fn rarity(self) -> RelicRarity {
+        SHARED_RELICS.iter().chain(IRONCLAD_RELICS).find(|&&(r, _)| r == self).expect("a pool relic").1
+    }
+
+    /// The pool relic with this game id.
+    pub fn from_game_id(id: &str) -> Option<BagRelic> {
+        SHARED_RELICS.iter().chain(IRONCLAD_RELICS).map(|&(r, _)| r).find(|r| r.game_id() == id)
+    }
+
+    /// `RelicModel.IsAllowed` at `floor` (`RunState.TotalFloor`). The ones
+    /// that override it want `IsBeforeAct3TreasureChest`; Lasting Candy also
+    /// wants a profile with a run behind it, which a fully unlocked one has.
+    fn allowed(self, floor: usize) -> bool {
+        use RelicId::*;
+        const LATE: &[RelicId] = &[
+            AmethystAubergine, BookOfFiveRings, BowlerHat, DragonFruit, FrozenEgg, Girya, JuzuBracelet, LastingCandy,
+            LuckyFysh, MealTicket, MoltenEgg, OldCoin, Planisphere, Shovel, ToxicEgg, WhiteBeastStatue, WhiteStar,
+        ];
+        !matches!(self, BagRelic::Sim(id) if LATE.contains(&id)) || floor < 41
+    }
+
+    /// `RelicModel.IsAllowedInShops`.
+    pub fn allowed_in_shops(self) -> bool {
+        use RelicId::*;
+        !matches!(self, BagRelic::Sim(AmethystAubergine | BowlerHat | LuckyFysh | OldCoin | TheCourier))
+    }
 }
 
 /// `RelicGrabBag` once populated: a deque per rarity, in the order each
@@ -178,13 +206,17 @@ impl BagRelic {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RelicBag {
     pub deques: Vec<(RelicRarity, Vec<BagRelic>)>,
+    /// `_originalRelics` where `_refreshAllowed`: the run's shared bag
+    /// refills a rarity it ran out of from these, unshuffled.
+    refill: Option<Vec<(BagRelic, RelicRarity)>>,
 }
 
 impl RelicBag {
     /// `RelicGrabBag.Populate`.
-    fn populate(relics: impl Iterator<Item = (BagRelic, RelicRarity)>, rng: &mut GameRng) -> Self {
+    fn populate(relics: impl Iterator<Item = (BagRelic, RelicRarity)>, refresh: bool, rng: &mut GameRng) -> Self {
+        let relics: Vec<(BagRelic, RelicRarity)> = relics.collect();
         let mut deques: Vec<(RelicRarity, Vec<BagRelic>)> = Vec::new();
-        for (relic, rarity) in relics {
+        for &(relic, rarity) in &relics {
             match deques.iter_mut().find(|(r, _)| *r == rarity) {
                 Some((_, deque)) => deque.push(relic),
                 None => deques.push((rarity, vec![relic])),
@@ -193,7 +225,77 @@ impl RelicBag {
         for (_, deque) in &mut deques {
             rng.shuffle(deque);
         }
-        Self { deques }
+        Self { deques, refill: refresh.then_some(relics) }
+    }
+
+    fn deque(&mut self, rarity: RelicRarity) -> Option<&mut Vec<BagRelic>> {
+        self.deques.iter_mut().find(|(r, _)| *r == rarity).map(|(_, d)| d)
+    }
+
+    /// `PullFromFront`: the first relic `keep` takes from the rarity's
+    /// deque, or the next rarity's when none there passes.
+    pub fn pull_front(&mut self, rarity: RelicRarity, floor: usize, keep: impl Fn(BagRelic) -> bool) -> Option<BagRelic> {
+        let deque = self.available(rarity, floor, &keep)?;
+        let i = deque.iter().position(|&r| keep(r))?;
+        Some(deque.remove(i))
+    }
+
+    /// `PullFromBack`.
+    pub fn pull_back(&mut self, rarity: RelicRarity, floor: usize, keep: impl Fn(BagRelic) -> bool) -> Option<BagRelic> {
+        let deque = self.available(rarity, floor, &keep)?;
+        let i = deque.iter().rposition(|&r| keep(r))?;
+        Some(deque.remove(i))
+    }
+
+    /// `Remove`: what obtaining a relic does to both bags.
+    pub fn remove(&mut self, relic: BagRelic) {
+        for (_, deque) in &mut self.deques {
+            deque.retain(|&r| r != relic);
+        }
+    }
+
+    /// `GetAvailableDeque`: drops the relics the run no longer allows for
+    /// good, refills an empty rarity if the bag may, then walks Shop, Common,
+    /// Uncommon, Rare from `rarity` to the first deque holding a relic `keep`
+    /// takes. A refill of a rarity the bag never had lands in a new deque
+    /// the walk does not see this time.
+    fn available(&mut self, rarity: RelicRarity, floor: usize, keep: &impl Fn(BagRelic) -> bool) -> Option<&mut Vec<BagRelic>> {
+        self.drop_disallowed(floor);
+        let had = self.deque(rarity).is_some();
+        if self.deque(rarity).is_none_or(|d| d.is_empty()) {
+            if let Some(refill) = self.refill.clone() {
+                for (relic, r) in refill.into_iter().filter(|&(_, r)| r == rarity) {
+                    match self.deque(r) {
+                        Some(deque) => deque.push(relic),
+                        None => self.deques.push((r, vec![relic])),
+                    }
+                }
+                self.drop_disallowed(floor);
+            }
+        }
+        let mut rarity = Some(rarity);
+        let mut skip_first = !had;
+        while let Some(r) = rarity {
+            let holds = !skip_first && self.deque(r).is_some_and(|d| d.iter().any(|&x| keep(x)));
+            if holds {
+                return self.deque(r);
+            }
+            skip_first = false;
+            rarity = match r {
+                RelicRarity::Shop => Some(RelicRarity::Common),
+                RelicRarity::Common => Some(RelicRarity::Uncommon),
+                RelicRarity::Uncommon => Some(RelicRarity::Rare),
+                _ => None,
+            };
+        }
+        None
+    }
+
+    /// `RemoveDisallowedRelicsFromDeques`.
+    fn drop_disallowed(&mut self, floor: usize) {
+        for (_, deque) in &mut self.deques {
+            deque.retain(|r| r.allowed(floor));
+        }
     }
 }
 
@@ -242,12 +344,12 @@ impl RunPlan {
         // (`Player.PopulateRelicGrabBagIfNecessary`), whose list
         // `RelicGrabBag.Populate(Player, Rng)` builds.
         let shared = || SHARED_RELICS.iter().copied().filter(|&(r, _)| unlocks.relic(r));
-        let shared_bag = RelicBag::populate(shared(), &mut rng);
+        let shared_bag = RelicBag::populate(shared(), true, &mut rng);
         let ironclad = IRONCLAD_RELICS.iter().copied().filter(|&(r, _)| unlocks.relic(r));
         let rewardable = |&(_, rarity): &(BagRelic, RelicRarity)| {
             matches!(rarity, RelicRarity::Common | RelicRarity::Uncommon | RelicRarity::Rare | RelicRarity::Shop)
         };
-        let player_bag = RelicBag::populate(shared().chain(ironclad).filter(rewardable), &mut rng);
+        let player_bag = RelicBag::populate(shared().chain(ironclad).filter(rewardable), false, &mut rng);
 
         // `GenerateRooms`: the shared ancients go to acts 2 and 3, a random
         // number of them to each, before any act is filled.
