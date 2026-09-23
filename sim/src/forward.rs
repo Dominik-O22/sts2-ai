@@ -23,6 +23,7 @@ use crate::rewards::Offer;
 use crate::rng::Rng;
 use crate::rooms::{Chooser, Decision};
 use crate::run::{Room, RoomType, RunState};
+use crate::shop::{Item, Ware};
 use crate::types::Ascension;
 
 /// How a fight went, once `Fights::fight` has written it into the run.
@@ -58,7 +59,8 @@ fn playable(offer: &Offer) -> bool {
 }
 
 /// A chooser that never sees a card the sim cannot play: those are left
-/// out of card and bundle offers before `inner` chooses.
+/// out of card and bundle offers and off the shop's shelves before `inner`
+/// chooses.
 struct Playable<'a, C: Chooser>(&'a mut C);
 
 impl<C: Chooser> Chooser for Playable<'_, C> {
@@ -73,6 +75,11 @@ impl<C: Chooser> Chooser for Playable<'_, C> {
                 let kept: Vec<usize> = (0..bundles.len()).filter(|&i| bundles[i].iter().all(playable)).collect();
                 let offered: Vec<Vec<Offer>> = kept.iter().map(|&i| bundles[i].clone()).collect();
                 kept.get(self.0.choose(run, Decision::Bundle(&offered))).copied().unwrap_or(bundles.len())
+            }
+            Decision::Shop(wares) => {
+                let kept: Vec<usize> = (0..wares.len()).filter(|&i| !matches!(&wares[i].item, Item::Card(c) if !playable(c))).collect();
+                let offered: Vec<Ware> = kept.iter().map(|&i| wares[i].clone()).collect();
+                kept.get(self.0.choose(run, Decision::Shop(&offered))).copied().unwrap_or(wares.len())
             }
             other => self.0.choose(run, other),
         }
