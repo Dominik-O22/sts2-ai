@@ -700,10 +700,16 @@ pub struct Replayer {
     stopped: bool,
 }
 
+/// The state a rewind goes back to: the sim at the last matched snapshot
+/// plus the replayer's own bookkeeping, including what it played early,
+/// which a rewind in the middle of that play has to forget.
 struct Checkpoint {
     c: Combat,
     known_enemies: usize,
     report: Report,
+    pre_played: Option<(CardId, bool)>,
+    pre_potion: Option<PotionId>,
+    pre_ended: bool,
 }
 
 /// What feeding a record did.
@@ -836,6 +842,7 @@ impl Replayer {
             unforced: vec![],
             hit_cards: vec![],
             spawns: vec![],
+            unscripted_shuffles: 0,
         };
         let mut c = Combat::with_script(&fs.as_setup(seed), script);
         // Enemies that start damaged (the start record is taken at the first decision point).
@@ -855,7 +862,14 @@ impl Replayer {
         Ok(Self {
             ids,
             seed,
-            checkpoint: Checkpoint { c: c.clone(), known_enemies, report: report.clone() },
+            checkpoint: Checkpoint {
+                c: c.clone(),
+                known_enemies,
+                report: report.clone(),
+                pre_played: None,
+                pre_potion: None,
+                pre_ended: false,
+            },
             c,
             report,
             known_enemies,
@@ -952,7 +966,13 @@ impl Replayer {
                     return Ok(Step::Diverged(msg));
                 }
                 Applied::Rewind => {
-                    for item in self.since.drain(..).rev() {
+                    // Every shuffle order the game has logged since the
+                    // checkpoint goes first this time: the sim consumes them
+                    // in the same sequence the game did, and one of them may
+                    // belong to a step that ran before its record arrived.
+                    let (shuffles, rest): (Vec<_>, Vec<_>) =
+                        self.since.drain(..).partition(|(_, r)| r["t"].as_str() == Some("shuffle"));
+                    for item in rest.into_iter().rev().chain(shuffles.into_iter().rev()) {
                         self.queue.push_front(item);
                     }
                 }
@@ -963,11 +983,25 @@ impl Replayer {
         Ok(if ended { Step::Ended } else { self.step() })
     }
 
+    /// Restore the last matching state, streams included. Reseeds already
+    /// spent stay counted.
+    fn restore(&mut self) {
+        let reseeds = self.report.reseeds;
+        self.report = Report { reseeds, ..self.checkpoint.report.clone() };
+        self.c = self.checkpoint.c.clone();
+        self.known_enemies = self.checkpoint.known_enemies;
+        self.pre_played = self.checkpoint.pre_played;
+        self.pre_potion = self.checkpoint.pre_potion;
+        self.pre_ended = self.checkpoint.pre_ended;
+        self.snecko_pending = false;
+        self.at_decision = false;
+    }
+
     /// Restore the last matching state and re-roll the unscripted streams.
     fn rewind(&mut self) {
         self.tries += 1;
-        self.report = Report { reseeds: self.report.reseeds + 1, ..self.checkpoint.report.clone() };
-        self.c = self.checkpoint.c.clone();
+        self.restore();
+        self.report.reseeds += 1;
         let salt = u64::from(self.tries) << 32;
         self.c.rngs.card_selection = crate::rng::Rng::new(self.seed ^ 0x06 ^ salt);
         self.c.rngs.targets = crate::rng::Rng::new(self.seed ^ 0x03 ^ salt);
@@ -975,9 +1009,6 @@ impl Replayer {
         // random depth in the draw pile. Neither is recorded.
         self.c.rngs.niche = crate::rng::Rng::new(self.seed ^ 0x04 ^ salt);
         self.c.rngs.card_generation = crate::rng::Rng::new(self.seed ^ 0x05 ^ salt);
-        self.known_enemies = self.checkpoint.known_enemies;
-        self.snecko_pending = false;
-        self.at_decision = false;
     }
 
     fn apply(&mut self, _n: usize, rec: &Value) -> Result<Applied, String> {
@@ -1019,8 +1050,15 @@ impl Replayer {
                 }
                 self.tries = 0;
                 self.since.clear();
-                self.checkpoint =
-                    Checkpoint { c: self.c.clone(), known_enemies: self.known_enemies, report: self.report.clone() };
+                self.c.script.unscripted_shuffles = 0;
+                self.checkpoint = Checkpoint {
+                    c: self.c.clone(),
+                    known_enemies: self.known_enemies,
+                    report: self.report.clone(),
+                    pre_played: self.pre_played,
+                    pre_potion: self.pre_potion,
+                    pre_ended: self.pre_ended,
+                };
                 if let Err(e) = force_moves(&mut self.c, rec) {
                     return Ok(Applied::Diverged(e));
                 }
@@ -1084,6 +1122,12 @@ impl Replayer {
                     .map(|v| card_ref(&self.ids, v))
                     .collect::<Result<Vec<_>, _>>()?;
                 self.c.script.shuffles.push_back(order);
+                // The sim already shuffled without this order: go back to
+                // the checkpoint and run those steps again with it queued.
+                if self.c.script.unscripted_shuffles > 0 {
+                    self.restore();
+                    return Ok(Applied::Rewind);
+                }
                 Ok(Applied::Ok)
             }
             "play" => {

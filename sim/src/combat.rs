@@ -167,6 +167,11 @@ pub struct Setup<'a> {
 pub struct Script {
     /// Draw pile orders, top first, as (id, upgraded).
     pub shuffles: VecDeque<Vec<(CardId, bool)>>,
+    /// Shuffles rolled with no order queued, since the last snapshot. The
+    /// replayer rewinds when the game's order arrives after the sim needed
+    /// it (a choice card played early, or a reshuffle an after-play hook
+    /// triggers once the `play` record is already written).
+    pub unscripted_shuffles: u32,
     /// Max HP per starting enemy, by index.
     pub enemy_hp: Vec<i32>,
     /// Targets for random-target hits, as indices into the living enemies.
@@ -3562,7 +3567,10 @@ fn shuffle_cards(cards: &mut Vec<Card>, script: &mut Script, rng: &mut crate::rn
             }
             cards.append(&mut rest);
         }
-        None => rng.shuffle(cards),
+        None => {
+            script.unscripted_shuffles += 1;
+            rng.shuffle(cards);
+        }
     }
     Arc::make_mut(log).push(cards.iter().map(|c| (c.id, c.upgraded)).collect());
 }

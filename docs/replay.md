@@ -76,6 +76,13 @@ times. The report shows how many reseeds a clean
 replay needed. Cards created mid-combat are logged as `gen` records and
 forced like the shuffles.
 
+A shuffle record can arrive after the sim needed it: a `choice` record plays
+its card early, and a reshuffle that an after-play hook triggers is logged
+after the `play` record. The sim shuffles at random then, and when the
+record lands it rewinds to the last matching snapshot and runs those steps
+again with the order queued. That rewind keeps the random streams; it is
+not a reseed.
+
 A snapshot immediately followed by another snapshot, with no action in
 between, caught the game mid-resolution and is skipped.
 
