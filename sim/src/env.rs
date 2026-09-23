@@ -385,15 +385,76 @@ fn row_hash(floats: &[f32], ids: &[i64], mask: &[bool]) -> u64 {
 /// player does not know its order, so the plan must not either. Forks in
 /// the same `group` share a shuffle, so plans in a group are compared on
 /// the same hidden draws.
+///
+/// Copies are the unit of the API, but copies whose states are equal sit
+/// on one shared node: copies of a shuffle group start on one node, and a
+/// step that rolls no dice moves every copy that took it to one new node.
+/// Only a step that rolls dice splits a group, each copy stepping on its
+/// own. Rewards and encodings per copy are exactly those of independent
+/// clones stepped one by one.
 pub struct Forks {
-    combats: Vec<Combat>,
-    /// Per copy: the last player turn it plays, and the root's baseline.
-    turns: Vec<u32>,
-    bases: Vec<Baseline>,
-    /// Per copy: the hash of its encoding, taken in `step` while its state
+    /// A node's combat is the state of every copy on it. Its `rngs` are
+    /// whichever copy stepped it last, or the root's: the copy's own dice
+    /// live in `Fork` and are swapped in for its steps.
+    nodes: Vec<Box<Combat>>,
+    /// Per node: the hash of its encoding, taken in `step` while its state
     /// is still in cache (`observe_unique` would fetch it all again). None
     /// until it first moves.
     hashes: Vec<Option<u64>>,
+    copies: Vec<Fork>,
+}
+
+/// One copy of a search: the node holding its state, its own dice, the
+/// last player turn it plays and the root's baseline.
+struct Fork {
+    node: usize,
+    rngs: CombatRngs,
+    turn: u32,
+    base: Baseline,
+}
+
+/// Copies on one node that take the same action this step. Owned when the
+/// group is all that refers to the node, so it steps in place.
+struct Group<'a> {
+    src: Src,
+    action: i64,
+    /// The copies, as `(node, action, copy)` keys.
+    members: &'a [(usize, i64, usize)],
+}
+
+enum Src {
+    Owned(Box<Combat>, Option<u64>),
+    Shared(usize),
+}
+
+/// Where a group's copies ended up: nodes it made, one entry per copy, and
+/// whether they stayed on the shared node instead (an illegal action).
+struct GroupOut {
+    nodes: Vec<(Box<Combat>, Option<u64>)>,
+    moved: Vec<Moved>,
+    stayed: Option<usize>,
+}
+
+struct Moved {
+    copy: usize,
+    /// Index into the group's `nodes`.
+    node: usize,
+    reward: f32,
+    /// The copy's dice after the step, when the step rolled any.
+    rngs: Option<CombatRngs>,
+}
+
+/// Whether a step rolled no dice: every stream is where it was. Xoshiro
+/// never returns to a state, so equal means untouched.
+fn rngs_unchanged(a: &CombatRngs, b: &CombatRngs) -> bool {
+    a.shuffle == b.shuffle
+        && a.monster_ai == b.monster_ai
+        && a.targets == b.targets
+        && a.niche == b.niche
+        && a.card_generation == b.card_generation
+        && a.card_selection == b.card_selection
+        && a.energy_costs == b.energy_costs
+        && a.potion_generation == b.potion_generation
 }
 
 impl Forks {
@@ -404,85 +465,114 @@ impl Forks {
     /// `n` copies of each root, root after root, each played for `depth`
     /// player turns: the rest of the current one, then `depth - 1` more.
     pub fn of(roots: &[&Combat], n: usize, groups: usize, seed: u64, depth: u32) -> Self {
-        let per_group = n.div_ceil(groups.max(1));
-        let combats = roots
+        let per_group = n.div_ceil(groups.max(1)).max(1);
+        let n_groups = n.div_ceil(per_group);
+        let root_seed = |r: usize| seed ^ (r as u64).wrapping_mul(0xD6E8_FEB8_6659_FD93);
+        let nodes = roots
             .par_iter()
             .enumerate()
             .flat_map_iter(|(r, root)| {
-                let seed = seed ^ (r as u64).wrapping_mul(0xD6E8_FEB8_6659_FD93);
-                (0..n).map(move |i| {
-                    let group = i / per_group;
+                (0..n_groups).map(move |group| {
                     let mut c = (*root).clone();
                     c.script = Default::default();
-                    c.rngs = CombatRngs::new(seed ^ (i as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15));
-                    Rng::new(seed ^ (group as u64 + 1) << 20).shuffle(&mut c.player.draw);
-                    c
+                    Rng::new(root_seed(r) ^ (group as u64 + 1) << 20).shuffle(&mut c.player.draw);
+                    Box::new(c)
                 })
             })
             .collect();
-        let turns = roots.iter().flat_map(|root| std::iter::repeat_n(root.player.turn + depth.max(1) - 1, n)).collect();
-        let bases = roots.iter().flat_map(|root| std::iter::repeat_n(Baseline::of(root), n)).collect();
-        let hashes = vec![None; roots.len() * n];
-        Self { combats, turns, bases, hashes }
+        let copies = (0..roots.len() * n)
+            .into_par_iter()
+            .map(|k| {
+                let (r, i) = (k / n, k % n);
+                Fork {
+                    node: r * n_groups + i / per_group,
+                    rngs: CombatRngs::new(root_seed(r) ^ (i as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15)),
+                    turn: roots[r].player.turn + depth.max(1) - 1,
+                    base: Baseline::of(roots[r]),
+                }
+            })
+            .collect();
+        let hashes = vec![None; roots.len() * n_groups];
+        Self { nodes, hashes, copies }
     }
 
     pub fn len(&self) -> usize {
-        self.combats.len()
+        self.copies.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.combats.is_empty()
+        self.copies.is_empty()
     }
 
+    /// Copy `i`'s state. Its `rngs` field is not copy `i`'s dice.
     pub fn combat(&self, i: usize) -> &Combat {
-        &self.combats[i]
+        &self.nodes[self.copies[i].node]
     }
 
     /// The player's turn is done: the sim moved on to the next one, or
     /// the fight ended.
     pub fn turn_over(&self, i: usize) -> bool {
-        let c = &self.combats[i];
-        c.is_over() || c.player.turn > self.turns[i]
+        let c = self.combat(i);
+        c.is_over() || c.player.turn > self.copies[i].turn
     }
 
     /// The forks still in their turn.
     pub fn live(&self) -> Vec<usize> {
-        (0..self.combats.len()).filter(|&i| !self.turn_over(i)).collect()
+        (0..self.copies.len()).filter(|&i| !self.turn_over(i)).collect()
     }
 
     /// Encode forks `rows`, one row per distinct observation: the distinct
     /// ones are packed at the front of the buffers, `inverse[k]` is the row
-    /// fork `rows[k]` encodes to, and the count is returned. Copies of a
-    /// root that took the same first action in the same shuffle group
-    /// mostly still look the same, so the network sees about a quarter of
-    /// the rows (a fourteenth on the first step). Forks are told apart by a
-    /// 64-bit hash of their encoding.
+    /// fork `rows[k]` encodes to, and the count is returned. Copies on one
+    /// node share a row outright; nodes that still encode the same (shuffle
+    /// groups before a draw) are told apart by a 64-bit hash of their
+    /// encoding.
     pub fn observe_unique(&self, rows: &[usize], floats: &mut [f32], ids: &mut [i64], mask: &mut [bool], inverse: &mut [usize]) -> usize {
-        // Hash each encoding in a scratch row that stays in cache, then
-        // write only the distinct ones to the (large) buffers.
-        let hashes: Vec<u64> = rows
+        let mut slot_of_node = vec![usize::MAX; self.nodes.len()];
+        let mut node_of_slot = vec![];
+        let slots: Vec<usize> = rows
+            .iter()
+            .map(|&r| {
+                let node = self.copies[r].node;
+                if slot_of_node[node] == usize::MAX {
+                    slot_of_node[node] = node_of_slot.len();
+                    node_of_slot.push(node);
+                }
+                slot_of_node[node]
+            })
+            .collect();
+        // Hash each node's encoding in a scratch row that stays in cache,
+        // then write only the distinct ones to the (large) buffers.
+        let hashes: Vec<u64> = node_of_slot
             .par_iter()
-            .map_init(scratch, |(f, i, m), &r| {
-                self.hashes[r].unwrap_or_else(|| {
-                    encode::encode(&self.combats[r], f, i, m);
+            .map_init(scratch, |(f, i, m), &node| {
+                self.hashes[node].unwrap_or_else(|| {
+                    encode::encode(&self.nodes[node], f, i, m);
                     row_hash(f, i, m)
                 })
             })
             .collect();
-        let mut distinct = std::collections::HashMap::with_capacity(rows.len());
+        let mut distinct = std::collections::HashMap::with_capacity(node_of_slot.len());
         let mut first = vec![];
-        for (k, h) in hashes.into_iter().enumerate() {
-            inverse[k] = *distinct.entry(h).or_insert_with(|| {
-                first.push(rows[k]);
-                first.len() - 1
-            });
+        let row_of_slot: Vec<usize> = hashes
+            .into_iter()
+            .zip(&node_of_slot)
+            .map(|(h, &node)| {
+                *distinct.entry(h).or_insert_with(|| {
+                    first.push(node);
+                    first.len() - 1
+                })
+            })
+            .collect();
+        for (k, slot) in slots.into_iter().enumerate() {
+            inverse[k] = row_of_slot[slot];
         }
         first
             .par_iter()
             .zip(floats.par_chunks_mut(N_FLOATS))
             .zip(ids.par_chunks_mut(N_IDS))
             .zip(mask.par_chunks_mut(N_ACTIONS))
-            .for_each(|(((&r, f), i), m)| encode::encode(&self.combats[r], f, i, m));
+            .for_each(|(((&node, f), i), m)| encode::encode(&self.nodes[node], f, i, m));
         first.len()
     }
 
@@ -490,27 +580,109 @@ impl Forks {
     /// action. Writes the shaped reward of each transition, 0 for a fork
     /// that did not move.
     pub fn step(&mut self, actions: &[i64], rewards: &mut [f32]) {
-        self.combats
-            .par_iter_mut()
-            .zip(self.turns.par_iter())
-            .zip(self.bases.par_iter())
-            .zip(actions.par_iter())
-            .zip(rewards.par_iter_mut())
-            .zip(self.hashes.par_iter_mut())
-            .for_each_init(scratch, |(f, i, m), (((((c, &turn), &base), &a), r), h)| {
-                *r = 0.0;
-                if !(c.is_over() || c.player.turn > turn) {
-                    if let Some(action) = encode::decode(c, a as usize) {
-                        let before = potential(c, base);
-                        c.step(action);
-                        *r = step_reward(before, c, base, c.is_over());
-                        *h = (!c.is_over()).then(|| {
-                            encode::encode(c, f, i, m);
-                            row_hash(f, i, m)
-                        });
-                    }
+        rewards.fill(0.0);
+        let mut keyed: Vec<(usize, i64, usize)> =
+            (0..self.copies.len()).filter(|&i| !self.turn_over(i)).map(|i| (self.copies[i].node, actions[i], i)).collect();
+        keyed.par_sort_unstable();
+        // Copies sitting a step out keep their node where it is.
+        let mut held = vec![0u32; self.nodes.len()];
+        self.copies.iter().for_each(|c| held[c.node] += 1);
+        keyed.iter().for_each(|&(node, _, _)| held[node] -= 1);
+        let runs: Vec<&[(usize, i64, usize)]> = keyed.chunk_by(|a, b| (a.0, a.1) == (b.0, b.1)).collect();
+        let mut groups_on = vec![0u32; self.nodes.len()];
+        runs.iter().for_each(|g| groups_on[g[0].0] += 1);
+        let mut old: Vec<Option<Box<Combat>>> = std::mem::take(&mut self.nodes).into_iter().map(Some).collect();
+        let old_hashes = std::mem::take(&mut self.hashes);
+        let groups: Vec<Group> = runs
+            .into_iter()
+            .map(|members| {
+                let node = members[0].0;
+                let src = if held[node] == 0 && groups_on[node] == 1 {
+                    Src::Owned(old[node].take().unwrap(), old_hashes[node])
+                } else {
+                    Src::Shared(node)
+                };
+                Group { src, action: members[0].1, members }
+            })
+            .collect();
+        let outs: Vec<GroupOut> = groups.into_par_iter().map_init(scratch, |row, g| self.step_group(g, &old, row)).collect();
+
+        let mut stayed = vec![false; old.len()];
+        outs.iter().filter_map(|o| o.stayed).for_each(|node| stayed[node] = true);
+        let mut remap = vec![usize::MAX; old.len()];
+        for (k, c) in old.into_iter().enumerate() {
+            let Some(c) = c.filter(|_| held[k] > 0 || stayed[k]) else { continue };
+            remap[k] = self.nodes.len();
+            self.nodes.push(c);
+            self.hashes.push(old_hashes[k]);
+        }
+        self.copies.iter_mut().for_each(|c| c.node = remap[c.node]);
+        for out in outs {
+            let at = self.nodes.len();
+            for (c, h) in out.nodes {
+                self.nodes.push(c);
+                self.hashes.push(h);
+            }
+            for m in out.moved {
+                let copy = &mut self.copies[m.copy];
+                copy.node = at + m.node;
+                rewards[m.copy] = m.reward;
+                if let Some(rngs) = m.rngs {
+                    copy.rngs = rngs;
                 }
+            }
+        }
+    }
+
+    /// Step one group: the first copy steps the node's state with its own
+    /// dice, and if that rolled none the whole group lands on the result.
+    /// Otherwise each other copy steps the pre-step state itself.
+    fn step_group(&self, g: Group, old: &[Option<Box<Combat>>], (f, i, m): &mut (Vec<f32>, Vec<i64>, Vec<bool>)) -> GroupOut {
+        let Group { src, action, members } = g;
+        let (pre, hash, shared) = match src {
+            Src::Owned(c, h) => (c, h, None),
+            Src::Shared(node) => (old[node].as_ref().unwrap().clone(), None, Some(node)),
+        };
+        let Some(action) = encode::decode(&pre, action as usize) else {
+            return match shared {
+                Some(node) => GroupOut { nodes: vec![], moved: vec![], stayed: Some(node) },
+                None => GroupOut {
+                    nodes: vec![(pre, hash)],
+                    moved: members.iter().map(|&(_, _, copy)| Moved { copy, node: 0, reward: 0.0, rngs: None }).collect(),
+                    stayed: None,
+                },
+            };
+        };
+        let befores: Vec<f32> = members.iter().map(|&(_, _, copy)| potential(&pre, self.copies[copy].base)).collect();
+        let reward = |j: usize, c: &Combat| step_reward(befores[j], c, self.copies[members[j].2].base, c.is_over());
+        // The last copy to step takes the pre-step state instead of a clone.
+        let mut pre = Some(pre);
+        let take = |pre: &mut Option<Box<Combat>>, j: usize| if j + 1 == members.len() { pre.take().unwrap() } else { pre.as_ref().unwrap().clone() };
+        let mut play = |mut c: Box<Combat>, copy: usize| {
+            c.rngs = self.copies[copy].rngs.clone();
+            c.step(action);
+            let hash = (!c.is_over()).then(|| {
+                encode::encode(&c, f, i, m);
+                row_hash(f, i, m)
             });
+            (c, hash)
+        };
+        let rep = members[0].2;
+        let (c, hash) = play(take(&mut pre, 0), rep);
+        if rngs_unchanged(&c.rngs, &self.copies[rep].rngs) {
+            let moved = members.iter().enumerate().map(|(j, &(_, _, copy))| Moved { copy, node: 0, reward: reward(j, &c), rngs: None }).collect();
+            return GroupOut { nodes: vec![(c, hash)], moved, stayed: None };
+        }
+        let mut out = GroupOut { nodes: vec![], moved: vec![], stayed: None };
+        let mut land = |j: usize, (c, hash): (Box<Combat>, Option<u64>)| {
+            out.moved.push(Moved { copy: members[j].2, node: out.nodes.len(), reward: reward(j, &c), rngs: Some(c.rngs.clone()) });
+            out.nodes.push((c, hash));
+        };
+        land(0, (c, hash));
+        for (j, &(_, _, copy)) in members.iter().enumerate().skip(1) {
+            land(j, play(take(&mut pre, j), copy));
+        }
+        out
     }
 }
 
@@ -632,6 +804,113 @@ mod tests {
                 .collect();
             forks.step(&actions, &mut rewards);
         }
+    }
+
+    /// Independent clones stepped one by one: what shared nodes must match
+    /// copy for copy.
+    struct Naive {
+        combats: Vec<Combat>,
+        turns: Vec<u32>,
+        bases: Vec<Baseline>,
+    }
+
+    impl Naive {
+        fn of(roots: &[&Combat], n: usize, groups: usize, seed: u64, depth: u32) -> Self {
+            let per_group = n.div_ceil(groups.max(1));
+            let mut combats = vec![];
+            for (r, root) in roots.iter().enumerate() {
+                let seed = seed ^ (r as u64).wrapping_mul(0xD6E8_FEB8_6659_FD93);
+                for i in 0..n {
+                    let mut c = (*root).clone();
+                    c.script = Default::default();
+                    c.rngs = CombatRngs::new(seed ^ (i as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+                    let group = i / per_group;
+                    Rng::new(seed ^ (group as u64 + 1) << 20).shuffle(&mut c.player.draw);
+                    combats.push(c);
+                }
+            }
+            let turns = roots.iter().flat_map(|root| std::iter::repeat_n(root.player.turn + depth - 1, n)).collect();
+            let bases = roots.iter().flat_map(|root| std::iter::repeat_n(Baseline::of(root), n)).collect();
+            Self { combats, turns, bases }
+        }
+
+        fn turn_over(&self, i: usize) -> bool {
+            self.combats[i].is_over() || self.combats[i].player.turn > self.turns[i]
+        }
+
+        fn step(&mut self, actions: &[i64], rewards: &mut [f32]) {
+            for (i, c) in self.combats.iter_mut().enumerate() {
+                rewards[i] = 0.0;
+                if c.is_over() || c.player.turn > self.turns[i] {
+                    continue;
+                }
+                if let Some(action) = encode::decode(c, actions[i] as usize) {
+                    let before = potential(c, self.bases[i]);
+                    c.step(action);
+                    rewards[i] = step_reward(before, c, self.bases[i], c.is_over());
+                }
+            }
+        }
+    }
+
+    /// Shared nodes are invisible: over whole turns of random play on
+    /// several fights, every copy's reward and encoding at every step are
+    /// those of its own independent clone, and copies did share nodes.
+    #[test]
+    fn shared_nodes_match_independent_copies() {
+        let mut rng = Rng::new(7);
+        let asc = Ascension(10);
+        let elite = encounter_of_kind(&mut rng, 0, Kind::Elite);
+        let boss = encounter_of_kind(&mut rng, 1, Kind::Boss);
+        let setups = [
+            generate(&mut rng, 2, asc),
+            generate(&mut rng, 9, asc),
+            generate_against(&mut rng, 7, asc, elite),
+            generate_against(&mut rng, BOSS_FLOOR + BOSS_FLOOR, asc, boss),
+            generate(&mut rng, 2 * BOSS_FLOOR + 4, asc),
+        ];
+        let (n, groups) = (24, 4);
+        let mut shared_at_some_point = false;
+        for (case, (depth, seed)) in [(1, 3u64), (2, 5), (1, 8)].into_iter().enumerate() {
+            let roots: Vec<Combat> = setups.iter().enumerate().map(|(k, s)| s.combat(seed + k as u64)).collect();
+            let roots: Vec<&Combat> = roots.iter().collect();
+            let mut forks = Forks::of(&roots, n, groups, seed, depth);
+            let mut naive = Naive::of(&roots, n, groups, seed, depth);
+            let total = forks.len();
+            assert_eq!(total, naive.combats.len());
+            let mut rewards = vec![0.0f32; total];
+            let mut expected = vec![0.0f32; total];
+            let (mut f, mut i, mut m) = scratch();
+            let (mut f2, mut i2, mut m2) = scratch();
+            for step in 0..300 {
+                let mut actions = vec![0i64; total];
+                for k in 0..total {
+                    assert_eq!(forks.turn_over(k), naive.turn_over(k), "case {case} step {step} copy {k}");
+                    encode::encode(forks.combat(k), &mut f, &mut i, &mut m);
+                    encode::encode(&naive.combats[k], &mut f2, &mut i2, &mut m2);
+                    assert!(f == f2 && i == i2 && m == m2, "case {case} step {step} copy {k}: encodings differ");
+                    let legal: Vec<usize> = (0..N_ACTIONS).filter(|&a| m[a]).collect();
+                    if !legal.is_empty() {
+                        actions[k] = legal[rng.next_int(legal.len())] as i64;
+                    }
+                }
+                if (0..total).all(|k| naive.turn_over(k)) {
+                    break;
+                }
+                forks.step(&actions, &mut rewards);
+                naive.step(&actions, &mut expected);
+                for k in 0..total {
+                    assert_eq!(rewards[k].to_bits(), expected[k].to_bits(), "case {case} step {step} copy {k}: reward {} vs {}", rewards[k], expected[k]);
+                }
+                let live = forks.live();
+                let mut nodes: Vec<usize> = live.iter().map(|&k| forks.copies[k].node).collect();
+                nodes.sort_unstable();
+                nodes.dedup();
+                shared_at_some_point |= nodes.len() < live.len();
+            }
+            assert!((0..total).all(|k| naive.turn_over(k)), "case {case}: a turn never ended");
+        }
+        assert!(shared_at_some_point, "no step shared a node between live copies");
     }
 
     /// Killing a monster that revives at full HP is progress, not a loss.
