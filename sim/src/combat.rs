@@ -279,6 +279,12 @@ pub struct Stats {
     /// rolled for them.
     pub transformed: Vec<u32>,
     pub procured_potions: Vec<usize>,
+    /// The open choice's options were drawn at random from the draw pile
+    /// (Seeker Strike); the replay takes the game's instead.
+    pub random_choice: bool,
+    /// Hidden Gem's random pick and the replays it gave, until the next
+    /// snapshot shows which card the game chose.
+    pub gem_pick: Option<(u32, u32)>,
 }
 
 #[derive(Clone, Debug)]
@@ -1062,7 +1068,9 @@ impl Combat {
                     let mut card = src.clone();
                     card.uid = self.new_uid();
                     card.exhaust_on_next_play = false;
+                    let cost = card.cost_this_turn;
                     self.card_entered_combat(&mut card);
+                    card.cost_this_turn = cost;
                     self.put_card(card, to);
                 }
             }
@@ -1164,6 +1172,7 @@ impl Combat {
                 uids.truncate(count as usize);
                 if !uids.is_empty() {
                     self.pending = Some(Pending { options: uids, then: Then::MoveTo(Pile::Hand), can_skip: false });
+                    self.stats.random_choice = true;
                 }
             }
             Effect::OfferRandom { pool, count, free, retain } => {
@@ -1598,6 +1607,7 @@ impl Combat {
                     if let Some(c) = self.find_card_mut(uid) {
                         c.replay += replays;
                     }
+                    self.stats.gem_pick = Some((uid, replays));
                 }
             }
             // EntropyPower.AfterPlayerTurnStart: CardSelectCmd.FromHand for
@@ -3063,6 +3073,21 @@ impl Combat {
                 card.affliction = Some(Affliction::Galvanized);
             } else if self.player.creature.power(PowerId::Hex).is_some() {
                 card.affliction = Some(Affliction::Hexed);
+            }
+        }
+        // Stomp.AfterCardEnteredCombat: a new Stomp is 1 cheaper this turn
+        // per attack play finished this turn. Clones skip it (`IsClone`);
+        // `CloneCard` puts their cost back.
+        if card.id == CardId::Stomp {
+            let attacks = self
+                .stats
+                .finished_this_turn
+                .iter()
+                .filter(|&&u| self.find_card(u).is_some_and(|k| k.ty() == CardType::Attack))
+                .count() as i32;
+            if attacks > 0 {
+                let cur = card.cost_this_turn.unwrap_or(card.base_cost());
+                card.cost_this_turn = Some((cur - attacks).max(0));
             }
         }
         // Aeonglass.AfterCardGeneratedForCombat: a new Wither is upgraded as

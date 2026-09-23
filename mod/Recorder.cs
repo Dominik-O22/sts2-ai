@@ -353,6 +353,8 @@ public static class Recorder
         {
             d["ench"] = new object?[] { e.Id.Entry, e.Amount, e.Status == EnchantmentStatus.Disabled };
         }
+        // Extra plays a card carries (Hidden Gem picks its card at random).
+        if (c.BaseReplayCount > 0) d["replay"] = c.BaseReplayCount;
         return d;
     }
 

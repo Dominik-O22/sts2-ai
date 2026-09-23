@@ -169,6 +169,15 @@ pub fn snapshot_of(c: &Combat) -> Value {
 /// exhaust, powers, and potion slots do not affect play by their order.
 fn normalize(rec: &Value) -> Value {
     let mut v = rec.clone();
+    // A card's extra plays are only read to adopt Hidden Gem's pick; older
+    // recordings do not carry them, so they are not compared.
+    for key in ["hand", "draw", "discard", "exhaust"] {
+        if let Some(cards) = v.get_mut(key).and_then(Value::as_array_mut) {
+            for k in cards.iter_mut().filter_map(Value::as_object_mut) {
+                k.remove("replay");
+            }
+        }
+    }
     let sort_arr = |a: &mut Value| {
         if let Some(arr) = a.as_array_mut() {
             *arr = sort_values(std::mem::take(arr));
@@ -221,6 +230,7 @@ fn settle(c: &Combat, snap: &Value, depth: u32) -> Result<Combat, String> {
     if c.pending.is_none() {
         let mut k = c.clone();
         adopt_random_results(&mut k, snap);
+        adopt_gem_pick(&mut k, snap);
         return match diff(snap, &snapshot_of(&k)) {
             None => Ok(k),
             Some(d) => Err(d),
@@ -324,6 +334,29 @@ fn adopt_layout(c: &mut Combat, snap: &Value, opening: bool) {
 /// account for in place of each transformed card, and the snapshot's potion
 /// in each slot filled at random. Runs on the settled branch, after any
 /// choice, since Entropy's picks decide which cards were transformed.
+/// Hidden Gem gave its replays to a random draw-pile card; the snapshot's
+/// `replay` counts (recorded since 2026-09-23) show which. Piles are in the
+/// game's order, so the card at the same place takes them over.
+fn adopt_gem_pick(c: &mut Combat, snap: &Value) {
+    let Some((uid, n)) = c.stats.gem_pick.take() else { return };
+    let mut to = None;
+    'find: for (key, pile) in [("draw", &c.player.draw), ("hand", &c.player.hand), ("discard", &c.player.discard)] {
+        for (r, k) in snap[key].as_array().into_iter().flatten().zip(pile) {
+            if r["replay"].as_u64().unwrap_or(0) >= n as u64 && k.uid != uid && k.replay < n {
+                to = Some(k.uid);
+                break 'find;
+            }
+        }
+    }
+    let Some(to) = to else { return };
+    if let Some(k) = c.find_card_mut(uid) {
+        k.replay -= n;
+    }
+    if let Some(k) = c.find_card_mut(to) {
+        k.replay += n;
+    }
+}
+
 fn adopt_random_results(c: &mut Combat, snap: &Value) {
     let transformed = std::mem::take(&mut c.stats.transformed);
     let procured = std::mem::take(&mut c.stats.procured_potions);
@@ -496,6 +529,28 @@ fn adopt_offer_options(c: &mut Combat, ids: &Ids, rec: &Value) {
         k.id = id;
         k.upgraded = up;
     }
+}
+
+/// A choice whose options the sim drew at random from the draw pile
+/// (`Stats::random_choice`): offer the draw-pile cards the game showed.
+fn adopt_random_choice(c: &mut Combat, ids: &Ids, rec: &Value) {
+    if !std::mem::take(&mut c.stats.random_choice) {
+        return;
+    }
+    let Some(p) = c.pending.as_mut() else { return };
+    let Some(options) = rec["options"].as_array() else { return };
+    let Ok(cards) = options.iter().map(|v| card_ref(ids, v)).collect::<Result<Vec<_>, _>>() else { return };
+    let mut picked: Vec<u32> = vec![];
+    for (id, up) in cards {
+        let Some(k) = c.player.draw.iter().find(|k| k.id == id && k.upgraded == up && !picked.contains(&k.uid)) else {
+            return;
+        };
+        picked.push(k.uid);
+    }
+    p.options = picked;
+    // The record names cards, not which copy: of two Strikes in the draw
+    // pile the game may offer the second. The next snapshot's layout says.
+    c.stats.random_draw_inserts += 1;
 }
 
 /// Forced rolls still have to be rolls the sim could make.
@@ -994,6 +1049,7 @@ impl Replayer {
                     }
                 }
                 adopt_offer_options(&mut self.c, &self.ids, rec);
+                adopt_random_choice(&mut self.c, &self.ids, rec);
                 Ok(self.after_action())
             }
             // One card taken from the open choice, or `card: null` when the
