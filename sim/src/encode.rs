@@ -111,6 +111,9 @@ fn then_kind(then: Then) -> usize {
         Then::TakeOffer => 7,
         Then::ExhaustMany => 8,
         Then::DiscardThenDraw { .. } => 9,
+        // The card leaves the hand for good, as an exhaust does. A kind of
+        // its own would change the observation layout.
+        Then::TransformPick { .. } => 0,
     }
 }
 
@@ -401,6 +404,7 @@ fn choice_verb(then: Then) -> &'static str {
         Then::FreeThisCombat => "make free",
         Then::TakeOffer => "take",
         Then::DiscardThenDraw { .. } => "discard",
+        Then::TransformPick { .. } => "transform",
     }
 }
 

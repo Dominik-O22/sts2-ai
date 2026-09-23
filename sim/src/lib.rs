@@ -845,6 +845,122 @@ mod tests {
         assert_eq!(c.outcome, Some(Outcome::Lost));
     }
 
+    /// Put a fresh card at the front of the hand.
+    fn to_hand(c: &mut Combat, id: ids::CardId, up: bool) {
+        let uid = 10_000 + c.player.hand.len() as u32 + c.player.discard.len() as u32 * 16;
+        c.player.hand.insert(0, card::Card::new(uid, id, up));
+    }
+
+    fn automation_counts(c: &Combat) -> Vec<i32> {
+        c.player.creature.powers.iter().filter(|p| p.id == PowerId::Automation).map(|p| p.data).collect()
+    }
+
+    /// AutomationPower is Instanced: a second copy is a new instance with
+    /// its own count of draws, so the two pay out on different draws.
+    #[test]
+    fn automation_instances_count_their_own_draws() {
+        use ids::CardId::{Automation, MasterOfStrategy};
+        let mut c = fight(&[one(MonsterId::Nibbit)], 5);
+        to_hand(&mut c, Automation, false);
+        c.step(Action::PlayCard { hand_idx: 0, target: None });
+        to_hand(&mut c, MasterOfStrategy, false);
+        c.step(Action::PlayCard { hand_idx: 0, target: None });
+        to_hand(&mut c, Automation, false);
+        c.step(Action::PlayCard { hand_idx: 0, target: None });
+        assert_eq!(automation_counts(&c), vec![3, 0]);
+        c.step(Action::EndTurn);
+        assert_eq!(automation_counts(&c), vec![8, 5]);
+        let energy = c.player.energy;
+        to_hand(&mut c, MasterOfStrategy, false);
+        c.step(Action::PlayCard { hand_idx: 0, target: None });
+        // The older one reached ten on the second draw and started over.
+        assert_eq!(automation_counts(&c), vec![1, 8]);
+        assert_eq!(c.player.energy, energy + 1);
+    }
+
+    /// Entropy asks for exactly its amount of hand cards, never the same
+    /// one twice, and puts a different card of the original's pool in each
+    /// place.
+    #[test]
+    fn entropy_transforms_the_picked_cards_in_place() {
+        let mut c = fight(&[one(MonsterId::Nibbit)], 7);
+        c.player.creature.powers.push(Power::new(PowerId::Entropy, 2));
+        c.step(Action::EndTurn);
+        let before: Vec<card::Card> = c.player.hand.clone();
+        let first = c.pending.as_ref().expect("Entropy asks").options[0];
+        c.step(Action::Choose(0));
+        assert!(!c.pending.as_ref().expect("second pick").options.contains(&first));
+        c.step(Action::Choose(0));
+        assert!(c.pending.is_none());
+        let changed: Vec<usize> = (0..before.len()).filter(|&i| c.player.hand[i].uid != before[i].uid).collect();
+        assert_eq!(changed.len(), 2);
+        for i in changed {
+            let (old, new) = (&before[i], &c.player.hand[i]);
+            assert_ne!(old.id, new.id);
+            assert!(card::transform_options(old.id).contains(&new.id));
+        }
+    }
+
+    /// Bolas comes back to hand before the next turn's draw.
+    #[test]
+    fn bolas_returns_to_hand_the_turn_after_it_was_played() {
+        let mut c = fight(&[one(MonsterId::Nibbit)], 3);
+        to_hand(&mut c, ids::CardId::Bolas, false);
+        c.step(Action::PlayCard { hand_idx: 0, target: Some(0) });
+        assert!(c.player.discard.iter().any(|k| k.id == ids::CardId::Bolas));
+        c.step(Action::EndTurn);
+        assert!(c.player.hand.iter().any(|k| k.id == ids::CardId::Bolas));
+        assert_eq!(c.player.hand.len(), 6);
+    }
+
+    /// Fisticuffs blocks for everything its hit dealt, the part the enemy's
+    /// block soaked up included.
+    #[test]
+    fn fisticuffs_blocks_for_blocked_damage_too() {
+        let mut c = fight(&[one(MonsterId::Nibbit)], 3);
+        c.enemies[0].creature.block = 3;
+        to_hand(&mut c, ids::CardId::Fisticuffs, false);
+        c.step(Action::PlayCard { hand_idx: 0, target: Some(0) });
+        assert_eq!(c.player.creature.block, 7);
+    }
+
+    /// Random decks from the colorless pool, random policy: catches panics
+    /// and runaway loops in the colorless ports.
+    #[test]
+    fn random_colorless_decks_do_not_panic() {
+        use crate::card::{Card, COLORLESS_POOL};
+        for seed in 0..300u64 {
+            let mut rng = rng::Rng::new(seed);
+            let mut deck = ironclad_starter_deck();
+            for _ in 0..8 {
+                let id = *rng.pick(COLORLESS_POOL).unwrap();
+                deck.push(Card::new(0, id, rng.next_int(3) == 0));
+            }
+            let mut c = Combat::with_setup(&Setup {
+                deck: &deck,
+                hp: IRONCLAD_HP,
+                max_hp: IRONCLAD_HP,
+                max_energy: IRONCLAD_ENERGY,
+                relics: &[],
+                potions: &[None, None],
+                enemies: &[one(MonsterId::Nibbit), one(MonsterId::Nibbit)],
+                room: RoomKind::Monster,
+                asc: Ascension(10),
+                seed,
+                gold: 0,
+            });
+            let mut steps = 0;
+            while !c.is_over() {
+                let acts = c.legal_actions();
+                assert!(!acts.is_empty(), "no legal actions at seed {seed}");
+                c.step(acts[rng.next_int(acts.len())]);
+                steps += 1;
+                assert!(steps < 20_000, "runaway fight at seed {seed}");
+                assert!(c.player.hand.len() <= combat::MAX_HAND);
+            }
+        }
+    }
+
     #[test]
     fn random_playouts_terminate() {
         let mut wins = 0;

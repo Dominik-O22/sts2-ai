@@ -17,6 +17,8 @@ use crate::types::{CardRarity, CardType, CreatureRef, Keyword, TargetType, Value
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tag {
     Strike,
+    /// Fasten's block bonus reads it.
+    Defend,
 }
 
 #[derive(Debug)]
@@ -84,7 +86,7 @@ defs! {
     CrimsonMantle: 1, Power, Rare, Self_;
     Cruelty: 1, Power, Rare, Self_;
     DarkEmbrace: 2, Power, Rare, Self_;
-    DefendIronclad: 1, Skill, Basic, Self_;
+    DefendIronclad: 1, Skill, Basic, Self_, tags = [Defend];
     DemonForm: 3, Power, Rare, Self_;
     Dismantle: 1, Attack, Uncommon, AnyEnemy;
     Dominate: 1, Skill, Uncommon, AnyEnemy, kw = [Exhaust];
@@ -145,55 +147,55 @@ defs! {
     Uppercut: 2, Attack, Uncommon, AnyEnemy;
     Vicious: 1, Power, Uncommon, Self_;
     Whirlwind: 0, Attack, Uncommon, AllEnemies, x = true;
-    Wound: -1, Status, Special, None, kw = [Unplayable], gen = false;
-    Slimed: 1, Status, Special, None, kw = [Exhaust], gen = false;
-    Dazed: -1, Status, Special, None, kw = [Ethereal, Unplayable], gen = false;
-    Burn: -1, Status, Special, None, kw = [Unplayable], gen = false;
-    Infection: -1, Status, Special, None, kw = [Unplayable], gen = false;
-    AscendersBane: -1, Curse, Special, None, kw = [Unplayable, Ethereal], gen = false;
-    GiantRock: 1, Attack, Special, AnyEnemy, gen = false;
-    MindBlast: 1, Attack, Uncommon, AnyEnemy, kw = [Innate], gen = false;
-    Beckon: 1, Status, Special, None, gen = false;
-    BadLuck: -1, Curse, Special, None, kw = [Unplayable], gen = false;
-    Clumsy: -1, Curse, Special, None, kw = [Unplayable, Ethereal], gen = false;
-    CurseOfTheBell: -1, Curse, Special, None, kw = [Unplayable], gen = false;
-    Debt: -1, Curse, Special, None, kw = [Unplayable], gen = false;
-    Decay: -1, Curse, Special, None, kw = [Unplayable], gen = false;
-    Doubt: -1, Curse, Special, None, kw = [Unplayable], gen = false;
-    Enthralled: 2, Curse, Special, None, gen = false;
-    Folly: -1, Curse, Special, None, kw = [Unplayable, Ethereal, Innate], gen = false;
-    Greed: -1, Curse, Special, None, kw = [Unplayable], gen = false;
-    Guilty: -1, Curse, Special, None, kw = [Unplayable], gen = false;
-    Injury: -1, Curse, Special, None, kw = [Unplayable], gen = false;
-    Normality: -1, Curse, Special, None, kw = [Unplayable], gen = false;
-    PoorSleep: -1, Curse, Special, None, kw = [Unplayable, Retain], gen = false;
-    Regret: -1, Curse, Special, None, kw = [Unplayable], gen = false;
-    Shame: -1, Curse, Special, None, kw = [Unplayable], gen = false;
-    SporeMind: 1, Curse, Special, None, kw = [Exhaust], gen = false;
-    Writhe: -1, Curse, Special, None, kw = [Unplayable, Innate], gen = false;
+    Wound: -1, Status, Special, None, kw = [Unplayable];
+    Slimed: 1, Status, Special, None, kw = [Exhaust];
+    Dazed: -1, Status, Special, None, kw = [Ethereal, Unplayable];
+    Burn: -1, Status, Special, None, kw = [Unplayable];
+    Infection: -1, Status, Special, None, kw = [Unplayable];
+    AscendersBane: -1, Curse, Special, None, kw = [Unplayable, Ethereal];
+    GiantRock: 1, Attack, Special, AnyEnemy;
+    MindBlast: 1, Attack, Uncommon, AnyEnemy, kw = [Innate];
+    Beckon: 1, Status, Special, None;
+    BadLuck: -1, Curse, Special, None, kw = [Unplayable];
+    Clumsy: -1, Curse, Special, None, kw = [Unplayable, Ethereal];
+    CurseOfTheBell: -1, Curse, Special, None, kw = [Unplayable];
+    Debt: -1, Curse, Special, None, kw = [Unplayable];
+    Decay: -1, Curse, Special, None, kw = [Unplayable];
+    Doubt: -1, Curse, Special, None, kw = [Unplayable];
+    Enthralled: 2, Curse, Special, None;
+    Folly: -1, Curse, Special, None, kw = [Unplayable, Ethereal, Innate];
+    Greed: -1, Curse, Special, None, kw = [Unplayable];
+    Guilty: -1, Curse, Special, None, kw = [Unplayable];
+    Injury: -1, Curse, Special, None, kw = [Unplayable];
+    Normality: -1, Curse, Special, None, kw = [Unplayable];
+    PoorSleep: -1, Curse, Special, None, kw = [Unplayable, Retain];
+    Regret: -1, Curse, Special, None, kw = [Unplayable];
+    Shame: -1, Curse, Special, None, kw = [Unplayable];
+    SporeMind: 1, Curse, Special, None, kw = [Exhaust];
+    Writhe: -1, Curse, Special, None, kw = [Unplayable, Innate];
     Soot: -1, Status, Special, None, kw = [Unplayable], gen = false;
-    Luminesce: 0, Skill, Special, Self_, kw = [Exhaust, Retain], gen = false;
-    Toxic: 1, Status, Special, None, kw = [Exhaust], gen = false;
+    Luminesce: 0, Skill, Special, Self_, kw = [Exhaust, Retain];
+    Toxic: 1, Status, Special, None, kw = [Exhaust];
     FranticEscape: 1, Status, Special, Self_, gen = false;
     Disintegration: -1, Status, Special, None, kw = [Unplayable], gen = false;
     MindRot: -1, Status, Special, None, kw = [Unplayable], gen = false;
     Sloth: -1, Status, Special, None, kw = [Unplayable], gen = false;
     WasteAway: -1, Status, Special, None, kw = [Unplayable], gen = false;
-    Wither: -1, Status, Special, None, kw = [Unplayable], gen = false;
+    Wither: -1, Status, Special, None, kw = [Unplayable];
     // Scaffolded from each class's constructor; keywords, tags and gen are the porters'.
-    Alchemize: 1, Skill, Rare, Self_;
-    Anointed: 1, Skill, Rare, Self_;
+    Alchemize: 1, Skill, Rare, Self_, kw = [Exhaust], gen = false;
+    Anointed: 1, Skill, Rare, Self_, kw = [Exhaust];
     Automation: 1, Power, Uncommon, Self_;
     BeaconOfHope: 1, Power, Rare, Self_;
     BeatDown: 3, Skill, Rare, RandomEnemy;
-    BelieveInYou: 0, Skill, Uncommon, Self_;
+    BelieveInYou: 0, Skill, Uncommon, AnyAlly;
     Bolas: 0, Attack, Rare, AnyEnemy;
     Calamity: 3, Power, Rare, Self_;
     Catastrophe: 2, Skill, Uncommon, Self_;
-    Coordinate: 1, Skill, Uncommon, Self_;
-    DarkShackles: 0, Skill, Uncommon, AnyEnemy;
-    Discovery: 1, Skill, Uncommon, Self_;
-    DramaticEntrance: 0, Attack, Uncommon, AllEnemies;
+    Coordinate: 1, Skill, Uncommon, AnyAlly;
+    DarkShackles: 0, Skill, Uncommon, AnyEnemy, kw = [Exhaust];
+    Discovery: 1, Skill, Uncommon, Self_, kw = [Exhaust];
+    DramaticEntrance: 0, Attack, Uncommon, AllEnemies, kw = [Exhaust, Innate];
     Entropy: 1, Power, Rare, Self_;
     Equilibrium: 2, Skill, Uncommon, Self_;
     EternalArmor: 3, Power, Rare, Self_;
@@ -203,18 +205,18 @@ defs! {
     FlashOfSteel: 0, Attack, Uncommon, AnyEnemy;
     GangUp: 1, Attack, Uncommon, AnyEnemy;
     GoldAxe: 1, Attack, Rare, AnyEnemy;
-    HandOfGreed: 2, Attack, Rare, AnyEnemy;
-    HiddenGem: 1, Skill, Rare, Self_;
-    HuddleUp: 1, Skill, Uncommon, Self_;
+    HandOfGreed: 2, Attack, Rare, AnyEnemy, gen = false;
+    HiddenGem: 1, Skill, Rare, Self_, gen = false;
+    HuddleUp: 1, Skill, Uncommon, AllAllies, kw = [Exhaust];
     Impatience: 0, Skill, Uncommon, Self_;
-    Intercept: 1, Skill, Uncommon, Self_;
-    JackOfAllTrades: 0, Skill, Uncommon, Self_;
+    Intercept: 1, Skill, Uncommon, AnyAlly;
+    JackOfAllTrades: 0, Skill, Uncommon, Self_, kw = [Exhaust];
     Jackpot: 3, Attack, Rare, AnyEnemy;
     Knockdown: 3, Attack, Rare, AnyEnemy;
-    Lift: 1, Skill, Uncommon, Self_;
-    MasterOfStrategy: 0, Skill, Rare, Self_;
+    Lift: 1, Skill, Uncommon, AnyAlly;
+    MasterOfStrategy: 0, Skill, Rare, Self_, kw = [Exhaust];
     Mayhem: 2, Power, Rare, Self_;
-    Mimic: 1, Skill, Rare, Self_;
+    Mimic: 1, Skill, Rare, AnyAlly, kw = [Exhaust];
     Nostalgia: 1, Power, Rare, Self_;
     Omnislice: 0, Attack, Uncommon, AnyEnemy;
     Panache: 0, Power, Uncommon, Self_;
@@ -307,6 +309,72 @@ pub const IRONCLAD_POOL: &[CardId] = &[
     CardId::Tremble, CardId::TrueGrit, CardId::TwinStrike, CardId::Unmovable, CardId::Unrelenting,
     CardId::Uppercut, CardId::Vicious, CardId::Whirlwind,
 ];
+
+/// `Models/CardPools/ColorlessCardPool.cs`, in its order.
+pub const COLORLESS_POOL: &[CardId] = &[
+    CardId::Alchemize, CardId::Anointed, CardId::Automation, CardId::BeaconOfHope, CardId::BeatDown,
+    CardId::BelieveInYou, CardId::Bolas, CardId::Calamity, CardId::Catastrophe, CardId::Coordinate,
+    CardId::DarkShackles, CardId::Discovery, CardId::DramaticEntrance, CardId::Entropy, CardId::Equilibrium,
+    CardId::EternalArmor, CardId::Fasten, CardId::Finesse, CardId::Fisticuffs, CardId::FlashOfSteel,
+    CardId::GangUp, CardId::GoldAxe, CardId::HandOfGreed, CardId::HiddenGem, CardId::HuddleUp,
+    CardId::Impatience, CardId::Intercept, CardId::JackOfAllTrades, CardId::Jackpot, CardId::Knockdown,
+    CardId::Lift, CardId::MasterOfStrategy, CardId::Mayhem, CardId::Mimic, CardId::MindBlast, CardId::Nostalgia,
+    CardId::Omnislice, CardId::Panache, CardId::PanicButton, CardId::PrepTime, CardId::Production,
+    CardId::Prolong, CardId::Prowess, CardId::Purity, CardId::Rally, CardId::Rend, CardId::Restlessness,
+    CardId::RollingBoulder, CardId::Salvo, CardId::Scrawl, CardId::SecretTechnique, CardId::SecretWeapon,
+    CardId::SeekerStrike, CardId::Shockwave, CardId::Splash, CardId::Stratagem, CardId::TagTeam,
+    CardId::TheBomb, CardId::TheGambit, CardId::ThinkingAhead, CardId::ThrummingHatchet,
+    CardId::UltimateDefend, CardId::UltimateStrike, CardId::Volley,
+];
+
+/// `CardMultiplayerConstraint.MultiplayerOnly`: never offered or generated
+/// in a single-player run (`CardFactory.FilterForPlayerCount`).
+pub const MULTIPLAYER_ONLY: &[CardId] = &[
+    CardId::BeaconOfHope, CardId::BelieveInYou, CardId::Coordinate, CardId::GangUp, CardId::HuddleUp,
+    CardId::Intercept, CardId::Knockdown, CardId::Lift, CardId::Mimic, CardId::Rally, CardId::TagTeam,
+];
+
+/// `Models/CardPools/StatusCardPool.cs`.
+const STATUS_POOL: &[CardId] = &[
+    CardId::Beckon, CardId::Burn, CardId::Dazed, CardId::Debris, CardId::FranticEscape, CardId::Infection,
+    CardId::Wither, CardId::Slimed, CardId::Soot, CardId::Toxic, CardId::Void, CardId::Wound,
+];
+
+/// `Models/CardPools/CurseCardPool.cs`.
+const CURSE_POOL: &[CardId] = &[
+    CardId::AscendersBane, CardId::BadLuck, CardId::Clumsy, CardId::CurseOfTheBell, CardId::Debt, CardId::Decay,
+    CardId::Doubt, CardId::Enthralled, CardId::Folly, CardId::Greed, CardId::Guilty, CardId::Injury,
+    CardId::Normality, CardId::PoorSleep, CardId::Regret, CardId::Shame, CardId::SporeMind, CardId::Writhe,
+];
+
+/// What a card may turn into when transformed in combat
+/// (`CardFactory.GetDefaultTransformationOptions` with `isInCombat`): its own
+/// pool, or the colorless pool for an Ancient, Event or Token card. Statuses
+/// and curses stay among their kind at any rarity; everything else becomes
+/// a Common, Uncommon or Rare. Never the same card, and only what can be
+/// generated in combat in a single-player run.
+pub fn transform_options(id: CardId) -> Vec<CardId> {
+    // The Ironclad pool's Special cards are its Ancients.
+    let (pool, any_rarity) = if STATUS_POOL.contains(&id) {
+        (STATUS_POOL, true)
+    } else if CURSE_POOL.contains(&id) {
+        (CURSE_POOL, true)
+    } else if IRONCLAD_POOL.contains(&id) && def(id).rarity != CardRarity::Special {
+        (IRONCLAD_POOL, false)
+    } else {
+        (COLORLESS_POOL, false)
+    };
+    pool.iter()
+        .copied()
+        .filter(|&o| {
+            let d = def(o);
+            o != id
+                && d.generatable
+                && !MULTIPLAYER_ONLY.contains(&o)
+                && (any_rarity || matches!(d.rarity, CardRarity::Common | CardRarity::Uncommon | CardRarity::Rare))
+        })
+        .collect()
+}
 
 /// `Models/Afflictions/*.cs` from act 3. Smog predates this and lives in
 /// `Card::smogged`; a card never holds more than one affliction.
@@ -407,6 +475,7 @@ impl Card {
             self.id,
             Barricade | BodySlam | Corruption | DarkEmbrace | ExpectAFight | Havoc | Hellraiser | MindBlast
                 | InfernalBlade | Stampede | Unmovable
+                | Alchemize | Automation | Calamity | Mayhem
         );
         if self.upgraded && cheaper_when_upgraded {
             c - 1
@@ -449,6 +518,15 @@ impl Card {
         if k == Keyword::Exhaust && self.dupe {
             return false;
         }
+        // `OnUpgrade` adding or removing a keyword.
+        if self.upgraded {
+            use CardId::*;
+            match (self.id, k) {
+                (Anointed | GoldAxe, Keyword::Retain) | (BeaconOfHope | Entropy, Keyword::Innate) => return true,
+                (Discovery | Mimic, Keyword::Exhaust) => return false,
+                _ => {}
+            }
+        }
         if k == Keyword::Retain && self.retain_added {
             return true;
         }
@@ -464,7 +542,8 @@ impl Card {
     /// `CardModel.GainsBlock`: whether the printed card ever grants block,
     /// which is what Nimble and Goopy check before they can sit on it.
     pub fn gains_block(&self) -> bool {
-        self.vars().block > 0.0
+        // Fisticuffs and Mimic compute their block and say so outright.
+        self.vars().block > 0.0 || matches!(self.id, CardId::Fisticuffs | CardId::Mimic)
     }
 
     pub fn has_tag(&self, t: Tag) -> bool {
@@ -491,8 +570,38 @@ impl Card {
         let picku = |base: u32, upg: u32| if up { upg } else { base };
         let d = Vars::default;
         let mut v = match self.id {
-            // Not ported yet, group A; the porter deletes this arm.
-            Alchemize | Anointed | Automation | BeaconOfHope | BeatDown | BelieveInYou | Bolas | Calamity | Catastrophe | Coordinate | DarkShackles | Discovery | DramaticEntrance | Entropy | Equilibrium | EternalArmor | Fasten | Finesse | Fisticuffs | FlashOfSteel | GangUp | GoldAxe | HandOfGreed | HiddenGem | HuddleUp | Impatience | Intercept | JackOfAllTrades | Jackpot | Knockdown | Lift | MasterOfStrategy | Mayhem | Mimic => d(),
+            // Colorless, group A. Mimic's block is the target ally's, and
+            // alone it has none to copy.
+            Alchemize | Anointed | BeaconOfHope | Calamity | Discovery | Mayhem | Mimic => d(),
+            Automation => Vars { energy: 1, ..d() },
+            BeatDown => Vars { cards: picku(3, 4), ..d() },
+            BelieveInYou => Vars { energy: if up { 3 } else { 2 }, ..d() },
+            Bolas => Vars { damage: pick(3.0, 4.0), ..d() },
+            Catastrophe => Vars { cards: picku(2, 3), ..d() },
+            Coordinate => Vars { magic: pick(5.0, 8.0), ..d() },
+            DarkShackles => Vars { magic: pick(9.0, 15.0), ..d() },
+            DramaticEntrance => Vars { damage: pick(11.0, 15.0), ..d() },
+            Entropy => Vars { cards: 1, ..d() },
+            Equilibrium => Vars { block: pick(13.0, 16.0), magic: 1.0, ..d() },
+            EternalArmor => Vars { magic: pick(9.0, 12.0), ..d() },
+            Fasten => Vars { magic: pick(4.0, 6.0), ..d() },
+            Finesse => Vars { block: pick(4.0, 7.0), cards: 1, ..d() },
+            Fisticuffs => Vars { damage: pick(7.0, 9.0), ..d() },
+            FlashOfSteel => Vars { damage: pick(5.0, 8.0), cards: 1, ..d() },
+            // `CalculationBase` 5 plus `ExtraDamage` per teammate hit.
+            GangUp => Vars { damage: 5.0, magic: pick(5.0, 7.0), ..d() },
+            // `CalculationBase` 0 plus `ExtraDamage` 1 per card play.
+            GoldAxe => Vars { magic: 1.0, ..d() },
+            HandOfGreed => Vars { damage: pick(20.0, 25.0), magic: pick(20.0, 25.0), ..d() },
+            HiddenGem => Vars { magic: pick(2.0, 3.0), ..d() },
+            HuddleUp => Vars { cards: picku(2, 3), ..d() },
+            Impatience => Vars { cards: picku(2, 3), ..d() },
+            Intercept => Vars { block: pick(9.0, 13.0), ..d() },
+            JackOfAllTrades => Vars { cards: picku(1, 2), ..d() },
+            Jackpot => Vars { damage: pick(25.0, 30.0), cards: 3, ..d() },
+            Knockdown => Vars { damage: pick(10.0, 14.0), magic: pick(2.0, 3.0), ..d() },
+            Lift => Vars { block: pick(11.0, 16.0), ..d() },
+            MasterOfStrategy => Vars { cards: picku(3, 4), ..d() },
             // Not ported yet, group B; the porter deletes this arm.
             Nostalgia | Omnislice | Panache | PanicButton | PrepTime | Production | Prolong | Prowess | Purity | Rally | Rend | Restlessness | RollingBoulder | Salvo | Scrawl | SecretTechnique | SecretWeapon | SeekerStrike | Shockwave | Splash | Stratagem | TagTeam | TheBomb | TheGambit | ThinkingAhead | ThrummingHatchet | UltimateDefend | UltimateStrike | Volley => d(),
             // Not ported yet, group C; the porter deletes this arm.
@@ -634,8 +743,79 @@ impl Card {
         let m = v.magic as i32;
 
         match self.id {
-            // Not ported yet, group A; the porter deletes this arm.
-            Alchemize | Anointed | Automation | BeaconOfHope | BeatDown | BelieveInYou | Bolas | Calamity | Catastrophe | Coordinate | DarkShackles | Discovery | DramaticEntrance | Entropy | Equilibrium | EternalArmor | Fasten | Finesse | Fisticuffs | FlashOfSteel | GangUp | GoldAxe | HandOfGreed | HiddenGem | HuddleUp | Impatience | Intercept | JackOfAllTrades | Jackpot | Knockdown | Lift | MasterOfStrategy | Mayhem | Mimic => vec![],
+            // Alchemize.cs: a random potion, if the belt has room.
+            Alchemize => vec![Effect::ProcureRandomPotion],
+            // Anointed.cs: Rares from the draw pile into the hand.
+            Anointed => vec![Effect::PullRaresToHand],
+            Automation => vec![self_power(PowerId::Automation, v.energy)],
+            // BeaconOfHope.cs: the power hands half of your block to your
+            // teammates, and alone there are none.
+            BeaconOfHope => vec![self_power(PowerId::BeaconOfHope, 1)],
+            BeatDown => vec![Effect::AutoPlayDiscardAttacks { count: v.cards }],
+            // AnyAlly cards need another player; alone `can_play` refuses
+            // them (Believe in You, Coordinate, Intercept, Lift, Mimic).
+            BelieveInYou | Coordinate | Intercept | Lift | Mimic => vec![],
+            // Bolas.cs: its BeforeHandDraw return lives in `Combat::start_turn`.
+            Bolas => vec![attack(1)],
+            Calamity => vec![self_power(PowerId::Calamity, 1)],
+            Catastrophe => vec![Effect::AutoPlayFromDraw { count: v.cards }],
+            DarkShackles => vec![power(t(), PowerId::DarkShackles, m)],
+            // Discovery.cs: three distinct Ironclad cards, take one (or
+            // none), free this turn.
+            Discovery => vec![Effect::OfferRandom { pool: GenPool::Ironclad, count: 3, free: true, retain: false }],
+            DramaticEntrance => vec![aoe(1)],
+            Entropy => vec![self_power(PowerId::Entropy, v.cards as i32)],
+            Equilibrium => vec![block(), self_power(PowerId::RetainHand, m)],
+            EternalArmor => vec![self_power(PowerId::Plating, m)],
+            Fasten => vec![self_power(PowerId::Fasten, m)],
+            Finesse => vec![block(), draw(v.cards)],
+            // Fisticuffs.cs: block equal to all the damage the hit dealt.
+            Fisticuffs => vec![attack(1), step(1)],
+            FlashOfSteel => vec![attack(1), draw(v.cards)],
+            // GangUp.cs: 5 more per hit a teammate landed on the target this
+            // turn. Alone that is never.
+            GangUp => vec![attack(1)],
+            // GoldAxe.cs: 1 per card play finished this combat.
+            GoldAxe => {
+                let plays = c.stats.card_plays_finished as f64;
+                vec![hit(v.damage + v.magic * plays, 1, AttackTargets::One(t()))]
+            }
+            // HandOfGreed.cs: gold if the hit was Fatal.
+            HandOfGreed => vec![attack(1), step(1)],
+            HiddenGem => vec![Effect::ReplayRandomDrawCard { replays: m.max(0) as u32 }],
+            // HuddleUp.cs: every living player on your side draws, you too.
+            HuddleUp => vec![draw(v.cards)],
+            Impatience => {
+                if c.player.hand.iter().any(|k| k.ty() == CardType::Attack) {
+                    vec![]
+                } else {
+                    vec![draw(v.cards)]
+                }
+            }
+            // JackOfAllTrades.cs: distinct colorless cards but itself.
+            JackOfAllTrades => vec![Effect::GenerateRandom {
+                pool: GenPool::Colorless,
+                count: v.cards,
+                to: Pile::Hand,
+                free_this_turn: false,
+                distinct: true,
+                upgraded: false,
+            }],
+            // Jackpot.cs: random 0-cost Ironclad cards, upgraded by Jackpot+.
+            Jackpot => vec![
+                attack(1),
+                Effect::GenerateRandom {
+                    pool: GenPool::IroncladZeroCost,
+                    count: v.cards,
+                    to: Pile::Hand,
+                    free_this_turn: false,
+                    distinct: false,
+                    upgraded: self.upgraded,
+                },
+            ],
+            Knockdown => vec![attack(1), power(t(), PowerId::Knockdown, m)],
+            MasterOfStrategy => vec![draw(v.cards)],
+            Mayhem => vec![self_power(PowerId::Mayhem, 1)],
             // Not ported yet, group B; the porter deletes this arm.
             Nostalgia | Omnislice | Panache | PanicButton | PrepTime | Production | Prolong | Prowess | Purity | Rally | Rend | Restlessness | RollingBoulder | Salvo | Scrawl | SecretTechnique | SecretWeapon | SeekerStrike | Shockwave | Splash | Stratagem | TagTeam | TheBomb | TheGambit | ThinkingAhead | ThrummingHatchet | UltimateDefend | UltimateStrike | Volley => vec![],
             // Not ported yet, group C; the porter deletes this arm.
@@ -745,6 +925,7 @@ impl Card {
                 to: Pile::Hand,
                 free_this_turn: true,
                 distinct: true,
+                upgraded: false,
             }],
             Inferno => vec![self_power(PowerId::Inferno, m)],
             Inflame => vec![self_power(PowerId::Strength, m)],
@@ -802,6 +983,7 @@ impl Card {
                         to: Pile::Hand,
                         free_this_turn: false,
                         distinct: false,
+                        upgraded: false,
                     },
                 ]
             }
@@ -910,6 +1092,20 @@ impl Card {
             // Rampage: the growth into `extra_damage` is applied by the
             // combat loop as this step starts.
             (Rampage, 1) => vec![],
+            // Fisticuffs: what its hit dealt, blocked and overkill included.
+            (Fisticuffs, 1) => {
+                let dealt = if c.stats.card_dealt.0 == self.uid { c.stats.card_dealt.1 } else { 0 };
+                vec![Effect::GainBlock { target: me, amount: dealt as f64, props: ValueProp::MOVE, card: Some(self.uid) }]
+            }
+            // HandOfGreed: a kill that counts as Fatal (not a Minion) pays out.
+            (HandOfGreed, 1) => {
+                let tgt = c.creature(target.unwrap());
+                if !tgt.alive() && tgt.power(PowerId::Minion).is_none() {
+                    vec![Effect::GainGold { amount: v.magic as i32 }]
+                } else {
+                    vec![]
+                }
+            }
             _ => vec![],
         }
     }

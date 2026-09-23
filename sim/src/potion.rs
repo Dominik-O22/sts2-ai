@@ -237,7 +237,14 @@ impl PotionId {
             MazalethsGift => vec![self_power(PowerId::Ritual, 1)],
             OrobicAcid => [GenPool::IroncladAttacks, GenPool::IroncladSkills, GenPool::IroncladPowers]
                 .into_iter()
-                .map(|pool| Effect::GenerateRandom { pool, count: 1, to: Pile::Hand, free_this_turn: true, distinct: true })
+                .map(|pool| Effect::GenerateRandom {
+                    pool,
+                    count: 1,
+                    to: Pile::Hand,
+                    free_this_turn: true,
+                    distinct: true,
+                    upgraded: false,
+                })
                 .collect(),
             PotionOfBinding => {
                 let mut e = all_enemies(PowerId::Weak, 1);

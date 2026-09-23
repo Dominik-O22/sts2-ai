@@ -60,8 +60,9 @@ Forced from the log: the opening draw order, every later shuffle, enemy
 and player HP at the first decision point, and each enemy's next move.
 Adopted from the snapshots where the game rolls what nothing records: the
 depth of a card shuffled in at random (Beckon, Soot, Dazed), the costs
-Confused rolls, and a card taken from a choose-a-card screen whose `gen`
-record only follows the pick. Everything else is the sim's own
+Confused rolls, a card taken from a choose-a-card screen whose `gen`
+record only follows the pick, what a card Entropy transformed became, and
+the potion Alchemize put in the belt. Everything else is the sim's own
 work and is diffed at every snapshot. Card choices (Armaments, exhaust
 picks) are not logged; the replay tries each option and keeps the one whose
 result matches the next snapshot.

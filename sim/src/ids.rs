@@ -497,6 +497,22 @@ pub enum PowerId {
     Nemesis,
     /// A Wither into your hand every sixth card you play (Aeonglass).
     WitheringPresence,
+    /// Energy every tenth card drawn; one instance per play (Automation).
+    Automation,
+    /// Shares block with teammates; nothing to share alone (Beacon of Hope).
+    BeaconOfHope,
+    /// A random attack into your hand per attack you play (Calamity).
+    Calamity,
+    /// Strength lost until the owner's turn ends (Dark Shackles).
+    DarkShackles,
+    /// Transform cards in your hand at the start of each turn (Entropy).
+    Entropy,
+    /// Block cards tagged Defend give more (Fasten).
+    Fasten,
+    /// Other players hit the owner harder this turn (Knockdown).
+    Knockdown,
+    /// Plays the top card of your draw pile at the start of each turn (Mayhem).
+    Mayhem,
 }
 
 /// `Models/Monsters/<Name>.cs`.
@@ -950,6 +966,14 @@ pub const ALL_POWERS: &[PowerId] = &[
     PowerId::PainfulStabs,
     PowerId::Nemesis,
     PowerId::WitheringPresence,
+    PowerId::Automation,
+    PowerId::BeaconOfHope,
+    PowerId::Calamity,
+    PowerId::DarkShackles,
+    PowerId::Entropy,
+    PowerId::Fasten,
+    PowerId::Knockdown,
+    PowerId::Mayhem,
 ];
 
 pub const ALL_MONSTERS: &[MonsterId] = &[

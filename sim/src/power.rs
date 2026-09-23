@@ -60,7 +60,15 @@ pub fn is_debuff(id: PowerId) -> bool {
             | PowerId::Hex
             | PowerId::Dampen
             | PowerId::ChainsOfBinding
+            | PowerId::DarkShackles
+            | PowerId::Knockdown
     )
+}
+
+/// `PowerInstanceType.Instanced`: every application is a new instance with
+/// its own amount and counter, never stacked onto an existing one.
+pub fn instanced(id: PowerId) -> bool {
+    matches!(id, PowerId::Automation | PowerId::Knockdown)
 }
 
 /// `PowerModel.AllowNegative`.
@@ -87,7 +95,7 @@ pub fn is_debuff_for_amount(id: PowerId, amount: i32) -> bool {
 pub fn temp_power(id: PowerId) -> Option<(PowerId, i32)> {
     match id {
         PowerId::SetupStrike | PowerId::FlexPotion => Some((PowerId::Strength, 1)),
-        PowerId::Mangle | PowerId::ShacklingPotion => Some((PowerId::Strength, -1)),
+        PowerId::Mangle | PowerId::ShacklingPotion | PowerId::DarkShackles => Some((PowerId::Strength, -1)),
         PowerId::SpeedPotion => Some((PowerId::Dexterity, 1)),
         _ => None,
     }
@@ -155,16 +163,24 @@ impl Power {
             PowerId::Flutter if target == owner => 0.5,
             // SoarPower.cs: DamageDecrease 50.
             PowerId::Soar if target == owner => 0.5,
+            // KnockdownPower.cs: everyone but whoever knocked it down hits
+            // it `amount` times as hard. Alone that is nobody.
+            PowerId::Knockdown if target == owner && dealer != self.applier => self.amount as f64,
             _ => 1.0,
         }
     }
 
     /// `ModifyBlockAdditive`. `source_owner` is the owner of the card that
     /// grants the block, or the target itself for monster moves.
-    pub fn modify_block_additive(&self, owner: CreatureRef, source_owner: CreatureRef, props: ValueProp) -> f64 {
+    /// `defend_source` is false only for block from a card without the
+    /// Defend tag.
+    pub fn modify_block_additive(&self, owner: CreatureRef, source_owner: CreatureRef, props: ValueProp, defend_source: bool) -> f64 {
         match self.id {
             // DexterityPower.cs
             PowerId::Dexterity if source_owner == owner && props.is_powered() => self.amount as f64,
+            // FastenPower.cs: the owner's powered block, when it comes from
+            // a Defend or from no card at all.
+            PowerId::Fasten if source_owner == owner && props.is_powered() && defend_source => self.amount as f64,
             _ => 0.0,
         }
     }
@@ -371,6 +387,36 @@ impl Power {
             ],
             // InfernoPower.cs
             PowerId::Inferno => vec![self_damage()],
+            // EntropyPower.cs
+            PowerId::Entropy => vec![Effect::TransformFromHand { count: self.amount.max(0) as u32 }],
+            _ => vec![],
+        }
+    }
+
+    /// `AfterAutoPrePlayPhaseEntered`, player powers: the turn is set up and
+    /// the player has not acted yet.
+    pub fn after_auto_pre_play(&self) -> Vec<Effect> {
+        match self.id {
+            // MayhemPower.cs
+            PowerId::Mayhem => vec![Effect::AutoPlayFromDrawTop { count: self.amount.max(0) as u32, force_exhaust: false }],
+            _ => vec![],
+        }
+    }
+
+    /// `AfterCardDrawn` for the player's draws. `data` counts the draws.
+    pub fn after_card_drawn(&mut self) -> Vec<Effect> {
+        match self.id {
+            // AutomationPower.cs: every tenth card drawn since this instance
+            // arrived pays out `amount` energy and the count starts over.
+            PowerId::Automation => {
+                self.data += 1;
+                if self.data >= 10 {
+                    self.data = 0;
+                    vec![Effect::GainEnergy { amount: self.amount }]
+                } else {
+                    vec![]
+                }
+            }
             _ => vec![],
         }
     }
@@ -488,7 +534,12 @@ impl Power {
             PowerId::DiamondDiadem if side == Side::Enemy => remove(),
             // TemporaryStrengthPower / TemporaryDexterityPower: remove self
             // and undo the real power.
-            PowerId::SetupStrike | PowerId::Mangle | PowerId::FlexPotion | PowerId::ShacklingPotion | PowerId::SpeedPotion
+            PowerId::SetupStrike
+            | PowerId::Mangle
+            | PowerId::FlexPotion
+            | PowerId::ShacklingPotion
+            | PowerId::SpeedPotion
+            | PowerId::DarkShackles
                 if own_side =>
             {
                 let (real, sign) = temp_power(self.id).unwrap();
@@ -524,6 +575,8 @@ impl Power {
             }],
             PowerId::RetainHand if own_side => vec![Effect::DecrementPower { target: owner, id: self.id }],
             PowerId::Duplication if own_side => remove(),
+            // KnockdownPower.cs: gone once its owner's turn is over.
+            PowerId::Knockdown if own_side => remove(),
             // DarkEmbracePower.cs: draw for ethereal exhausts at end of turn.
             PowerId::DarkEmbrace if own_side => {
                 let n = self.amount * self.data;
@@ -637,6 +690,16 @@ impl Power {
                     Effect::ApplyPower { target: owner, id: PowerId::Dexterity, amount: -1, applier: self.applier },
                 ]
             }
+            // CalamityPower.cs: every attack you play (each play of it) puts
+            // `amount` random Ironclad attacks into your hand.
+            PowerId::Calamity if ty == CardType::Attack => vec![Effect::GenerateRandom {
+                pool: crate::effect::GenPool::IroncladAttacks,
+                count: self.amount.max(0) as u32,
+                to: Pile::Hand,
+                free_this_turn: false,
+                distinct: false,
+                upgraded: false,
+            }],
             PowerId::Juggling if ty == CardType::Attack => {
                 self.data += 1;
                 if self.data == 3 {
