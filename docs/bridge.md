@@ -20,6 +20,23 @@ them. When the sim cannot follow a fight (a divergence, or an encounter it
 does not model) it says so once and leaves the fight to you. Card choices
 in that fight go to the grid.
 
+## Card rewards
+
+```
+uv run python -m sts2ai.cards runs/<run>/latest.pt
+```
+
+A second process, alongside the player or without it, ranks each card
+reward while its screen is open. The mod writes the offered cards into
+`sts2ai/run.json` (`card_reward`, with the act and max energy), and
+`sts2ai.cards` plays the deck with each card added, and without one,
+against every elite and boss of the act: 512 greedy fights per encounter
+per option, the same enemies for every option. It prints the options best
+first, each against skipping, with the win rate and the worst encounter.
+Values closer than about 0.03 are a tie. It judges the deck as it stands,
+not the picks ahead, and the policy plays cards it was trained on: a card
+the generator rarely hands out may be undervalued.
+
 ## Protocol
 
 JSON lines both ways. `mod/Bridge.cs` has the full list at the top.

@@ -15,6 +15,7 @@
 // Every line also goes to the bridge (Bridge.cs), which lets a Python
 // player act on it.
 
+using System.Reflection;
 using System.Text.Json;
 using Godot;
 using MegaCrit.Sts2.Core.Combat;
@@ -30,6 +31,8 @@ using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Models.Relics;
 using MegaCrit.Sts2.Core.Nodes.Combat;
 using MegaCrit.Sts2.Core.Nodes.Rooms;
+using MegaCrit.Sts2.Core.Nodes.Screens.CardSelection;
+using MegaCrit.Sts2.Core.Nodes.Screens.Overlays;
 using MegaCrit.Sts2.Core.Rooms;
 using MegaCrit.Sts2.Core.Runs;
 using MegaCrit.Sts2.Core.ValueProps;
@@ -150,7 +153,8 @@ public static class Recorder
     private static int _runStateFrame;
 
     /// `sts2ai/run.json`: the run as it stands, in or out of combat, for
-    /// scripts that set fights up (scripts/record.py). Rewritten whenever it
+    /// scripts that set fights up (scripts/record.py) and the card advisor
+    /// (`sts2ai.cards`, which reads `card_reward`). Rewritten whenever it
     /// changes, checked every 15 frames. `active` is false with no run.
     private static void WriteRunState()
     {
@@ -174,6 +178,9 @@ public static class Recorder
                 ["relic_state"] = me.Relics.Select(r => (r, n: RelicState(r))).Where(x => x.n != null)
                     .GroupBy(x => x.r.Id.Entry).ToDictionary(g => g.Key, g => g.First().n!.Value),
                 ["potions"] = me.PotionSlots.Select(p => p?.Id.Entry).ToList(),
+                ["max_energy"] = me.MaxEnergy,
+                ["act"] = run.Act.GetType().Name,
+                ["card_reward"] = CardRewardOptions(),
             };
         string json = JsonSerializer.Serialize(state, Json);
         if (json == _lastRunState) return;
@@ -342,6 +349,17 @@ public static class Recorder
     // An enchantment rides along with the card, so every pile logs it: the
     // sim folds Sharp and Nimble into damage and block before any power or
     // relic sees the number, and cannot infer either from the card alone.
+    private static readonly FieldInfo? RewardOptions =
+        typeof(NCardRewardSelectionScreen).GetField("_options", BindingFlags.NonPublic | BindingFlags.Instance);
+
+    /// The cards on the card reward screen while it is the top overlay,
+    /// else null. The screen keeps them private (`_options`); the reward
+    /// only hands them to a selector when no screen is shown.
+    private static List<Dictionary<string, object?>>? CardRewardOptions() =>
+        NOverlayStack.Instance?.Peek() is NCardRewardSelectionScreen screen && RewardOptions?.GetValue(screen) is IReadOnlyList<CardCreationResult> options
+            ? options.Select(o => CardRef(o.Card)).ToList()
+            : null;
+
     private static Dictionary<string, object?> CardRef(CardModel c)
     {
         var d = new Dictionary<string, object?>
