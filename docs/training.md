@@ -64,8 +64,13 @@ maturin from `sim-py/` into the package `sts2ai._sim`.
   except after an act boss, where the next act's Ancient heals 80% of the
   missing HP at A10 and only the other 20% counts (0.1). A potion at 0.1 is
   about 16 HP. On top of it, potential-based shaping: each step pays the
-  change in half the enemy HP fraction taken minus `w` times the player HP
-  fraction lost, measured from the fight's own start. A fight's rewards
+  change in half the enemy HP lost (a running count over the fight, as a
+  fraction of what the enemies started with) minus `w` times the player HP
+  fraction lost, measured from the fight's own start. The count matters:
+  read off the current HP bars, a monster that revives at full HP (Test
+  Subject, the Waterfall Giant's blast turn) took the potential back, the
+  killing blow cost half a fight's reward, and the policy learned to leave
+  the Test Subject at 21 HP for five turns. A fight's rewards
   sum to its terminal reward (the batch test checks it), and PPO runs
   undiscounted (`gamma` 1), so the optimal policy is unchanged; the credit
   for playing Armaments before the Strikes just lands at the play, not
