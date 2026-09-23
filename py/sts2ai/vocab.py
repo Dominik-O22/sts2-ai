@@ -155,8 +155,9 @@ def column_map(old_v: Vocab, new_v: Vocab, old_segs: Segments, new_segs: Segment
 
 def remap_state(state: dict[str, Tensor], old_v: Vocab, new_v: Vocab, policy_state: dict[str, Tensor], L: Layout) -> dict[str, Tensor]:
     """A copy of `state` laid out for `new_v`. Embedding rows and the input
-    columns of the torso and enemy encoder move by name; new entries keep
-    the init in `policy_state`. Anything else must already match in shape."""
+    columns of the torso (`SlotAttention`'s `glob`) and enemy encoder move
+    by name; new entries keep the init in `policy_state`. Anything else
+    must already match in shape."""
     out = dict(state)
     tables = {"card.weight": "card", "monster.weight": "monster", "move.weight": "move", "potion.weight": "potion", "enchant.weight": "enchant"}
     for key, kind in tables.items():
@@ -167,13 +168,14 @@ def remap_state(state: dict[str, Tensor], old_v: Vocab, new_v: Vocab, policy_sta
         new[0] = state[key][0]
         out[key] = new
     old_L = layout_for(old_v, L)
-    # Embedding widths do not depend on the vocabulary, so read them off the
-    # new weights.
-    dims = {
-        "torso_emb": policy_state["torso.0.weight"].shape[1] - (L.n_floats - L.max_enemies * L.enemy_feats),
-        "enemy_emb": policy_state["enemy.0.weight"].shape[1] - L.enemy_feats,
-    }
-    for key, segs in (("torso.0.weight", torso_segments), ("enemy.0.weight", enemy_input_segments)):
+    inputs = (("torso.0.weight", torso_segments), ("glob.weight", torso_segments), ("enemy.0.weight", enemy_input_segments))
+    for key, segs in inputs:
+        if key not in policy_state:
+            continue
+        # Embedding widths do not depend on the vocabulary, so read them off
+        # the new weights.
+        width = policy_state[key].shape[1]
+        dims = {"torso_emb": width - (L.n_floats - L.max_enemies * L.enemy_feats), "enemy_emb": width - L.enemy_feats}
         old_w, new_w = state[key], policy_state[key].clone()
         src, dst = column_map(old_v, new_v, segs(old_L, dims), segs(L, dims))
         new_w[:, dst] = old_w[:, src]
@@ -188,7 +190,7 @@ if __name__ == "__main__":
     # grow every kind by appending, build policies for both layouts, remap
     # the old weights into the new one, and confirm the outputs agree on an
     # observation padded with zeros at the new columns.
-    from sts2ai.model import Policy
+    from sts2ai.model import Arch, build_policy
 
     L0 = Layout.load()
     v = parse(current_text())
@@ -199,9 +201,6 @@ if __name__ == "__main__":
         grown[kind] += [f"NEW_{kind}_{i}" for i in range(extra)]
     GL = layout_for(grown, L0)
 
-    torch.manual_seed(0)
-    old, new = Policy(L), Policy(GL)
-    new.load_state_dict(remap_state(old.state_dict(), v, grown, new.state_dict(), GL))
     floats = torch.rand(8, L.n_floats)
     ids = torch.zeros(8, L.n_ids, dtype=torch.long)
     ids[:, L.i_hand : L.i_hand + 3] = torch.tensor([1, 5, 9])
@@ -211,8 +210,12 @@ if __name__ == "__main__":
     src, dst = column_map(v, grown, float_segments(L), float_segments(GL))
     gf = torch.zeros(8, GL.n_floats)
     gf[:, dst] = floats[:, src]
-    with torch.no_grad():
-        lo, vo = old(floats, ids)
-        ln, vn = new(gf, ids)
-    assert torch.allclose(lo, ln, atol=1e-5) and torch.allclose(vo, vn, atol=1e-5), "remapped policy differs"
+    for arch in (Arch("slots"), Arch("attn", 128, 3)):
+        torch.manual_seed(0)
+        old, new = build_policy(L, arch).eval(), build_policy(GL, arch).eval()
+        new.load_state_dict(remap_state(old.state_dict(), v, grown, new.state_dict(), GL))
+        with torch.no_grad():
+            lo, vo = old(floats, ids)
+            ln, vn = new(gf, ids)
+        assert torch.allclose(lo, ln, atol=1e-5) and torch.allclose(vo, vn, atol=1e-5), f"remapped {arch.kind} policy differs"
     print("remap self-check ok:", f"floats {L.n_floats} -> {GL.n_floats}")

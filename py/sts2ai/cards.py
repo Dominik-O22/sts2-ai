@@ -43,7 +43,7 @@ import numpy as np
 import torch
 
 from sts2ai import _sim
-from sts2ai.env import DEFAULT_RECORDINGS, End, Envs, Layout
+from sts2ai.env import DEFAULT_RECORDINGS, End, Envs
 from sts2ai.model import Policy, load_policy, masked_logits
 
 RUN_STATE = DEFAULT_RECORDINGS.parent / "run.json"
@@ -306,8 +306,7 @@ def main() -> None:
     ap.add_argument("--repeats", type=int, default=512, help="fights per elite and boss per option")
     args = ap.parse_args()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    policy = Policy(Layout.load()).to(device).eval()
-    load_policy(args.checkpoint, policy, device)
+    policy = load_policy(args.checkpoint, device).eval()
     if args.recording is None:
         watch(policy, device, args.repeats)
         return

@@ -20,7 +20,7 @@ import numpy as np
 import torch
 
 from sts2ai.advise import PLAN_MARGIN
-from sts2ai.env import Envs, Layout
+from sts2ai.env import Envs
 from sts2ai.evaluate import HOLDOUT_PER_ENCOUNTER
 from sts2ai.model import Policy, load_policy, masked_logits
 from sts2ai.search import openings, rollout, spread
@@ -105,8 +105,7 @@ def main() -> None:
     ap.add_argument("--two-level", action="store_true", help="rank openings by their best second action (search.openings)")
     args = ap.parse_args()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    policy = Policy(Layout.load()).to(device)
-    load_policy(args.checkpoint, policy, device)
+    policy = load_policy(args.checkpoint, device)
     policy.eval()
     kinds = set(args.kinds.split(","))
     greedy: dict[str, list[bool]] = defaultdict(list)

@@ -8,6 +8,7 @@ step t cuts the value bootstrap for step t+1.
 from __future__ import annotations
 
 import copy
+import shutil
 import threading
 import time
 from collections import deque
@@ -23,7 +24,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 from sts2ai.env import DEFAULT_RECORDINGS, End, Envs, has_recordings
 from sts2ai.evaluate import evaluate
-from sts2ai.model import Policy, checkpoint_layout, checkpoint_vocab, load_state, masked_logits
+from sts2ai.model import Arch, Policy, build_policy, checkpoint_arch, checkpoint_layout, checkpoint_vocab, load_state, masked_logits
 from sts2ai.search import rollout, spread
 from sts2ai.vocab import current_text
 
@@ -38,6 +39,9 @@ class Config:
     epochs: int = 4
     minibatches: int = 8
     lr: float = 3e-4
+    # Iterations the learning rate ramps up over from zero, for a network
+    # that does not take the full rate from its first update (`attn`).
+    warmup: int = 0
     # Learning rate at the last iteration, reached linearly; None keeps
     # `lr` throughout.
     lr_final: float | None = None
@@ -93,6 +97,9 @@ class Config:
     # per iteration, at the search's speed.
     search_sync: bool = False
     eval_every: int = 50
+    # Also keep a checkpoint every this many iterations (`it<N>.pt`), to
+    # set runs side by side at equal steps. 0 keeps only `latest.pt`.
+    keep_every: int = 0
     # Fights per held-out setup at each eval.
     eval_repeats: int = 2
     recordings: Path = DEFAULT_RECORDINGS
@@ -108,6 +115,12 @@ class Config:
     # bfloat16. Advantages, returns, and the loss stay in fp32.
     compile: bool = True
     bf16: bool = True
+    # The network (`model.Arch`): `slots` (an MLP, `hidden` wide, `depth`
+    # layers) or `attn` (a transformer over the slots, `hidden` wide, `depth`
+    # layers). A resumed run keeps its checkpoint's.
+    arch: str = "slots"
+    hidden: int = 512
+    depth: int = 2
 
 
 class Rollout:
@@ -284,6 +297,7 @@ def save_checkpoint(path: Path, policy: Policy, opt: torch.optim.Optimizer, it: 
             "global_step": global_step,
             "vocab": current_text(),
             "layout": asdict(policy.layout),
+            "arch": asdict(policy.arch),
         },
         path,
     )
@@ -294,7 +308,8 @@ def train(cfg: Config) -> Policy:
     np.random.seed(cfg.seed)
     device = torch.device(cfg.device)
     envs = Envs(cfg.envs, seed=cfg.seed, max_floor=cfg.floor_start)
-    policy = Policy(envs.layout).to(device)
+    ck = torch.load(cfg.resume, map_location=device) if cfg.resume else None
+    policy = build_policy(envs.layout, checkpoint_arch(ck) if ck else Arch(cfg.arch, cfg.hidden, cfg.depth)).to(device)
     opt = torch.optim.Adam(policy.parameters(), lr=cfg.lr, eps=1e-5)
     # `net` is what runs; `policy` keeps the plain module for checkpoints.
     net = torch.compile(policy) if cfg.compile and device.type == "cuda" else policy
@@ -320,8 +335,7 @@ def train(cfg: Config) -> Policy:
     search_go.set()
     stats = Stats()
     start_iter, global_step = 1, 0
-    if cfg.resume:
-        ck = torch.load(cfg.resume, map_location=device)
+    if ck is not None:
         if load_state(policy, ck["policy"], checkpoint_vocab(ck, cfg.old_vocab), checkpoint_layout(ck)):
             print("vocabulary grew since the checkpoint: weights remapped by name, optimizer state reset")
         else:
@@ -330,7 +344,7 @@ def train(cfg: Config) -> Policy:
         print(f"resumed {cfg.resume} at iteration {ck['iter']}")
     cfg.run_dir.mkdir(parents=True, exist_ok=True)
     writer = SummaryWriter(str(cfg.run_dir))
-    print(f"training on {device}, {cfg.envs} envs x {cfg.steps} steps, logs in {cfg.run_dir}")
+    print(f"training {policy.arch} on {device}, {cfg.envs} envs x {cfg.steps} steps, logs in {cfg.run_dir}")
 
     step0 = global_step
     t0 = time.time()
@@ -341,10 +355,11 @@ def train(cfg: Config) -> Policy:
         envs.set_hard_frac(cfg.hard_frac if max_floor >= BOSS_FLOOR else 0.0)
         if cfg.focus and it % 10 == 0:
             envs.set_hard_weights(stats.loss_weights())
-        if cfg.lr_final is not None:
-            frac = (it - start_iter) / max(1, cfg.iters - 1)
-            for group in opt.param_groups:
-                group["lr"] = cfg.lr + (cfg.lr_final - cfg.lr) * frac
+        lr = cfg.lr if cfg.lr_final is None else cfg.lr + (cfg.lr_final - cfg.lr) * (it - start_iter) / max(1, cfg.iters - 1)
+        if cfg.warmup:
+            lr *= min(1.0, (it - start_iter + 1) / cfg.warmup)
+        for group in opt.param_groups:
+            group["lr"] = lr
 
         # Rollout.
         search_go.clear()
@@ -476,6 +491,8 @@ def train(cfg: Config) -> Policy:
             )
         if it % cfg.eval_every == 0 or it == start_iter + cfg.iters - 1:
             save_checkpoint(cfg.run_dir / "latest.pt", policy, opt, it, global_step)
+            if cfg.keep_every and it % cfg.keep_every == 0:
+                shutil.copy(cfg.run_dir / "latest.pt", cfg.run_dir / f"it{it}.pt")
             policy.eval()
             win, _, by_kind = evaluate(policy, device, cfg.eval_repeats, acts=cfg.acts)
             writer.add_scalar("eval/holdout_win_rate", win, global_step)

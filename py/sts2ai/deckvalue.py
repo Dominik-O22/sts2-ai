@@ -27,7 +27,7 @@ from torch import Tensor, nn
 
 from sts2ai import _sim
 from sts2ai.cards import BOSS_FLOOR, fights, horizon
-from sts2ai.env import DEFAULT_RECORDINGS, Layout
+from sts2ai.env import DEFAULT_RECORDINGS
 from sts2ai.model import Policy, load_policy
 
 ACTS = ["Overgrowth", "Underdocks", "Hive", "Glory"]
@@ -129,8 +129,7 @@ def label(policy: Policy, device: torch.device, run: dict, repeats: int, seed: i
 
 def cmd_label(args) -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    policy = Policy(Layout.load()).to(device).eval()
-    load_policy(args.checkpoint, policy, device)
+    policy = load_policy(args.checkpoint, device).eval()
     rng = np.random.default_rng(args.seed)
     with open(args.out, "a") as out, torch.no_grad():
         for i in range(args.n):
@@ -162,8 +161,7 @@ def cmd_train(args) -> None:
     val = torch.tensor([p in val_pairs for p in pairs.tolist()])
     model = DeckValue()
     if args.policy:
-        policy = Policy(Layout.load())
-        load_policy(args.policy, policy, torch.device("cpu"))
+        policy = load_policy(args.policy, torch.device("cpu"))
         model.seed_cards(policy)
     opt = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=args.weight_decay)
 
@@ -239,8 +237,7 @@ def cmd_check(args) -> None:
     encounters. Prints how often the picks match and what the network's
     pick gives up against the fights' best, each beside a random pick's."""
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    policy = Policy(Layout.load()).to(device).eval()
-    load_policy(args.checkpoint, policy, device)
+    policy = load_policy(args.checkpoint, device).eval()
     saved = torch.load(args.model, map_location="cpu")
     model = DeckValue()
     model.load_state_dict(saved["model"])

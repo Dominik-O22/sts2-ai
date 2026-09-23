@@ -17,9 +17,8 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from sts2ai.env import Layout
 from sts2ai.evaluate import by_kind, play
-from sts2ai.model import Policy, load_policy
+from sts2ai.model import load_policy
 
 
 def main() -> None:
@@ -31,8 +30,7 @@ def main() -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     tables: dict[str, dict[str, dict[str, float]]] = {"win rate": {}, "HP lost per won fight (% of max)": {}, "potions per fight": {}}
     for path in args.checkpoints:
-        policy = Policy(Layout.load()).to(device)
-        load_policy(path, policy, device)
+        policy = load_policy(path, device)
         policy.eval()
         ends = play(policy, device, args.repeats, acts=args.acts)
         tables["win rate"][str(path)] = {"overall": float(np.mean([e.won for e in ends])), **by_kind(ends, lambda e: e.won)}

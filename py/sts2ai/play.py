@@ -34,7 +34,6 @@ from typing import Iterator
 import torch
 
 from sts2ai.advise import Session
-from sts2ai.env import Layout
 from sts2ai.model import Policy, load_policy
 
 DEFAULT_PORT = 47474
@@ -174,8 +173,7 @@ def main() -> None:
     sys.stdout.reconfigure(line_buffering=True)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    policy = Policy(Layout.load()).to(device)
-    load_policy(args.checkpoint, policy, device)
+    policy = load_policy(args.checkpoint, device)
     policy.eval()
 
     try:

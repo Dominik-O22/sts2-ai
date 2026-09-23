@@ -20,7 +20,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from sts2ai.env import DEFAULT_RECORDINGS, End, Envs, Layout, has_recordings
+from sts2ai.env import DEFAULT_RECORDINGS, End, Envs, has_recordings
 from sts2ai.model import Policy, load_policy, masked_logits
 
 HOLDOUT_PER_ENCOUNTER = 10
@@ -109,8 +109,7 @@ def main() -> None:
     ap.add_argument("--acts", type=int, default=3, help="acts the holdout covers")
     args = ap.parse_args()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    policy = Policy(Layout.load()).to(device)
-    load_policy(args.checkpoint, policy, device, args.old_vocab)
+    policy = load_policy(args.checkpoint, device, args.old_vocab)
     policy.eval()
     win, by_enc, kinds = evaluate(policy, device, args.repeats, args.source, args.recordings, acts=args.acts)
     for enc, (w, n) in sorted(by_enc.items()):

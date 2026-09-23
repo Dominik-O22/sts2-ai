@@ -1,6 +1,9 @@
-"""Policy and value network (DESIGN.md, Decision engine).
+"""Policy and value networks (DESIGN.md, Decision engine). Two
+architectures read the same observation and fill the same action layout,
+so masks, search, decode and the bridge do not care which one runs; a
+checkpoint records its `Arch` and `load_policy` builds the right one.
 
-Id embeddings for the cards in hand and on offer, their enchantments, and
+`SlotMLP`: id embeddings for the cards in hand and on offer, their enchantments, and
 the potions are concatenated with the dense features and run through an
 MLP. Enemies are a set: one small encoder reads each enemy (its monster and
 next-move embeddings plus its dense block), and the sum over enemies joins
@@ -11,11 +14,19 @@ scored once per target from its own embedding, the encoded enemy it would
 hit, and the MLP state, so "what Bash does" and "which enemy to hit" are
 learned once rather than once per slot. Choice options are scored from
 their embedding and the MLP state.
+
+`SlotAttention`: the same slots as tokens (one global token for the rest
+of the observation, then hand cards, enemies and potions) through a small
+transformer, so a card's encoding has seen the enemies and the rest of the
+hand before the heads score it. Empty slots are masked. Choice options stay
+out of the sequence: there are 20 slots, almost always empty, and they
+would double its length; their pooled encoding joins the global token and
+each is scored against the encoded global token.
 """
 
 from __future__ import annotations
 
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import torch
@@ -84,6 +95,27 @@ class PairHead(nn.Module):
         return self.out(h).squeeze(-1)
 
 
+@dataclass(frozen=True)
+class Arch:
+    """Which network and how big: `slots` (`SlotMLP`, `hidden` wide, `depth`
+    torso layers) or `attn` (`SlotAttention`, `hidden` wide, `depth`
+    transformer layers)."""
+
+    kind: str = "slots"
+    hidden: int = 512
+    depth: int = 2
+
+
+class Policy(nn.Module):
+    """What every architecture shares: the layout it was built for, its
+    `Arch`, the card embedding (`sts2ai.deckvalue` seeds from it), and
+    `forward(floats, ids) -> (logits [B, n_actions], values [B])`."""
+
+    layout: Layout
+    arch: Arch
+    card: nn.Embedding
+
+
 def _head(in_dim: int, out_dim: int, hidden: int = 128) -> nn.Sequential:
     head = nn.Sequential(nn.Linear(in_dim, hidden), nn.ReLU(), nn.Linear(hidden, out_dim))
     nn.init.orthogonal_(head[-1].weight, gain=0.01)
@@ -91,11 +123,12 @@ def _head(in_dim: int, out_dim: int, hidden: int = 128) -> nn.Sequential:
     return head
 
 
-class Policy(nn.Module):
+class SlotMLP(Policy):
     def __init__(
         self,
         layout: Layout,
         hidden: int = 512,
+        depth: int = 2,
         card_dim: int = 32,
         monster_dim: int = 16,
         move_dim: int = 8,
@@ -112,6 +145,7 @@ class Policy(nn.Module):
         assert L.a_choose == L.a_end_turn + 1 and L.a_skip == L.a_choose + L.max_choices == L.n_actions - 1
         assert L.targets == L.max_enemies + 1
         self.layout = L
+        self.arch = Arch("slots", hidden, depth)
         self.card = nn.Embedding(L.card_vocab, card_dim, padding_idx=0)
         self.monster = nn.Embedding(L.monster_vocab, monster_dim, padding_idx=0)
         self.move = nn.Embedding(L.move_vocab, move_dim, padding_idx=0)
@@ -129,7 +163,10 @@ class Policy(nn.Module):
             + L.max_potions * potion_dim
             + enemy_dim
         )
-        self.torso = nn.Sequential(nn.Linear(in_dim, hidden), nn.ReLU(), nn.Linear(hidden, hidden), nn.ReLU())
+        layers: list[nn.Module] = [nn.Linear(in_dim, hidden), nn.ReLU()]
+        for _ in range(depth - 1):
+            layers += [nn.Linear(hidden, hidden), nn.ReLU()]
+        self.torso = nn.Sequential(*layers)
         self.play = PairHead(hidden, card_dim + enchant_dim + L.hand_feats, enemy_dim)
         self.use_potion = PairHead(hidden, potion_dim + 1, enemy_dim)
         self.choose = KeyedHead(hidden, card_dim + L.choice_feats, 1)
@@ -186,6 +223,116 @@ class Policy(nn.Module):
         return logits, self.v(h).squeeze(-1)
 
 
+class SlotAttention(Policy):
+    def __init__(
+        self,
+        layout: Layout,
+        hidden: int = 128,
+        depth: int = 3,
+        heads: int = 4,
+        card_dim: int = 32,
+        monster_dim: int = 16,
+        move_dim: int = 8,
+        potion_dim: int = 8,
+        enchant_dim: int = 4,
+        enemy_dim: int = 64,
+    ):
+        super().__init__()
+        L = layout
+        assert L.targets == L.max_enemies + 1
+        self.layout = L
+        self.arch = Arch("attn", hidden, depth)
+        d = hidden
+        self.card = nn.Embedding(L.card_vocab, card_dim, padding_idx=0)
+        self.monster = nn.Embedding(L.monster_vocab, monster_dim, padding_idx=0)
+        self.move = nn.Embedding(L.move_vocab, move_dim, padding_idx=0)
+        self.potion = nn.Embedding(L.potion_vocab, potion_dim, padding_idx=0)
+        self.enchant = nn.Embedding(L.enchant_vocab, enchant_dim, padding_idx=0)
+        # Named like `SlotMLP`'s so `vocab.remap_state` moves their input
+        # columns when a vocabulary grows: `enemy` as the enemy encoder,
+        # `glob` as the torso with no embeddings after the floats.
+        self.enemy = nn.Sequential(
+            nn.Linear(monster_dim + move_dim + L.enemy_feats, enemy_dim), nn.ReLU(), nn.Linear(enemy_dim, enemy_dim), nn.ReLU()
+        )
+        self.glob = nn.Linear(L.n_floats - L.max_enemies * L.enemy_feats, d)
+        # One projection per token kind; their biases tell the kinds apart.
+        # Choices are not tokens (module docstring).
+        self.hand_in = nn.Linear(card_dim + enchant_dim + L.hand_feats, d)
+        self.enemy_in = nn.Linear(enemy_dim, d)
+        self.potion_in = nn.Linear(potion_dim + 1, d)
+        self.choice_in = nn.Linear(card_dim + L.choice_feats, d)
+        layer = nn.TransformerEncoderLayer(d, heads, 4 * d, dropout=0.0, batch_first=True, norm_first=True)
+        self.encoder = nn.TransformerEncoder(layer, depth, norm=nn.LayerNorm(d), enable_nested_tensor=False)
+        self.play = PairHead(d, d, d)
+        self.use_potion = PairHead(d, d, d)
+        self.choose = KeyedHead(d, d, 1)
+        self.end_or_skip = _head(d, 2)
+        self.v = nn.Linear(d, 1)
+        nn.init.orthogonal_(self.v.weight, gain=1.0)
+        nn.init.zeros_(self.v.bias)
+
+    def forward(self, floats: Tensor, ids: Tensor) -> tuple[Tensor, Tensor]:
+        L = self.layout
+        B = floats.shape[0]
+        H, E, P, C = L.max_hand, L.max_enemies, L.max_potions, L.max_choices
+        hand_feats = floats[:, L.f_hand : L.f_hand + H * L.hand_feats].view(B, H, L.hand_feats)
+        enemy_floats = floats[:, L.f_enemies : L.f_relics].view(B, E, L.enemy_feats)
+        potion_feats = floats[:, L.f_potions : L.f_potions + P].unsqueeze(2)
+        choice_feats = floats[:, L.f_choices : L.f_choices + C * L.choice_feats].view(B, C, L.choice_feats)
+        hand_ids = ids[:, L.i_hand : L.i_hand + H]
+        potion_ids = ids[:, L.i_potions : L.i_potions + P]
+        choice_ids = ids[:, L.i_choices : L.i_choices + C]
+
+        enemies = self.enemy(
+            torch.cat(
+                [self.monster(ids[:, L.i_enemies : L.i_enemies + E]), self.move(ids[:, L.i_moves : L.i_moves + E]), enemy_floats],
+                dim=2,
+            )
+        )
+        choices = self.choice_in(torch.cat([self.card(choice_ids), choice_feats], dim=2))
+        offered = (choice_ids != 0).unsqueeze(2)
+        glob = self.glob(torch.cat([floats[:, : L.f_enemies], floats[:, L.f_relics :]], dim=1))
+        glob = glob + (choices * offered).sum(1) / offered.sum(1).clamp(min=1)
+        tokens = torch.cat(
+            [
+                glob.unsqueeze(1),
+                self.hand_in(torch.cat([self.card(hand_ids), self.enchant(ids[:, L.i_enchants : L.i_enchants + H]), hand_feats], dim=2)),
+                self.enemy_in(enemies),
+                self.potion_in(torch.cat([self.potion(potion_ids), potion_feats], dim=2)),
+            ],
+            dim=1,
+        )
+        # True where a slot is empty. The global token never is, so every
+        # row attends to something.
+        empty = torch.cat(
+            [torch.zeros_like(hand_ids[:, :1], dtype=torch.bool), hand_ids == 0, enemy_floats[:, :, 0] == 0, potion_ids == 0],
+            dim=1,
+        )
+        x = self.encoder(tokens, src_key_padding_mask=empty)
+        g, hand, enemy, potion = x.split([1, H, E, P], dim=1)
+        g = g.squeeze(1)
+        play = self.play(g, hand, enemy).flatten(1)
+        use = self.use_potion(g, potion, enemy).flatten(1)
+        choose = self.choose(g, choices).squeeze(2)
+        end_skip = self.end_or_skip(g)
+        logits = torch.cat([play, use, end_skip[:, :1], choose, end_skip[:, 1:]], dim=1)
+        return logits, self.v(g).squeeze(-1)
+
+
+def build_policy(layout: Layout, arch: Arch) -> Policy:
+    if arch.kind == "slots":
+        return SlotMLP(layout, hidden=arch.hidden, depth=arch.depth)
+    if arch.kind == "attn":
+        return SlotAttention(layout, hidden=arch.hidden, depth=arch.depth)
+    raise ValueError(f"unknown architecture {arch.kind!r}: slots or attn")
+
+
+def checkpoint_arch(ck: object) -> Arch:
+    """The architecture a checkpoint was trained with; `SlotMLP` at its old
+    size for checkpoints from before that was recorded."""
+    return Arch(**ck["arch"]) if isinstance(ck, dict) and isinstance(ck.get("arch"), dict) else Arch()
+
+
 def masked_logits(logits: Tensor, mask: Tensor) -> Tensor:
     """Illegal actions get a logit small enough to vanish after softmax."""
     return logits.masked_fill(~mask, -1e9)
@@ -232,7 +379,10 @@ def checkpoint_layout(ck: object) -> dict[str, int] | None:
     return ck.get("layout") if isinstance(ck, dict) and isinstance(ck.get("layout"), dict) else None
 
 
-def load_policy(path: Path, policy: Policy, device: torch.device, old_vocab: Path | None = None) -> None:
-    """Load weights from a training checkpoint (or a bare state dict)."""
+def load_policy(path: Path, device: torch.device, old_vocab: Path | None = None) -> Policy:
+    """The network a training checkpoint (or a bare state dict) holds,
+    built for the current sim, on `device`."""
     ck = torch.load(path, map_location=device)
+    policy = build_policy(Layout.load(), checkpoint_arch(ck)).to(device)
     load_state(policy, ck["policy"] if "policy" in ck else ck, checkpoint_vocab(ck, old_vocab), checkpoint_layout(ck))
+    return policy

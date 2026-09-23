@@ -248,8 +248,7 @@ def main() -> None:
     sys.stdout.reconfigure(line_buffering=True)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    policy = Policy(Layout.load()).to(device)
-    load_policy(args.checkpoint, policy, device)
+    policy = load_policy(args.checkpoint, device)
     policy.eval()
 
     session = Session(policy, device, args.search, args.groups)

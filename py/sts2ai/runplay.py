@@ -20,7 +20,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from sts2ai.env import End, Envs, Layout
+from sts2ai.env import End, Envs
 from sts2ai.model import Policy, load_policy, masked_logits
 
 
@@ -96,9 +96,7 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=0, help="the first run's seed index")
     args = ap.parse_args()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    policy = Policy(Layout.load()).to(device)
-    load_policy(args.checkpoint, policy, device, args.old_vocab)
-    policy.eval()
+    policy = load_policy(args.checkpoint, device, args.old_vocab).eval()
     envs = Envs(args.envs, seed=args.seed)
     ends, steps, seconds = play(policy, device, envs, args.seed, args.runs_per_env, args.minutes)
     report(ends, args.seed, args.seed + args.runs_per_env * args.envs, steps, args.envs, seconds)

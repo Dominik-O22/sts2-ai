@@ -16,7 +16,7 @@ import torch
 from sts2ai import _sim
 from sts2ai.env import Envs, Layout
 from sts2ai.evaluate import HOLDOUT_PER_ENCOUNTER
-from sts2ai.model import Policy, load_policy, masked_logits
+from sts2ai.model import load_policy, masked_logits
 from sts2ai.vocab import current_text, parse
 
 # Power indices from ids.rs, the ones worth printing.
@@ -85,8 +85,7 @@ def main() -> None:
     cards, monsters = _sim.card_names(), _sim.monster_names()
     vocab = parse(current_text())
     enchants, intents = vocab["enchant"], vocab["intent"]
-    policy = Policy(L).to(device)
-    load_policy(args.checkpoint, policy, device, args.old_vocab)
+    policy = load_policy(args.checkpoint, device, args.old_vocab)
     policy.eval()
 
     probe = Envs(1, seed=args.seed)

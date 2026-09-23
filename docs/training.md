@@ -50,12 +50,19 @@ maturin from `sim-py/` into the package `sts2ai._sim`.
   resets each one as it ends, and writes observations into caller buffers.
   Rewards are described under Reward below; they are the stopgap price
   table from DESIGN.md, which the run value network replaces later.
-- `py/sts2ai/`: `Envs` owns the numpy buffers. `Policy` embeds card,
-  enchantment, monster, move, and potion ids. Enemies are a set: one
-  small encoder reads each enemy and the sum joins the MLP input, so no
-  weight belongs to a slot. Cards and potions are scored per target from
-  their own embedding, the encoded enemy, and the MLP state (`PairHead`),
-  so "hit the low one that is about to attack" is learned once. `ppo.py`
+- `py/sts2ai/`: `Envs` owns the numpy buffers. The policy (`SlotMLP`,
+  `--arch slots`) embeds card, enchantment, monster, move, and potion ids.
+  Enemies are a set: one small encoder reads each enemy and the sum joins
+  the MLP input, so no weight belongs to a slot. Cards and potions are
+  scored per target from their own embedding, the encoded enemy, and the
+  MLP state (`PairHead`), so "hit the low one that is about to attack" is
+  learned once. `--hidden` and `--depth` size its torso (512 and 2 through
+  set-12). `--arch attn` (`SlotAttention`) turns the same slots into
+  tokens (a global one for the rest of the observation, then hand cards,
+  enemies, potions and choices) and runs a transformer over them before
+  the same heads, so a card's encoding has seen the board; give it
+  `--warmup`. The checkpoint records the arch, and every tool builds the
+  right network from it (`model.load_policy`). `ppo.py`
   is a plain PPO with GAE. `evaluate.py` runs the policy greedily on the
   held-out set: ten generated fights per encounter from a fixed seed
   (`gen::holdout`), or on run recordings (Real decks, below).
@@ -82,7 +89,7 @@ maturin from `sim-py/` into the package `sts2ai._sim`.
   for playing Armaments before the Strikes just lands at the play, not
   fifty steps later. With a discount the policy was paid for finishing
   sooner, and traded HP and potions for it.
-- Checkpoints record the vocabulary and the layout. Vocabulary growth
+- Checkpoints record the vocabulary, the layout and the arch. Vocabulary growth
   (new cards, powers, monsters, relics, potions, moves, enchantments,
   intent kinds) is remapped by name on load. A layout change (a slot count
   or a per-slot feature count, `model.SHAPE_FIELDS`) is not: that is a
