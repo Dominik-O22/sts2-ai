@@ -368,21 +368,24 @@ impl Forks {
     /// player turns: the rest of the current one, then `depth - 1` more.
     pub fn of(roots: &[&Combat], n: usize, groups: usize, seed: u64, depth: u32) -> Self {
         let per_group = n.div_ceil(groups.max(1));
-        let mut out = Self { combats: vec![], turns: vec![], bases: vec![] };
-        for (r, root) in roots.iter().enumerate() {
-            let seed = seed ^ (r as u64).wrapping_mul(0xD6E8_FEB8_6659_FD93);
-            for i in 0..n {
-                let group = i / per_group;
-                let mut c = (*root).clone();
-                c.script = Default::default();
-                c.rngs = CombatRngs::new(seed ^ (i as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15));
-                Rng::new(seed ^ (group as u64 + 1) << 20).shuffle(&mut c.player.draw);
-                out.combats.push(c);
-                out.turns.push(root.player.turn + depth.max(1) - 1);
-                out.bases.push(Baseline::of(root));
-            }
-        }
-        out
+        let combats = roots
+            .par_iter()
+            .enumerate()
+            .flat_map_iter(|(r, root)| {
+                let seed = seed ^ (r as u64).wrapping_mul(0xD6E8_FEB8_6659_FD93);
+                (0..n).map(move |i| {
+                    let group = i / per_group;
+                    let mut c = (*root).clone();
+                    c.script = Default::default();
+                    c.rngs = CombatRngs::new(seed ^ (i as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+                    Rng::new(seed ^ (group as u64 + 1) << 20).shuffle(&mut c.player.draw);
+                    c
+                })
+            })
+            .collect();
+        let turns = roots.iter().flat_map(|root| std::iter::repeat_n(root.player.turn + depth.max(1) - 1, n)).collect();
+        let bases = roots.iter().flat_map(|root| std::iter::repeat_n(Baseline::of(root), n)).collect();
+        Self { combats, turns, bases }
     }
 
     pub fn len(&self) -> usize {

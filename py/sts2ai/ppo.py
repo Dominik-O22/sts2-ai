@@ -216,7 +216,10 @@ def start_search(policy: Policy, device: torch.device, envs: Envs, cfg: Config, 
     floats, ids, mask = envs.floats[roots], envs.ids[roots], envs.mask[roots]
 
     def finish():
-        score = rollout(policy, device, forks, first)
+        # Autocast is per thread (and keeps state on the object), so the
+        # searcher's thread enters its own.
+        with torch.autocast(device.type, dtype=torch.bfloat16, enabled=cfg.bf16 and device.type == "cuda"):
+            score = rollout(policy, device, forks, first)
         target = np.zeros((len(roots), mask.shape[1]), np.float32)
         for r in range(len(roots)):
             f, sc = first[r * n : (r + 1) * n], score[r * n : (r + 1) * n]
