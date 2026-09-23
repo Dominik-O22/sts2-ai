@@ -174,11 +174,12 @@ pub struct Script {
     pub unscripted_shuffles: u32,
     /// Max HP per starting enemy, by index.
     pub enemy_hp: Vec<i32>,
-    /// The player's HP at the first decision point, where the recording
-    /// first shows it. Taken once the sim settles there, after turn 1's
-    /// start has healed (Blood Vial) or hurt (Royal Poison); a choice that
-    /// start opens (Gambling Chip) stops the sim short of it.
-    pub player_hp: Option<i32>,
+    /// The recording's first snapshot is still to come. It shows the
+    /// player's HP after turn 1's start has healed (Blood Vial) or hurt
+    /// (Royal Poison), and the opening layout; both are taken once the sim
+    /// settles there, which a choice that start opens (Gambling Chip)
+    /// holds up.
+    pub first_snapshot_pending: bool,
     /// Targets for random-target hits, as indices into the living enemies.
     pub random_targets: VecDeque<usize>,
     /// Cards random generation should produce, in order.

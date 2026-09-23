@@ -232,8 +232,10 @@ fn settle(c: &Combat, snap: &Value, depth: u32) -> Result<Combat, String> {
         // The first decision point. Turn 1's start is over here, including
         // a choice it opened (Gambling Chip), so what the first snapshot
         // settles can be read off by position now and not before.
-        if let Some(hp) = k.script.player_hp.take() {
-            k.player.creature.hp = hp;
+        if std::mem::take(&mut k.script.first_snapshot_pending) {
+            if let Some(hp) = snap["hp"].as_i64() {
+                k.player.creature.hp = hp as i32;
+            }
             adopt_layout(&mut k, snap, true);
             adopt_cracked(&mut k, snap);
         }
@@ -828,10 +830,12 @@ impl Gate {
 const RESEED_LIMIT: u32 = 64;
 
 impl Replayer {
-    /// Build the combat the `start` record describes. `first_snap` is the
-    /// recording's first snapshot: it carries the player's HP and the
-    /// opening draw order, which the start record does not.
-    pub fn new(start: &Value, first_snap: &Value, ids: Ids, seed: u64) -> Result<Self, String> {
+    /// Build the combat the `start` record describes. A start record written
+    /// since 2026-09-23 carries the player's HP and the opening draw order
+    /// itself, so the combat can be built the moment it arrives, ahead of any
+    /// snapshot; older ones need `first_snap`, the recording's first
+    /// snapshot, for both.
+    pub fn new(start: &Value, first_snap: Option<&Value>, ids: Ids, seed: u64) -> Result<Self, String> {
         let fs = FightSetup::from_start(start, first_snap, &ids)?;
         let enemies = start["enemies"].as_array().ok_or("start without enemies")?;
         for (e, spec) in enemies.iter().zip(&fs.enemies) {
@@ -851,8 +855,9 @@ impl Replayer {
                 }
             }
             None => {
+                let snap = first_snap.ok_or("start without an opening draw order and no snapshot to read it from")?;
                 for key in ["hand", "draw"] {
-                    for v in first_snap[key].as_array().ok_or("snapshot without piles")? {
+                    for v in snap[key].as_array().ok_or("snapshot without piles")? {
                         opening.push(card_ref(&ids, v)?);
                     }
                 }
@@ -884,7 +889,7 @@ impl Replayer {
         let script = Script {
             shuffles: VecDeque::from(vec![opening]),
             enemy_hp: enemies.iter().map(|e| e["max_hp"].as_i64().unwrap_or(1) as i32).collect(),
-            player_hp: Some(fs.hp),
+            first_snapshot_pending: true,
             random_targets: VecDeque::new(),
             generated,
             random_exhausts,
@@ -1074,7 +1079,7 @@ impl Replayer {
                 adopt_offer(&mut self.c, rec);
                 // The opening layout is settled on the matching branch, where
                 // any choice turn 1's start opened has been answered.
-                if self.c.script.player_hp.is_none() {
+                if !self.c.script.first_snapshot_pending {
                     adopt_layout(&mut self.c, rec, false);
                 }
                 if let Err(e) = adopt_spawn_hp(&mut self.c, rec, self.known_enemies) {
@@ -1211,10 +1216,17 @@ impl Replayer {
                             return Ok(Applied::Ok);
                         }
                         self.pre_potion = self.ids.potions.get(name).copied();
-                    } else if rec["card"].is_null() && self.c.side == Side::Player && !self.pre_ended {
+                    } else if rec["card"].is_null()
+                        && self.c.side == Side::Player
+                        && !self.pre_ended
+                        && !self.c.script.first_snapshot_pending
+                    {
                         // Nothing of yours opened it: the enemy turn did,
                         // which the game is already in. Get the sim there so
-                        // the choice is up while the game waits on it.
+                        // the choice is up while the game waits on it. Before
+                        // the first decision point only turn 1's start can
+                        // have opened one, by a relic the sim does not stop
+                        // at; the first snapshot reports that.
                         self.c.step(Action::EndTurn);
                         self.report.actions += 1;
                         self.pre_ended = true;
@@ -1230,6 +1242,9 @@ impl Replayer {
             // the next snapshot settles the choice instead.
             "picked" => {
                 let Some(p) = self.c.pending.clone() else { return Ok(Applied::Ok) };
+                // The pick answers the decision; a choice still open after it
+                // (Ashwater asks again, the chip takes any number) raises it again.
+                self.at_decision = false;
                 if rec["card"].is_null() {
                     if p.can_skip {
                         self.c.step(Action::Skip);
@@ -1419,7 +1434,7 @@ pub fn replay_seeded(text: &str, ids: &Ids, seed: u64) -> Result<Report, String>
         .map(|l| serde_json::from_str(l).map_err(|e| format!("bad json: {e}")))
         .collect::<Result<_, _>>()?;
     let start = records.first().filter(|r| r["t"] == "start").ok_or("no start record")?;
-    let first_snap = records.iter().find(|r| r["t"] == "snapshot").ok_or("no snapshot")?;
+    let first_snap = records.iter().find(|r| r["t"] == "snapshot");
 
     let mut r = Replayer::new(start, first_snap, ids.clone(), seed)?;
     for rec in &records[1..] {
@@ -1627,7 +1642,7 @@ mod tests {
         for seed in 0..10u64 {
             let text = recorded_playout(seed);
             let records: Vec<Value> = text.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
-            let first_snap = records.iter().find(|r| r["t"] == "snapshot").unwrap();
+            let first_snap = records.iter().find(|r| r["t"] == "snapshot");
             let mut r = Replayer::new(&records[0], first_snap, ids.clone(), seed + 100).unwrap();
             let mut decisions = 0;
             let mut ended = false;
@@ -1658,6 +1673,85 @@ mod tests {
             assert_eq!((fed.snapshots, fed.actions, fed.reseeds), (whole.snapshots, whole.actions, whole.reseeds));
             assert!(decisions >= whole.snapshots);
         }
+    }
+
+    /// The bridge's turn 1 with Gambling Chip: the start record arrives when
+    /// the chip's choice opens, before any snapshot, and carries the HP and
+    /// opening order the replayer needs to build the fight. The sim must be
+    /// waiting at the same choice, take the picks the pilot sends back as
+    /// the mod logs them, and then match the first snapshot the game takes
+    /// once the mulligan has resolved.
+    #[test]
+    fn turn_one_choice_is_answered_before_the_first_snapshot() {
+        let ids = Ids::new();
+        let mut rng = Rng::new(3);
+        let specs = crate::encounter::Encounter::NibbitsWeak.monsters(&mut rng);
+        let deck = crate::ironclad_starter_deck();
+        let relics = [Relic::new(RelicId::GamblingChip)];
+        let setup = Setup {
+            deck: &deck,
+            hp: 61,
+            max_hp: 80,
+            max_energy: 3,
+            relics: &relics,
+            potions: &[None, None],
+            enemies: &specs,
+            room: RoomKind::Monster,
+            asc: Ascension(10),
+            seed: 7,
+            gold: 0,
+        };
+        // The game's side of the fight, same seed.
+        let mut game = Combat::with_setup(&setup);
+        assert!(game.pending.is_some(), "the chip's choice is open at turn 1's start");
+        let start = json!({
+            "t": "start",
+            "encounter": "NIBBITS_WEAK",
+            "room": "Monster",
+            "ascension": 10,
+            "max_energy": 3,
+            "hp": 61,
+            "max_hp": 80,
+            "deck": deck.iter().map(|k| card_json(k.id, k.upgraded)).collect::<Vec<_>>(),
+            "relics": ["GAMBLING_CHIP"],
+            "potions": [null, null],
+            "opening": game.shuffle_log[0].iter().map(|&(id, up)| card_json(id, up)).collect::<Vec<_>>(),
+            "early": [],
+            "enemies": game.enemies.iter().map(|e| json!({
+                "id": slug(&format!("{:?}", e.monster.id)),
+                "hp": e.creature.hp,
+                "max_hp": e.creature.max_hp,
+            })).collect::<Vec<_>>(),
+        });
+        let mut r = Replayer::new(&start, None, ids, 7).unwrap();
+        assert!(r.combat().pending.is_some());
+
+        let hand: Vec<Value> = game.player.hand.iter().map(|k| card_json(k.id, k.upgraded)).collect();
+        let choice = json!({ "t": "choice", "card": null, "options": hand, "min": 0, "max": 5 });
+        assert_eq!(r.feed(&choice).unwrap(), Step::Decision);
+        assert!(r.at_decision());
+
+        // The pilot discards the first card on offer, then closes the
+        // selection. The mod logs each answer as a `picked` record.
+        let pick = (0..crate::encode::N_ACTIONS)
+            .find(|&i| crate::encode::decode(r.combat(), i) == Some(Action::Choose(0)))
+            .expect("the first option is a legal pick");
+        let cmd = command(r.combat(), pick).unwrap();
+        assert_eq!(cmd["cmd"], "pick");
+        let discarded = r.combat().player.hand[0].uid;
+        game.step(Action::Choose(0));
+        assert_eq!(r.feed(&json!({ "t": "picked", "card": cmd["card"] })).unwrap(), Step::Decision);
+        assert!(r.combat().player.discard.iter().any(|k| k.uid == discarded));
+        game.step(Action::Skip);
+        assert_eq!(r.feed(&json!({ "t": "picked", "card": null })).unwrap(), Step::Ok);
+        assert!(r.combat().pending.is_none());
+        assert_eq!(r.combat().player.hand.len(), 5, "one card drawn for the one discarded");
+
+        assert_eq!(r.feed(&json!({ "t": "turn_start", "turn": 1 })).unwrap(), Step::Ok);
+        assert_eq!(r.feed(&snapshot_of(&game)).unwrap(), Step::Ok, "a snapshot is held until the recorder goes quiet");
+        assert_eq!(r.flush().unwrap(), Step::Decision);
+        assert!(r.report().ok(), "{:?}", r.report().divergence);
+        assert_eq!(r.report().snapshots, 1);
     }
 }
 

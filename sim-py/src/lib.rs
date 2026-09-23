@@ -211,16 +211,28 @@ impl Advisor {
         let rec: Value = serde_json::from_str(line)
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("bad json: {e}")))?;
         match rec["t"].as_str().unwrap_or("") {
+            // A start record that carries the player's HP (written since
+            // 2026-09-23) builds the combat at once, so a choice turn 1's
+            // start opens (Gambling Chip) finds the sim waiting at it. An
+            // older one waits for the first snapshot, which carried the HP
+            // and the opening draw order instead.
             "start" => {
-                self.start = Some(rec);
                 self.inner = None;
-                return Ok("ok".into());
+                if rec["hp"].is_null() {
+                    self.start = Some(rec);
+                    return Ok("ok".into());
+                }
+                return Ok(match Replayer::new(&rec, None, self.ids.clone(), self.seed) {
+                    Ok(r) => {
+                        self.inner = Some(r);
+                        "ok".into()
+                    }
+                    Err(e) => format!("unsupported: {e}"),
+                });
             }
-            // The first snapshot carries the opening draw order and the
-            // player's HP, so the combat is built from it and the start.
             "snapshot" if self.inner.is_none() => {
                 let Some(start) = self.start.clone() else { return Ok("waiting".into()) };
-                match Replayer::new(&start, &rec, self.ids.clone(), self.seed) {
+                match Replayer::new(&start, Some(&rec), self.ids.clone(), self.seed) {
                     Ok(r) => self.inner = Some(r),
                     // Nothing about this fight is followable, so forget the
                     // start: later snapshots wait quietly for the next one.
@@ -492,8 +504,7 @@ fn encounters() -> Vec<(String, String, String)> {
 #[pyfunction]
 fn start_blocker(start: &str) -> PyResult<Option<String>> {
     let v: Value = serde_json::from_str(start).map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
-    // Only `hp` and `max_hp` are read from the snapshot, so an empty one does.
-    Ok(sim::gen::FightSetup::from_start(&v, &serde_json::json!({}), &Ids::new()).err())
+    Ok(sim::gen::FightSetup::from_start(&v, None, &Ids::new()).err())
 }
 
 /// What the sim knows about an encounter: each monster with the powers it

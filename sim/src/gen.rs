@@ -93,11 +93,11 @@ impl FightSetup {
         Combat::with_setup(&self.as_setup(seed))
     }
 
-    /// Read a recorder file's `start` record (and the first snapshot for
-    /// HP, which the start record does not carry). Relics the sim does not
-    /// know are dropped; anything else unknown is an error.
+    /// Read a recorder file's `start` record, and the first snapshot for
+    /// HP when the start record predates carrying it. Relics the sim does
+    /// not know are dropped; anything else unknown is an error.
     pub fn from_recording(text: &str, ids: &Ids) -> Result<Self, String> {
-        let mut start = None;
+        let mut start: Option<Value> = None;
         let mut first_snap = None;
         for line in text.lines().filter(|l| !l.trim().is_empty()) {
             let v: Value = serde_json::from_str(line).map_err(|e| format!("bad json: {e}"))?;
@@ -106,17 +106,24 @@ impl FightSetup {
                 Some("snapshot") if first_snap.is_none() => first_snap = Some(v),
                 _ => {}
             }
-            if start.is_some() && first_snap.is_some() {
+            if start.as_ref().is_some_and(|s| s["hp"].is_i64()) || (start.is_some() && first_snap.is_some()) {
                 break;
             }
         }
         let start = start.ok_or("no start record")?;
-        let snap = first_snap.ok_or("no snapshot")?;
-        Self::from_start(&start, &snap, ids)
+        if start["hp"].is_null() && first_snap.is_none() {
+            return Err("no snapshot".into());
+        }
+        Self::from_start(&start, first_snap.as_ref(), ids)
     }
 
-    /// The parsing shared with the replay harness.
-    pub fn from_start(start: &Value, first_snap: &Value, ids: &Ids) -> Result<Self, String> {
+    /// The parsing shared with the replay harness. The player's HP is in
+    /// the start record since 2026-09-23; before that only the first
+    /// snapshot showed it, after turn 1's start had healed or hurt.
+    pub fn from_start(start: &Value, first_snap: Option<&Value>, ids: &Ids) -> Result<Self, String> {
+        let hp_of = |key: &str| {
+            start[key].as_i64().or_else(|| first_snap.and_then(|s| s[key].as_i64())).unwrap_or(1) as i32
+        };
         let RunParts { deck, relics, mut potions, gold, max_energy, asc } = RunParts::of(start, ids)?;
         // The belt is logged after Petrified Toad added its rock, which the
         // sim adds again. Taking out the first rock and letting the Toad fill
@@ -146,8 +153,8 @@ impl FightSetup {
         };
         Ok(Self {
             deck,
-            hp: first_snap["hp"].as_i64().unwrap_or(1) as i32,
-            max_hp: first_snap["max_hp"].as_i64().unwrap_or(1) as i32,
+            hp: hp_of("hp"),
+            max_hp: hp_of("max_hp"),
             max_energy,
             relics,
             potions,
