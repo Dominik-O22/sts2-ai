@@ -37,9 +37,10 @@ leave it, and as it is, against every elite of the act and its boss:
 greedy fights, the same enemies for every option, 512 per encounter per
 option (256 when there are more than four). A deck that already wins 95%
 of those leaves every option tied, so then the next act's elites and
-bosses join, at full HP. It prints the options best first against keeping
-the deck, with the win rate per boss and the worst elite. Values closer than about 0.03 are a tie, which many upgrades
-are. Picks it cannot price, a transform or an enchant, it names and
+bosses join, at full HP. It prints the options best first, each with its
+value against keeping the deck and its win rate, and marks a tie when an
+option is within 0.03 of keeping the deck, as many upgrades are. Picks
+it cannot price, a transform or an enchant, it names and
 leaves alone. It judges the deck as it stands, not the picks ahead, and
 the policy plays cards it was trained on: a card the generator rarely
 hands out may be undervalued.

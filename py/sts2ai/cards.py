@@ -20,8 +20,8 @@ potions kept) against keeping the deck as it is. A deck that already wins
 bosses are added, fought at full HP. Every option faces the same enemies. Elites are fought at the run's
 current HP, bosses at full HP (a rest site comes first). The score looks at
 the deck as it stands: it does not plan for the picks and upgrades ahead.
-At 512 fights per encounter two options closer than about 0.03 in value
-are a tie: that is how far a run with another seed moves them.
+At 512 fights per encounter an option within `TIE` of keeping the deck is
+marked a tie: that is how far a run with another seed moves it.
 """
 
 from __future__ import annotations
@@ -29,7 +29,6 @@ from __future__ import annotations
 import argparse
 import json
 import time
-from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -76,7 +75,6 @@ class Verdict:
     change: Change | None
     value: float
     win: float
-    win_by_encounter: dict[str, float]
 
 
 def upcoming(act: str, bosses: list[str] | None = None) -> list[tuple[str, int, str]]:
@@ -132,15 +130,7 @@ def fights(policy: Policy, device: torch.device, start: dict, max_hp: int, encou
 
 
 def verdict(change: Change | None, ends: list[End]) -> Verdict:
-    by_enc: dict[str, list[bool]] = defaultdict(list)
-    for e in ends:
-        by_enc[e.encounter].append(e.won)
-    return Verdict(
-        change=change,
-        value=float(np.mean([e.reward for e in ends])),
-        win=float(np.mean([e.won for e in ends])),
-        win_by_encounter={k: float(np.mean(v)) for k, v in by_enc.items()},
-    )
+    return Verdict(change, float(np.mean([e.reward for e in ends])), float(np.mean([e.won for e in ends])))
 
 
 def rank(
@@ -166,20 +156,21 @@ def rank(
     return sorted(verdicts, key=lambda v: -v.value), acts
 
 
+# How far a rerun with another seed moves an option's value at 512 fights
+# per encounter: closer to keeping the deck than this is a tie.
+TIE = 0.03
+
+
 def describe(verdicts: list[Verdict]) -> str:
-    """The ranking as text, each option against keeping the deck."""
+    """The ranking as text: each option's value against keeping the deck,
+    and its win rate."""
     keep = next(v for v in verdicts if v.change is None)
     lines = []
     for v in verdicts:
         name = "keep deck" if v.change is None else v.change.label()
-        bosses = {k: w for k, w in v.win_by_encounter.items() if k.endswith("Boss")}
-        elites = {k: w for k, w in v.win_by_encounter.items() if not k.endswith("Boss")}
-        worst = min(elites, key=elites.get) if elites else None
-        lines.append(
-            f"{name:32s} value {v.value:+.3f} ({v.value - keep.value:+.3f})  wins {v.win:.0%}  "
-            + "  ".join(f"{k.removesuffix('Boss')} {w:.0%}" for k, w in sorted(bosses.items()))
-            + (f"  worst elite {worst.removesuffix('Elite')} {elites[worst]:.0%}" if worst else "")
-        )
+        gain = v.value - keep.value
+        tie = "  (tie)" if v.change is not None and abs(gain) < TIE else ""
+        lines.append(f"{name:28s} {gain:+.2f}  wins {v.win:.0%}{tie}")
     return "\n".join(lines)
 
 
