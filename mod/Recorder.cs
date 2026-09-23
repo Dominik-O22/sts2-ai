@@ -33,6 +33,8 @@ using MegaCrit.Sts2.Core.Nodes.Combat;
 using MegaCrit.Sts2.Core.Nodes.Rooms;
 using MegaCrit.Sts2.Core.Nodes.Screens.CardSelection;
 using MegaCrit.Sts2.Core.Nodes.Screens.Overlays;
+using MegaCrit.Sts2.Core.CardSelection;
+using MegaCrit.Sts2.Core.Entities.Merchant;
 using MegaCrit.Sts2.Core.Rooms;
 using MegaCrit.Sts2.Core.Runs;
 using MegaCrit.Sts2.Core.ValueProps;
@@ -184,6 +186,8 @@ public static class Recorder
                 ["bosses"] = new[] { run.Act.BossEncounter, run.Act.SecondBossEncounter }
                     .Where(b => b != null).Select(b => b!.Id.Entry).ToList(),
                 ["card_reward"] = CardRewardOptions(),
+                ["deck_choice"] = CombatManager.Instance.IsInProgress ? null : DeckChoice(),
+                ["shop"] = run.CurrentRoom is MerchantRoom room ? Shop(room.GetLocalInventory()) : null,
             };
         string json = JsonSerializer.Serialize(state, Json);
         if (json == _lastRunState) return;
@@ -362,6 +366,37 @@ public static class Recorder
         NOverlayStack.Instance?.Peek() is NCardRewardSelectionScreen screen && RewardOptions?.GetValue(screen) is IReadOnlyList<CardCreationResult> options
             ? options.Select(o => CardRef(o.Card)).ToList()
             : null;
+
+    private static readonly FieldInfo? GridCards =
+        typeof(NCardGridSelectionScreen).GetField("_cards", BindingFlags.NonPublic | BindingFlags.Instance);
+
+    /// A pick from the deck outside combat (rest site upgrade, shop or event
+    /// removal, transform, enchant) while its grid is the top overlay:
+    /// the prompt's key (`TO_UPGRADE`, `TO_REMOVE`, ...) and the cards on
+    /// offer, else null. Each grid screen keeps its prefs privately.
+    private static Dictionary<string, object?>? DeckChoice()
+    {
+        if (NOverlayStack.Instance?.Peek() is not NCardGridSelectionScreen screen) return null;
+        if (GridCards?.GetValue(screen) is not IReadOnlyList<CardModel> cards) return null;
+        var prefs = screen.GetType().GetField("_prefs", BindingFlags.NonPublic | BindingFlags.Instance)?.GetValue(screen);
+        return new()
+        {
+            ["prompt"] = (prefs as CardSelectorPrefs?)?.Prompt.LocEntryKey,
+            ["options"] = cards.Select(CardRef).ToList(),
+        };
+    }
+
+    /// The local merchant's cards for sale, with their prices, and what a
+    /// removal costs (null once used).
+    private static Dictionary<string, object?> Shop(MerchantInventory inv) => new()
+    {
+        ["cards"] = inv.CardEntries.Where(e => e.IsStocked).Select(e => new Dictionary<string, object?>
+        {
+            ["card"] = CardRef(e.CreationResult!.Card),
+            ["cost"] = e.Cost,
+        }).ToList(),
+        ["removal_cost"] = inv.CardRemovalEntry is { IsStocked: true } r ? r.Cost : null,
+    };
 
     private static Dictionary<string, object?> CardRef(CardModel c)
     {

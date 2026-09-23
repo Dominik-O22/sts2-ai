@@ -20,22 +20,28 @@ them. When the sim cannot follow a fight (a divergence, or an encounter it
 does not model) it says so once and leaves the fight to you. Card choices
 in that fight go to the grid.
 
-## Card rewards
+## Card rewards, upgrades, removals, shops
 
 ```
 uv run python -m sts2ai.cards runs/<run>/latest.pt
 ```
 
-A second process, alongside the player or without it, ranks each card
-reward while its screen is open. The mod writes the offered cards into
-`sts2ai/run.json` (`card_reward`, with the act, the bosses the map shows
-and max energy), and `sts2ai.cards` plays the deck with each card added,
-and without one, against every elite of the act and its boss: 512 greedy fights per encounter
-per option, the same enemies for every option. It prints the options best
-first, each against skipping, with the win rate and the worst encounter.
-Values closer than about 0.03 are a tie. It judges the deck as it stands,
-not the picks ahead, and the policy plays cards it was trained on: a card
-the generator rarely hands out may be undervalued.
+A second process, alongside the player or without it, ranks every deck
+choice the game puts up. The mod writes what is on offer into
+`sts2ai/run.json`: the cards on a reward screen (`card_reward`), a pick
+from the deck outside combat with its prompt (`deck_choice`: `TO_UPGRADE`
+at a rest site or event, `TO_REMOVE` at a shop or event), and a shop's
+cards with their prices (`shop`), along with the act, the bosses the map
+shows and max energy. `sts2ai.cards` plays the deck as each option would
+leave it, and as it is, against every elite of the act and its boss:
+greedy fights, the same enemies for every option, 512 per encounter per
+option (256 when there are more than four). It prints the options best
+first against keeping the deck, with the win rate and the worst
+encounter. Values closer than about 0.03 are a tie, which many upgrades
+are. Picks it cannot price, a transform or an enchant, it names and
+leaves alone. It judges the deck as it stands, not the picks ahead, and
+the policy plays cards it was trained on: a card the generator rarely
+hands out may be undervalued.
 
 ## Protocol
 

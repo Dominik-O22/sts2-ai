@@ -1,17 +1,20 @@
-"""Card reward advice: which offered card, or none, makes the deck fight
-best, found by playing the act's elites and bosses with the trained policy.
+"""Deck advice: which card to take, upgrade, remove or buy, found by
+playing the act's elites and boss with the trained policy.
 
-    uv run python -m sts2ai.cards runs/<run>/latest.pt              # watch the game, advise each reward
+    uv run python -m sts2ai.cards runs/<run>/latest.pt              # watch the game, advise each choice
     uv run python -m sts2ai.cards runs/<run>/latest.pt --recording FILE --offer INFLAME,SHRUG_IT_OFF
 
-Watching, it polls the mod's `run.json`, which carries the cards on the
-reward screen while it is open (`card_reward`), and prints a ranking for
-each new reward. With `--recording`, the run is a recorded fight's start.
+Watching, it polls the mod's `run.json` and prints a ranking for each new
+card reward (`card_reward`), deck pick outside combat (`deck_choice`: rest
+site and event upgrades, shop and event removals) and shop (`shop`, the
+cards for sale with their prices). Picks it cannot price (a transform is
+random) are named and left alone. With `--recording`, the run is a
+recorded fight's start and the options are cards to add.
 
-For each option the deck (with the card added) plays `repeats` fights
-against every elite of the act and the boss the map shows, greedy, and the options are ranked
-by the mean fight reward (the training reward: a win, plus HP and potions
-kept). Every option faces the same enemies. Elites are fought at the run's
+For each option the changed deck plays `repeats` fights against every
+elite of the act and the boss the map shows, greedy, and the options are
+ranked by the mean fight reward (the training reward: a win, plus HP and
+potions kept) against keeping the deck as it is. Every option faces the same enemies. Elites are fought at the run's
 current HP, bosses at full HP (a rest site comes first). The score looks at
 the deck as it stands: it does not plan for the picks and upgrades ahead.
 At 512 fights per encounter two options closer than about 0.03 in value
@@ -26,6 +29,7 @@ import time
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 import torch
@@ -41,10 +45,32 @@ ELITE_FLOOR = 10
 
 
 @dataclass(frozen=True)
-class Verdict:
-    """One option's fights: `card` is None for skipping the reward."""
+class Change:
+    """One way the deck can change. `card` is as the recorder writes it
+    (`id`, `up`, maybe `ench`); for `upgrade` and `remove` it is a card in
+    the deck, and the first copy of it changes."""
 
-    card: dict | None
+    kind: Literal["add", "upgrade", "remove"]
+    card: dict
+    note: str = ""
+
+    def apply(self, deck: list[dict]) -> list[dict]:
+        if self.kind == "add":
+            return deck + [self.card]
+        i = deck.index(self.card)
+        rest = deck[:i] + deck[i + 1 :]
+        return rest if self.kind == "remove" else rest[:i] + [{**self.card, "up": True}] + rest[i:]
+
+    def label(self) -> str:
+        name = self.card["id"] + ("+" if self.card.get("up") else "")
+        return f"{self.kind} {name}{self.note}"
+
+
+@dataclass(frozen=True)
+class Verdict:
+    """One option's fights: `change` is None for keeping the deck."""
+
+    change: Change | None
     value: float
     win: float
     win_by_encounter: dict[str, float]
@@ -88,19 +114,21 @@ def fights(policy: Policy, device: torch.device, start: dict, hp: int, max_hp: i
 
 
 def rank(
-    policy: Policy, device: torch.device, start: dict, hp: int, max_hp: int, act: str, options: list[dict], repeats: int = 512, seed: int = 1
+    policy: Policy, device: torch.device, start: dict, hp: int, max_hp: int, act: str, changes: list[Change], repeats: int = 512, seed: int = 1
 ) -> list[Verdict]:
-    """Every option (and skipping), best first."""
+    """Every change, and keeping the deck, best first. Changes that do the
+    same thing (upgrading one of five Strikes) are tried once."""
+    unique = list({json.dumps([c.kind, c.card], sort_keys=True): c for c in changes}.values())
     verdicts = []
-    for card in [None, *options]:
-        run = {**start, "deck": start["deck"] + ([card] if card else [])}
+    for change in [None, *unique]:
+        run = {**start, "deck": change.apply(start["deck"]) if change else start["deck"]}
         ends = fights(policy, device, run, hp, max_hp, act, repeats, seed)
         by_enc: dict[str, list[bool]] = defaultdict(list)
         for e in ends:
             by_enc[e.encounter].append(e.won)
         verdicts.append(
             Verdict(
-                card=card,
+                change=change,
                 value=float(np.mean([e.reward for e in ends])),
                 win=float(np.mean([e.won for e in ends])),
                 win_by_encounter={k: float(np.mean(v)) for k, v in by_enc.items()},
@@ -110,34 +138,56 @@ def rank(
 
 
 def describe(verdicts: list[Verdict]) -> str:
-    """The ranking as text, each option against skipping."""
-    skip = next(v for v in verdicts if v.card is None)
+    """The ranking as text, each option against keeping the deck."""
+    keep = next(v for v in verdicts if v.change is None)
     lines = []
     for v in verdicts:
-        name = "skip" if v.card is None else v.card["id"] + ("+" if v.card.get("up") else "")
+        name = "keep deck" if v.change is None else v.change.label()
         worst = min(v.win_by_encounter, key=v.win_by_encounter.get)
         lines.append(
-            f"{name:24s} value {v.value:+.3f} ({v.value - skip.value:+.3f} vs skip)  wins {v.win:.0%}  worst {worst} {v.win_by_encounter[worst]:.0%}"
+            f"{name:32s} value {v.value:+.3f} ({v.value - keep.value:+.3f})  wins {v.win:.0%}  worst {worst} {v.win_by_encounter[worst]:.0%}"
         )
     return "\n".join(lines)
 
 
+def choices(run: dict) -> dict[str, list[Change] | str]:
+    """What `run.json` offers right now, by kind of choice: the changes to
+    price, or why a choice is not priced."""
+    out: dict[str, list[Change] | str] = {}
+    if run.get("card_reward"):
+        out["card reward"] = [Change("add", c) for c in run["card_reward"]]
+    if pick := run.get("deck_choice"):
+        kind = {"TO_UPGRADE": "upgrade", "TO_REMOVE": "remove"}.get(pick.get("prompt"))
+        out[f"deck pick {pick.get('prompt')}"] = [Change(kind, c) for c in pick["options"]] if kind else "not priced"
+    if shop := run.get("shop"):
+        if shop["cards"]:
+            out["shop"] = [Change("add", e["card"], f" ({e['cost']}g)") for e in shop["cards"]]
+    return out
+
+
 def watch(policy: Policy, device: torch.device, repeats: int, poll: float = 0.5) -> None:
-    """Advise every card reward the game shows, until interrupted."""
-    print(f"watching {RUN_STATE} for card rewards")
-    last = None
+    """Advise every choice the game shows, until interrupted."""
+    print(f"watching {RUN_STATE} for card rewards, deck picks and shops")
+    seen: dict[str, str] = {}
     while True:
         try:
             run = json.loads(RUN_STATE.read_text())
         except (FileNotFoundError, json.JSONDecodeError):
             run = {}
-        offer = run.get("card_reward")
-        if offer and offer != last:
-            last = offer
-            print(f"\n{run['act']}, {run['hp']}/{run['max_hp']} HP, {len(run['deck'])} cards")
-            print(describe(rank(policy, device, run, run["hp"], run["max_hp"], run["act"], offer, repeats)), flush=True)
-        elif not offer:
-            last = None
+        now = choices(run) if run.get("active") else {}
+        for what, changes in now.items():
+            key = json.dumps(changes if isinstance(changes, str) else [[c.kind, c.card] for c in changes])
+            if seen.get(what) == key:
+                continue
+            seen[what] = key
+            print(f"\n{what}: {run['act']}, {run['hp']}/{run['max_hp']} HP, {len(run['deck'])} cards")
+            if isinstance(changes, str):
+                print(changes, flush=True)
+                continue
+            n = repeats if len(changes) <= 4 else repeats // 2
+            print(describe(rank(policy, device, run, run["hp"], run["max_hp"], run["act"], changes, n)), flush=True)
+        for what in set(seen) - set(now):
+            del seen[what]
         time.sleep(poll)
 
 
@@ -158,9 +208,9 @@ def main() -> None:
     start = next(r for r in lines if r["t"] == "start")
     snap = next(r for r in lines if r["t"] == "snapshot")
     act = next(a for name, a, _ in _sim.encounters() if name == start["encounter"])
-    options = [{"id": c.rstrip("+"), "up": c.endswith("+")} for c in args.offer.split(",")]
+    changes = [Change("add", {"id": c.rstrip("+"), "up": c.endswith("+")}) for c in args.offer.split(",")]
     print(f"{act}, {snap['hp']}/{snap['max_hp']} HP, {len(start['deck'])} cards")
-    print(describe(rank(policy, device, start, snap["hp"], snap["max_hp"], act, options, args.repeats)))
+    print(describe(rank(policy, device, start, snap["hp"], snap["max_hp"], act, changes, args.repeats)))
 
 
 if __name__ == "__main__":
