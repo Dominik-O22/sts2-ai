@@ -4,6 +4,7 @@
 pub mod card;
 pub mod combat;
 pub mod effect;
+pub mod effects;
 pub mod enchant;
 pub mod encode;
 pub mod encounter;

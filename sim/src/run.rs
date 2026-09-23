@@ -13,7 +13,7 @@
 
 use crate::encounter::{Act, Encounter};
 use crate::game_rng::{GameRng, RunRngs, RunStream};
-use crate::map::{PointId, PointType};
+use crate::map::{ActMap, PointId, PointType};
 use crate::plan::{RunPlan, Unlocks};
 use crate::rewards::{CardOdds, PotionOdds};
 use crate::types::{Ascension, AscensionLevel};
@@ -132,12 +132,6 @@ pub struct Enchant {
 impl DeckCard {
     pub fn new(id: &str) -> Self {
         DeckCard { id: id.to_string(), upgraded: false, enchantment: None }
-    }
-
-    /// `CardModel.IsRemovable`: not Eternal, which Tezcatara's Ember makes
-    /// a card.
-    pub fn removable(&self) -> bool {
-        self.enchantment.as_ref().is_none_or(|e| e.id != "TEZCATARAS_EMBER")
     }
 
     fn basic(&self) -> bool {
@@ -281,12 +275,25 @@ impl RunState {
         self.unknown_odds.roll(allowed, self.rngs.run(RunStream::UnknownMapPoint))
     }
 
-    /// `EnterMapPointInternal` up to entering the room: the room type the
-    /// point resolves to, the room `CreateRoom` makes of it (pulling the
-    /// act's next encounter or event), then `MarkRoomVisited`. The floor
-    /// counts the point once the room exists, so an event's `IsAllowed`
-    /// sees the floors before it.
-    pub fn enter(&mut self, point: PointType, shop_banned: bool) -> Room {
+    /// `RunManager.EnterMapCoord` onto `point` of the act's `map`: its shop
+    /// blacklist (`BuildRoomTypeBlacklist`: the last room was a shop, or
+    /// every child of the point is one), then `enter_point`.
+    pub fn enter(&mut self, map: &ActMap, point: PointId) -> Room {
+        let children = &map[point].children;
+        let all_shops = !children.is_empty() && children.iter().all(|c| map[c].kind == PointType::Shop);
+        let banned = self.room == Some(Room::Shop) || all_shops;
+        self.point = Some(point);
+        self.enter_point(map[point].kind, banned)
+    }
+
+    /// `EnterMapPointInternal` into a point of type `point`: the room type
+    /// it resolves to, the room `CreateRoom` makes of it (pulling the act's
+    /// next encounter or event), `MarkRoomVisited`, then what entering the
+    /// room does (`room_entered`). The floor counts the point once the room
+    /// exists, so an event's `IsAllowed` sees the floors before it.
+    /// `shop_banned` is the point's shop blacklist; the history check,
+    /// which does not know the point, works it out.
+    pub fn enter_point(&mut self, point: PointType, shop_banned: bool) -> Room {
         let kind = match point {
             PointType::Unknown => self.roll_unknown(shop_banned),
             PointType::Shop => RoomType::Shop,
@@ -322,6 +329,8 @@ impl RunState {
             RoomType::Boss => visited.bosses += 1,
             _ => {}
         }
+        self.room = Some(room);
+        self.room_entered(room, point == PointType::Unknown);
         room
     }
 

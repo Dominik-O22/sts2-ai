@@ -22,7 +22,8 @@ use crate::encounter::{Act, Encounter};
 use crate::map::{ActMap, PointId, PointType};
 use crate::plan::Unlocks;
 use crate::replay::slug;
-use crate::rewards::{Offer, Offered, UNPORTED_RELICS};
+use crate::effects::{Offered, RestOption};
+use crate::rewards::{Offer, UNPORTED_RELICS};
 use crate::run::{DeckCard, Enchant, Room, RoomType, RunState};
 use crate::types::Ascension;
 
@@ -139,7 +140,7 @@ pub fn check(run: &Value) -> Report {
             let rooms = floor["rooms"].as_array().unwrap();
             previous_had_shop = rooms.iter().any(|r| r["room_type"] == "shop");
 
-            let room = state.enter(point, banned.first().copied().unwrap_or(false));
+            let room = state.enter_point(point, banned.first().copied().unwrap_or(false));
             let recorded = &rooms[0];
             let want = (recorded["room_type"].as_str().unwrap(), recorded["model_id"].as_str().map(str::to_string));
             let got = (room_type_name(room.kind()), model_id(room));
@@ -300,6 +301,8 @@ fn follow(state: &mut RunState, room: Room, rooms: &[Value], stats: &Value) -> R
                         took.extend(relics);
                     }
                     Offered::Potions(potions) => potions_offered.extend(potions),
+                    Offered::Unported(relic) if UNPORTED_RELICS.contains(&relic.as_str()) => return Err(format!("{relic} is not ported")),
+                    Offered::Unported(_) | Offered::Pick(_) => {}
                     other => return Err(format!("event {name} offered {other:?}")),
                 }
             }
@@ -337,13 +340,16 @@ fn follow(state: &mut RunState, room: Room, rooms: &[Value], stats: &Value) -> R
         Room::RestSite => {
             let options: Vec<&str> = stats["rest_site_choices"].as_array().map_or(Vec::new(), |c| c.iter().filter_map(Value::as_str).collect());
             for option in options {
-                for offered in state.rest_option(option)? {
+                let option = RestOption::from_id(option).ok_or_else(|| format!("rest site option {option} is not ported"))?;
+                for offered in state.rest(option) {
                     match offered {
                         Offered::Potions(potions) => potions_offered.extend(potions),
                         Offered::Took(relics) => {
                             relics_offered.extend(relics.clone());
                             took.extend(relics);
                         }
+                        Offered::Unported(relic) if UNPORTED_RELICS.contains(&relic.as_str()) => return Err(format!("{relic} is not ported")),
+                        Offered::Unported(_) | Offered::Pick(_) => {}
                         other => return Err(format!("rest site offered {other:?}")),
                     }
                 }
@@ -358,9 +364,12 @@ fn follow(state: &mut RunState, room: Room, rooms: &[Value], stats: &Value) -> R
             took.remove(i);
             continue;
         }
-        for offered in state.obtain(relic)? {
+        if UNPORTED_RELICS.contains(&relic.as_str()) {
+            return Err(format!("{relic} is not ported"));
+        }
+        for offered in state.obtain(relic) {
             match offered {
-                Offered::Cards(cards) => cards_offered.extend(cards.iter().map(offer_text)),
+                Offered::Cards(cards) | Offered::Gained(cards) => cards_offered.extend(cards.iter().map(offer_text)),
                 Offered::Relics(relics) => relics_offered.extend(relics),
                 Offered::Took(relics) => {
                     relics_offered.extend(relics.clone());
@@ -368,6 +377,8 @@ fn follow(state: &mut RunState, room: Room, rooms: &[Value], stats: &Value) -> R
                 }
                 Offered::Bundles(bundles) => cards_offered.extend(bundles.iter().flatten().map(offer_text)),
                 Offered::Potions(potions) => potions_offered.extend(potions),
+                Offered::Unported(relic) if UNPORTED_RELICS.contains(&relic.as_str()) => return Err(format!("{relic} is not ported")),
+                Offered::Unported(_) | Offered::Pick(_) => {}
             }
         }
     }

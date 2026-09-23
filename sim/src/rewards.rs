@@ -520,24 +520,6 @@ impl RunState {
     }
 }
 
-/// What picking a relic up (`AfterObtained`) put in front of the player,
-/// or took for them.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Offered {
-    /// Cards to choose one of (Hefty Tablet), or the one taken (Arcane
-    /// Scroll).
-    Cards(Vec<Offer>),
-    /// Relics offered as rewards to take (Neow's Bones, Small Capsule).
-    Relics(Vec<String>),
-    /// A relic handed over without a choice (Large Capsule, an event),
-    /// already obtained.
-    Took(Vec<String>),
-    /// Bundles of cards to choose one of (Scroll Boxes).
-    Bundles(Vec<Vec<Offer>>),
-    /// Potions offered as rewards.
-    Potions(Vec<String>),
-}
-
 /// The relics whose pickup or hooks draw on the Rewards stream (or add
 /// rewards) in ways not ported yet. Holding or taking one ends what the
 /// port can follow.
@@ -548,100 +530,7 @@ pub const UNPORTED_RELICS: &[&str] = &[
     "VAKUU_CARD_SELECTOR", "WHITE_STAR", "WING_CHARM", "WONGOS_MYSTERY_TICKET",
 ];
 
-/// `Neow.AllPossibleOptions`' relics in order, as Neow's Bones lists them
-/// (`GetValidRelics`): itself left out, and Massive Scroll, which
-/// `IsAllowed` keeps to multiplayer. Kaleidoscope and Scroll Boxes pass
-/// their `IsAllowedAtNeow` on a fully unlocked profile.
-const NEOW_RELICS: &[&str] = &[
-    "CURSED_PEARL", "HEFTY_TABLET", "LARGE_CAPSULE", "LEAFY_POULTICE", "PRECARIOUS_SHEARS", "SILKEN_TRESS",
-    "SILVER_CRUCIBLE", "ARCANE_SCROLL", "BOOMING_CONCH", "FISHING_ROD", "GOLDEN_PEARL", "KALEIDOSCOPE",
-    "LEAD_PAPERWEIGHT", "LOST_COFFER", "NEOWS_TORMENT", "NEW_LEAF", "PHIAL_HOLSTER", "PRECISE_SCISSORS",
-    "SCROLL_BOXES", "WINGED_BOOTS", "LAVA_ROCK", "NEOWS_TALISMAN", "NUTRITIOUS_OYSTER", "POMANDER", "SMALL_CAPSULE",
-    "STONE_HUMIDIFIER",
-];
-
 impl RunState {
-    /// `RelicCmd.Obtain`, then the relic's `AfterObtained` as far as it
-    /// draws on the Rewards stream or pulls from a bag. An error names a
-    /// relic whose pickup is not ported.
-    pub fn obtain(&mut self, id: &str) -> Result<Vec<Offered>, String> {
-        if UNPORTED_RELICS.contains(&id) {
-            return Err(format!("{id} is not ported"));
-        }
-        self.obtain_relic(id);
-        let mut offered = Vec::new();
-        match id {
-            // `HeftyTablet`, `ArcaneScroll`: rare cards, uniform odds, no
-            // upgrade roll.
-            "HEFTY_TABLET" | "ARCANE_SCROLL" => {
-                let count = if id == "HEFTY_TABLET" { 3 } else { 1 };
-                let mut odds = self.card_odds;
-                offered.push(Offered::Cards(create_cards(count, &CardOptions::uniform(Rarity::Rare), &mut odds, &mut self.roll_ctx())));
-            }
-            // `LargeCapsule`: two relics off the front of the bag, each
-            // obtained (and picked up) before the next is pulled.
-            "LARGE_CAPSULE" => {
-                for _ in 0..2 {
-                    let relic = self.relic_reward().game_id();
-                    offered.extend(self.take(relic)?);
-                }
-            }
-            // `SmallCapsule`: a relic reward.
-            "SMALL_CAPSULE" => {
-                let relic = self.relic_reward().game_id();
-                offered.push(Offered::Relics(vec![relic]));
-            }
-            // `NeowsBones`: two of Neow's other relics, shuffled on the
-            // Rewards stream, as rewards. Its curse draws on Niche.
-            "NEOWS_BONES" => {
-                let mut relics: Vec<&str> = NEOW_RELICS.to_vec();
-                self.rngs.player(PlayerStream::Rewards).shuffle(&mut relics);
-                offered.push(Offered::Relics(relics[..2].iter().map(|r| r.to_string()).collect()));
-            }
-            "SCROLL_BOXES" => {
-                let bundles = self.scroll_boxes();
-                offered.push(Offered::Bundles(bundles));
-            }
-            _ => {}
-        }
-        Ok(offered)
-    }
-
-    /// A relic handed over without a choice: obtained, with what its pickup
-    /// offered after it.
-    pub fn take(&mut self, relic: String) -> Result<Vec<Offered>, String> {
-        let pickup = self.obtain(&relic)?;
-        Ok([Offered::Took(vec![relic])].into_iter().chain(pickup).collect())
-    }
-
-    /// `ScrollBoxes.GenerateRandomBundles` for the Ironclad: two bundles of
-    /// two commons and an uncommon, no card in both.
-    fn scroll_boxes(&mut self) -> Vec<Vec<Offer>> {
-        let of = |rarity: Rarity| -> Vec<&'static PoolCard> {
-            IRONCLAD_CARDS.iter().filter(|c| c.rarity == rarity && !c.multiplayer_only).collect()
-        };
-        let (commons, uncommons) = (of(Rarity::Common), of(Rarity::Uncommon));
-        let rng = self.rngs.player(PlayerStream::Rewards);
-        let mut used: Vec<&str> = Vec::new();
-        let mut bundles = Vec::new();
-        for _ in 0..2 {
-            let mut bundle = Vec::new();
-            let mut left: Vec<&PoolCard> = commons.iter().copied().filter(|c| !used.contains(&c.id)).collect();
-            for _ in 0..2 {
-                let i = rng.next_int_in(0, left.len() as i32) as usize;
-                let card = left.remove(i);
-                used.push(card.id);
-                bundle.push(Offer { id: card.id, upgraded: false });
-            }
-            let items: Vec<&PoolCard> = uncommons.iter().copied().filter(|c| !used.contains(&c.id)).collect();
-            let card = *rng.pick(&items).expect("an uncommon");
-            used.push(card.id);
-            bundle.push(Offer { id: card.id, upgraded: false });
-            bundles.push(bundle);
-        }
-        bundles
-    }
-
     /// A treasure room's chest (`OneOffSynchronizer.DoTreasureRoomRewards`,
     /// `TreasureRoomRelicSynchronizer.BeginRelicPicking`): gold on the
     /// Rewards stream, three quarters of it at Poverty, and a relic off the

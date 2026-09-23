@@ -1,6 +1,5 @@
-//! What an event's or a rest site's chosen option draws on the player's
-//! Rewards stream or pulls from a grab bag (`Models/Events/<Name>.cs`,
-//! `Entities/RestSite/*RestSiteOption.cs`). An event's own choices
+//! What an event's chosen option draws on the player's Rewards stream or
+//! pulls from a grab bag (`Models/Events/<Name>.cs`). An event's own choices
 //! (its variables, which option does what) draw on its own stream and are
 //! not here; what the option gives the player (cards, relics, gold) is the
 //! caller's to read off the record.
@@ -12,7 +11,8 @@ use crate::pools::{PoolCard, PoolPotion, PotionRarity, Rarity, COLORLESS_CARDS, 
 use crate::types::{CardType, RelicRarity};
 use crate::game_rng::PlayerStream;
 use crate::plan::BagRelic;
-use crate::rewards::{create_cards, create_potion, CardOptions, OddsType, Offer, Offered, Pulled};
+use crate::effects::Offered;
+use crate::rewards::{create_cards, create_potion, CardOptions, OddsType, Offer, Pulled};
 use crate::run::RunState;
 
 /// Events none of whose options draw on the Rewards stream or pull from a
@@ -54,7 +54,7 @@ impl RunState {
             // the bag, taken.
             ("ThisOrThat", "ORNATE") | ("UnrestSite", "KILL") => {
                 let relic = self.relic_reward().game_id();
-                self.take(relic)?
+                self.take(relic)
             }
             ("ThisOrThat", "PLAIN") | ("UnrestSite", "REST") => Vec::new(),
             // `WhisperingHollow.Gold`: two potion rewards; `Hug` transforms
@@ -87,9 +87,9 @@ impl RunState {
                 match first {
                     "BARGAIN_BIN" => {
                         let relic = self.pull_for_shop(RelicRarity::Common).game_id();
-                        self.take(relic)?
+                        self.take(relic)
                     }
-                    "FEATURED_ITEM" => self.take(featured)?,
+                    "FEATURED_ITEM" => self.take(featured),
                     _ => Vec::new(),
                 }
             }
@@ -105,14 +105,14 @@ impl RunState {
             }
             // `DenseVegetation`: resting (`MimicRestSiteHeal`) leads to a
             // fight, whose rewards are a monster room's.
-            ("DenseVegetation", "REST") => self.heal_rewards(),
+            ("DenseVegetation", "REST") => self.rest_heal(),
             ("DenseVegetation", "TRUDGE_ON") => Vec::new(),
             // `RelicTrader`: three relics off the front of the bag, one per
             // trade offered (`NewRelics`), the chosen one taken.
             ("RelicTrader", "TOP" | "MIDDLE" | "BOTTOM") => {
                 let relics: Vec<String> = (0..3).map(|_| self.relic_reward().game_id()).collect();
                 let i = ["TOP", "MIDDLE", "BOTTOM"].iter().position(|&o| o == first).expect("a trade");
-                self.take(relics[i].clone())?
+                self.take(relics[i].clone())
             }
             // `Trial`: the defendant is the event's roll; the verdict decides.
             ("Trial", "ACCEPT") => match last {
@@ -121,7 +121,7 @@ impl RunState {
                     let mut offered = Vec::new();
                     for _ in 0..2 {
                         let relic = self.relic_reward().game_id();
-                        offered.extend(self.take(relic)?);
+                        offered.extend(self.take(relic));
                     }
                     offered
                 }
@@ -147,32 +147,6 @@ impl RunState {
             let cards: Vec<&PoolCard> = IRONCLAD_CARDS.iter().filter(|c| c.rarity == Rarity::Ancient && c.id != "BREAK").collect();
             self.rewards().pick(&cards);
         }
-    }
-
-    /// A rest site option's draws (`OptionId`). Digging (Shovel) takes a
-    /// relic off the front of the bag; the other options besides resting
-    /// draw nothing.
-    pub fn rest_option(&mut self, option: &str) -> Result<Vec<Offered>, String> {
-        match option {
-            "HEAL" => Ok(self.heal_rewards()),
-            "DIG" => {
-                let relic = self.relic_reward().game_id();
-                self.take(relic)
-            }
-            "SMITH" | "LIFT" | "COOK" | "CLONE" | "MEND" | "KINDLE" | "HATCH" => Ok(Vec::new()),
-            _ => Err(format!("rest site option {option} is not ported")),
-        }
-    }
-
-    /// The rewards a rest heals with, real or mimicked
-    /// (`Hook.ModifyRestSiteHealRewards`): Tiny Mailbox's two potions.
-    /// Dream Catcher's card reward is not ported (`UNPORTED_RELICS`).
-    fn heal_rewards(&mut self) -> Vec<Offered> {
-        if !self.has_relic("TINY_MAILBOX") {
-            return Vec::new();
-        }
-        let potions = (0..2).map(|_| create_potion(self.rewards()).to_string()).collect();
-        vec![Offered::Potions(potions)]
     }
 
     /// `RelicFactory.PullNextRelicFromFront` for a rarity, of the relics a

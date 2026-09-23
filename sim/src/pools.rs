@@ -11,7 +11,9 @@
 //! be offered; `sim_card`, `sim_potion` and `sim_relic` map to the sim's
 //! where it has one.
 
+use std::collections::HashMap;
 use std::fmt::Write;
+use std::sync::OnceLock;
 
 use crate::ids::{CardId, ALL_CARDS};
 use crate::potion::{PotionId, ALL as ALL_POTIONS};
@@ -276,17 +278,27 @@ pub const SHARED_POTIONS: &[PoolPotion] = &[
 
 /// The sim's card for a game id, if it has one.
 pub fn sim_card(id: &str) -> Option<CardId> {
-    ALL_CARDS.iter().copied().find(|c| slug(&format!("{c:?}")) == id)
+    by_game_id(&CARDS, ALL_CARDS, id)
 }
 
 /// The sim's potion for a game id, if it has one.
 pub fn sim_potion(id: &str) -> Option<PotionId> {
-    ALL_POTIONS.iter().copied().find(|p| slug(&format!("{p:?}")) == id)
+    by_game_id(&POTIONS, ALL_POTIONS, id)
 }
 
 /// The sim's relic for a game id, if it has one.
 pub fn sim_relic(id: &str) -> Option<RelicId> {
-    ALL_RELICS.iter().copied().find(|r| slug(&format!("{r:?}")) == id)
+    by_game_id(&RELICS, ALL_RELICS, id)
+}
+
+static CARDS: OnceLock<HashMap<String, CardId>> = OnceLock::new();
+static POTIONS: OnceLock<HashMap<String, PotionId>> = OnceLock::new();
+static RELICS: OnceLock<HashMap<String, RelicId>> = OnceLock::new();
+
+/// A lookup from game id to the sim's id, built on first use: the run layer
+/// asks on every card it adds or checks.
+fn by_game_id<T: Copy + std::fmt::Debug>(map: &OnceLock<HashMap<String, T>>, all: &[T], id: &str) -> Option<T> {
+    map.get_or_init(|| all.iter().map(|&x| (slug(&format!("{x:?}")), x)).collect()).get(id).copied()
 }
 
 /// The tables as `tools/oracle pools` prints them.
