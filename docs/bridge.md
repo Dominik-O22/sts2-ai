@@ -6,7 +6,7 @@ You play the map, rewards, shops and events. The player takes every combat,
 card choices included.
 
 ```
-./scripts/build-mod.sh                      # then restart the game
+./scripts/build-mod.sh                      # with the game closed; it refuses otherwise
 uv run python -m sts2ai.play runs/<run>/latest.pt --search 256
 ```
 
