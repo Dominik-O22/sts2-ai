@@ -193,6 +193,13 @@ runcheck also compares every ancient's options with the record's apart
 from the effects, the dev console's runs included up to their first
 console fight: 51 of 51 match.
 
+Other players' runs come from ststracker.app: `scripts/tracker.py URL
+OUT.run` turns a run page into this format, minus what the page drops
+(potion offers, the ancients' unchosen options, transforms, enchantments
+made on the way). Its first run, an A10 win (seed ZQY94FARS9), walks
+from its seed with the rooms and the Rewards stream matching on all 49
+floors; the effects differ only where the page is silent.
+
 Fights draw on the run's Niche stream: `CombatState.CreateCreature`
 rolls each enemy's max HP there. The run draws once per enemy a fight
 starts with (`RunState::enemies_created`), which is what makes Whetstone
