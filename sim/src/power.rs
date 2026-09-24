@@ -27,6 +27,29 @@ impl Power {
     pub fn new(id: PowerId, amount: i32) -> Self {
         Self { id, amount, skip_next_tick: false, data: 0, applier: None }
     }
+
+    /// The number on the power's icon (`PowerModel.DisplayAmount`): the
+    /// amount, but for the powers that show a count kept in `data`.
+    pub fn display_amount(&self) -> i32 {
+        match self.id {
+            // AutomationPower.cs: cardsLeft, 10 down to 1; `data` counts up.
+            PowerId::Automation => 10 - self.data,
+            // HardenedShellPower.cs: what it still blocks this turn.
+            PowerId::HardenedShell => (self.amount - self.data).max(0),
+            // PanachePower.cs: CardsLeft, 5 until the Panache is played.
+            PowerId::Panache if self.data == 0 => PANACHE_CARDS,
+            PowerId::Panache => self.data,
+            // SlothPower.cs, TenderPower.cs: cards played this turn.
+            PowerId::Sloth | PowerId::Tender => self.data,
+            // SlowPower.cs: SlowAmount * 10, the percent more damage taken.
+            PowerId::Slow => self.data * 10,
+            // TagTeamPower.cs shows 1 whatever it holds.
+            PowerId::TagTeam => 1,
+            // WitheringPresencePower.cs: CardsLeft to the next Wither.
+            PowerId::WitheringPresence => self.amount - self.data,
+            _ => self.amount,
+        }
+    }
 }
 
 /// `PowerModel.Type == Debuff`.
