@@ -99,6 +99,11 @@ class Picks:
         for decision, c in sorted(self.picks.items(), key=lambda kv: -kv[1].total()):
             top = ", ".join(f"{k} {v / c.total():.0%}" for k, v in c.most_common(8))
             print(f"  {decision:8s} {c.total():6d}: {top}")
+        paths, rest = self.picks["Path"], self.picks["Rest"]
+        print(
+            f"  map steps into an elite {paths['Path Elite'] / max(paths.total(), 1):.1%}, "
+            f"rest sites healed at {rest['RestHeal'] / max(rest['RestHeal'] + rest['RestSmith'], 1):.1%} (of heal or smith)"
+        )
 
 
 def play(
@@ -156,6 +161,8 @@ def report(fights: list[End], runs: list[RunFight], seed: int, last: int, steps:
     print(f"floor reached: mean {floors.mean():.1f}, median {np.median(floors):.0f}, max {floors.max()}")
     by_act = Counter("won" if r.end == "won" else f"act {r.act + 1}" for r in counted)
     print("  ended in: " + "  ".join(f"{k} {v} ({v / len(counted):.0%})" for k, v in sorted(by_act.items())))
+    reached = lambda act: np.mean([r.act >= act for r in counted])
+    print(f"  reached act 2 {reached(1):.1%}, act 3 {reached(2):.1%}; won {np.mean([r.end == 'won' for r in counted]):.1%}")
     print("  floor quantiles: " + "  ".join(f"p{q} {np.percentile(floors, q):.0f}" for q in (10, 25, 50, 75, 90)))
 
     decks = np.array([r.deck for r in counted])
