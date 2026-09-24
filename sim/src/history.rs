@@ -27,9 +27,17 @@
 //! blacklist of an unknown point (`RunManager.BuildRoomTypeBlacklist`) is
 //! worked out from every path through the act's map that fits the point
 //! types the run met.
+//!
+//! `imitate` walks a run the same way and keeps the decisions the record
+//! made where the walk shows what the player saw, each encoded as the run
+//! policy would see it (`runobs::observe`), for the policy to learn from
+//! (docs/run-env.md, Winners' decisions).
+use std::collections::BTreeMap;
+
 use serde_json::Value;
 
 use crate::effects::{DeckAction, Offered, RestOption};
+use crate::forward::{path_options, shown_whole};
 use crate::game_rng::RunStream;
 use crate::encounter::{Act, Encounter};
 use crate::map::{ActMap, PointId, PointType};
@@ -38,6 +46,7 @@ use crate::replay::slug;
 use crate::rewards::{Offer, UNPORTED_RELICS};
 use crate::rooms::{Chooser, Decision};
 use crate::run::{DeckCard, Enchant, Room, RoomType, RunRelic, RunState};
+use crate::runobs::{self, RunObs};
 use crate::shop::{Item, Ware};
 use crate::types::Ascension;
 
@@ -145,6 +154,105 @@ const CURSES: &[&str] = &["CLUMSY", "DOUBT", "REGRET", "SHAME", "INJURY", "POOR_
 /// Walks `run`, which must be `eligible`; with `live`, checks the effects
 /// too.
 pub fn check(run: &Value, live: bool) -> Report {
+    walk(run, live, &mut ())
+}
+
+/// Hears the decisions a walk puts to the record's choices, and after each
+/// stretch of them (a map step, a floor) whether the walk showed the
+/// player what the game did there.
+pub trait Witness {
+    /// `decision` as `run` stood when it was put, and the record's
+    /// `answer`; `kept` is false for a kind of choice the record does not
+    /// keep (a page's potion offers, transforms and enchantments), whose
+    /// answer is a guess.
+    fn decision(&mut self, run: &RunState, decision: Decision<'_>, answer: usize, kept: bool);
+    /// Whether the decisions since the last verdict were `faithful`, and
+    /// whether the Rewards stream was still `streamed` into them.
+    fn verdict(&mut self, faithful: bool, streamed: bool);
+}
+
+/// Hears nothing: the plain check.
+impl Witness for () {
+    fn decision(&mut self, _: &RunState, _: Decision<'_>, _: usize, _: bool) {}
+    fn verdict(&mut self, _: bool, _: bool) {}
+}
+
+/// A decision the record made, as the run policy would have seen it.
+pub struct Imitated {
+    pub obs: RunObs,
+    /// The option token the record took.
+    pub option: usize,
+    pub floor: usize,
+    /// Whether the Rewards stream was still followed: before its first
+    /// floor that drew what the record did not, every draw so far matched.
+    pub streamed: bool,
+}
+
+/// The decisions of a walk the run policy would be asked, whose options
+/// and state are the record's (`imitate`).
+#[derive(Default)]
+pub struct Imitation {
+    pub rows: Vec<Imitated>,
+    /// Decisions left out, as "why: decision kind".
+    pub left_out: BTreeMap<String, usize>,
+    pending: Vec<(RunObs, usize, usize)>,
+}
+
+impl Imitation {
+    fn leave_out(&mut self, why: &str, obs: &RunObs) {
+        let kind = runobs::DECISIONS[obs.ids[0] as usize - 1];
+        *self.left_out.entry(format!("{why}: {kind}")).or_default() += 1;
+    }
+}
+
+impl Witness for Imitation {
+    fn decision(&mut self, run: &RunState, decision: Decision<'_>, answer: usize, kept: bool) {
+        // A decision with one option is taken without asking the policy
+        // (`env::Replay`).
+        if runobs::option_count(decision) <= 1 {
+            return;
+        }
+        let obs = runobs::observe(run, decision);
+        if !shown_whole(decision) {
+            self.leave_out("offers a card the sim cannot play", &obs);
+        } else if !kept {
+            self.leave_out("the record does not keep it", &obs);
+        } else if let Some(option) = obs.answers.iter().position(|&a| a == answer) {
+            self.pending.push((obs, option, run.floor));
+        } else {
+            self.leave_out("the record's choice is not an option", &obs);
+        }
+    }
+
+    fn verdict(&mut self, faithful: bool, streamed: bool) {
+        for (obs, option, floor) in std::mem::take(&mut self.pending) {
+            if faithful {
+                self.rows.push(Imitated { obs, option, floor, streamed });
+            } else {
+                self.leave_out("the walk differs from the record there", &obs);
+            }
+        }
+    }
+}
+
+/// Walks `run`, which must be `eligible`, with the effects live, and keeps
+/// the decisions the record made where the walk is faithful to it: the
+/// floor's room and every one before it are the record's, what the floor
+/// drew is what the record shows, every choice the record made there was
+/// on offer, and the player leaves it as the record has them. A map step
+/// counts where the point the player left and the point they went to are
+/// the only ones on paths that fit the record, and the rooms so far
+/// matched. The walk goes on past the first floor whose draws differ: the
+/// player is set back to the record after it, so a later floor whose own
+/// draws match the record (a rest site, most events, an ancient) and a
+/// later map step still show what the player saw.
+pub fn imitate(run: &Value) -> Imitation {
+    let mut imitation = Imitation::default();
+    walk(run, true, &mut imitation);
+    imitation
+}
+
+fn walk(run: &Value, live: bool, witness: &mut dyn Witness) -> Report {
     let seed = run["seed"].as_str().unwrap();
     let ascension = Ascension(run["ascension"].as_u64().unwrap() as u8);
     let acts: Vec<Act> = run["acts"].as_array().unwrap().iter().map(|a| act(a.as_str().unwrap())).collect();
@@ -176,6 +284,7 @@ pub fn check(run: &Value, live: bool) -> Report {
             report.floors += 1;
             let last = a + 1 == history.len() && j + 1 == floors.len();
             let label = format!("floor {} (act {} {})", report.floors, a + 1, floor["map_point_type"].as_str().unwrap());
+            let rooms_matched = report.room_problem.is_none();
             let point = kinds[j];
             let all_shops = |p: PointId| !map[p].children.is_empty() && map[p].children.iter().all(|c| map[c].kind == PointType::Shop);
             let banned: Vec<bool> = paths[j].iter().map(|&p| previous_had_shop || all_shops(p)).collect();
@@ -186,6 +295,10 @@ pub fn check(run: &Value, live: bool) -> Report {
             let rooms = floor["rooms"].as_array().unwrap();
             previous_had_shop = rooms.iter().any(|r| r["room_type"] == "shop");
 
+            if j > 0 && rooms_matched {
+                map_step(witness, &state, &map, &paths, j);
+                witness.verdict(true, rewards_live);
+            }
             state.point = paths[j].first().copied();
             let room = state.enter_point(point, banned.first().copied().unwrap_or(false));
             let recorded = &rooms[0];
@@ -213,7 +326,7 @@ pub fn check(run: &Value, live: bool) -> Report {
             if monsters.filter_map(Value::as_str).any(|m| SUMMONERS.contains(&game_id(m))) {
                 niche_live = false;
             }
-            let walked = (!ended).then(|| follow(&mut state, room, rooms, stats));
+            let walked = (!ended).then(|| follow(&mut state, room, rooms, stats, witness));
             match walked.as_ref().and_then(|w| w.ancient.as_ref()) {
                 Some(Ok(())) => report.ancients += 1,
                 Some(Err(why)) => report.ancient_mismatches.push(format!("{label}: {why}")),
@@ -234,43 +347,66 @@ pub fn check(run: &Value, live: bool) -> Report {
                 // are taken as the player's.
                 player.potions = state.held_potions().map(str::to_string).collect();
             }
-            if !live {
+            let effects_faithful = if !live {
                 player.restore(&mut state);
-                continue;
-            }
-            let skip = match &walked {
-                None => Some("the run ended in this fight".to_string()),
-                Some(w) if w.unported.is_some() => w.unported.clone(),
-                _ if !streamed && state.rewards().counter != counter => Some("drew on the lost Rewards stream".into()),
-                _ if !niche_before.0 && state.rngs.run(RunStream::Niche).counter != niche_before.1 + fought(rooms) => {
-                    Some("drew on the lost Niche stream".into())
+                true
+            } else {
+                let skip = match &walked {
+                    None => Some("the run ended in this fight".to_string()),
+                    Some(w) if w.unported.is_some() => w.unported.clone(),
+                    _ if !streamed && state.rewards().counter != counter => Some(LOST_REWARDS.into()),
+                    _ if !niche_before.0 && state.rngs.run(RunStream::Niche).counter != niche_before.1 + fought(rooms) => {
+                        Some("drew on the lost Niche stream".into())
+                    }
+                    _ => None,
+                };
+                match skip {
+                    Some(why) => {
+                        report.effects.skipped.push(format!("{label}: {why}"));
+                        player.restore(&mut state);
+                        why == LOST_REWARDS
+                    }
+                    None => {
+                        report.effects.checked += 1;
+                        if matches!(room, Room::Combat(..)) || rooms.len() > 1 {
+                            (state.hp, state.max_hp) = (player.hp, player.max_hp);
+                        }
+                        let missing = walked.as_ref().map(|w| w.missing.clone()).unwrap_or_default();
+                        let diff = player.differs(&state, &missing);
+                        if let Some(diff) = &diff {
+                            report.effects.divergences.push(format!("{label}: {diff}"));
+                            player.restore(&mut state);
+                        }
+                        diff.is_none()
+                    }
                 }
-                _ => None,
             };
-            if let Some(why) = skip {
-                report.effects.skipped.push(format!("{label}: {why}"));
-                player.restore(&mut state);
-                continue;
-            }
-            report.effects.checked += 1;
-            if matches!(room, Room::Combat(..)) || rooms.len() > 1 {
-                (state.hp, state.max_hp) = (player.hp, player.max_hp);
-            }
-            let missing = walked.map(|w| w.missing).unwrap_or_default();
-            if let Some(diff) = player.differs(&state, &missing) {
-                report.effects.divergences.push(format!("{label}: {diff}"));
-                player.restore(&mut state);
-            }
+            let drawn = walked.as_ref().is_some_and(|w| w.stream.is_ok() && w.missing.is_empty() && w.unported.is_none());
+            witness.verdict(report.room_problem.is_none() && drawn && effects_faithful, streamed);
         }
     }
     report
 }
+
+const LOST_REWARDS: &str = "drew on the lost Rewards stream";
 
 /// Whether a floor comes from a run page (`scripts/tracker.py`), which
 /// keeps no potion offers, transforms, enchantments or ancient options
 /// left untaken.
 fn page(stats: &Value) -> bool {
     stats["potions_unrecorded"] == true
+}
+
+/// The map step into floor `j` of an act, put to `witness` where the record
+/// pins it: one point fits the paths at floor `j - 1`, and one of the
+/// points the player could go to from it fits them at `j`.
+fn map_step(witness: &mut dyn Witness, state: &RunState, map: &ActMap, paths: &[Vec<PointId>], j: usize) {
+    let [from] = paths[j - 1][..] else { return };
+    let options = path_options(map, from, state);
+    let fits: Vec<usize> = (0..options.len()).filter(|&i| paths[j].contains(&options[i])).collect();
+    if let [answer] = fits[..] {
+        witness.decision(state, Decision::Path(map, &options), answer, true);
+    }
 }
 
 /// The player as the record leaves them after each floor: the state the
@@ -505,8 +641,8 @@ fn names(stats: &Value, key: &str) -> Vec<String> {
 }
 
 /// The player's choices on one floor as its record lists them, taken as
-/// the room flows ask.
-struct Recorded {
+/// the room flows ask, each told to `witness`.
+struct Recorded<'w> {
     /// `cards_gained`, the cards taken from offers among them.
     cards: Vec<DeckCard>,
     /// `relic_choices` picked, in the order they came.
@@ -528,10 +664,11 @@ struct Recorded {
     /// From a run page (`page`): its potion offers are not known, so every
     /// potion is kept.
     page: bool,
+    witness: &'w mut dyn Witness,
 }
 
-impl Recorded {
-    fn of(stats: &Value) -> Self {
+impl<'w> Recorded<'w> {
+    fn of(stats: &Value, witness: &'w mut dyn Witness) -> Self {
         let list = |key: &str| stats[key].as_array().cloned().unwrap_or_default();
         let ids = |key: &str| list(key).iter().map(|v| game_id(v.as_str().unwrap()).to_string()).collect();
         Recorded {
@@ -547,6 +684,7 @@ impl Recorded {
             events: list("event_choices").iter().filter_map(|c| event_option(c["title"]["key"].as_str()?)).collect(),
             missing: Vec::new(),
             page: page(stats),
+            witness,
         }
     }
 
@@ -563,8 +701,22 @@ impl Recorded {
     }
 }
 
-impl Chooser for Recorded {
+impl Chooser for Recorded<'_> {
     fn choose(&mut self, run: &RunState, decision: Decision<'_>) -> usize {
+        let answer = self.answer(run, decision);
+        let guessed = matches!(
+            decision,
+            Decision::Potion(_)
+                | Decision::Deck { action: DeckAction::Enchant(..) | DeckAction::Transform { .. } | DeckAction::Maul | DeckAction::TransformInto(_), .. }
+        );
+        self.witness.decision(run, decision, answer, !(self.page && guessed));
+        answer
+    }
+}
+
+impl Recorded<'_> {
+    /// The record's answer to `decision`.
+    fn answer(&mut self, run: &RunState, decision: Decision<'_>) -> usize {
         match decision {
             Decision::Path(..) => 0,
             Decision::Card(offers) => Self::take(&mut self.cards, offers, |c, o| c.id == o.id),
@@ -687,8 +839,8 @@ struct Walked {
 /// One floor through the room flows with the player's recorded choices:
 /// the fight's outcome and the player's own potion use first, from the
 /// record, then the room. What it drew is then checked against the record.
-fn follow(state: &mut RunState, room: Room, rooms: &[Value], stats: &Value) -> Walked {
-    let mut chooser = Recorded::of(stats);
+fn follow(state: &mut RunState, room: Room, rooms: &[Value], stats: &Value, witness: &mut dyn Witness) -> Walked {
+    let mut chooser = Recorded::of(stats, witness);
     let mut log: Vec<Offered> = Vec::new();
     let mut stream: Option<String> = None;
     let mut unported: Option<String> = None;
@@ -1063,5 +1215,56 @@ mod tests {
             assert_eq!(effects.checked, compared, "not compared: {:?}", effects.skipped);
             assert_eq!(check(&run, true).matched, check(&run, false).matched);
         }
+    }
+
+    /// The label of a row: its option token's kind.
+    fn taken(row: &Imitated) -> runobs::OptionKind {
+        let kind = row.obs.ids[runobs::I_OPTIONS + row.option * runobs::OPTION_IDS];
+        runobs::OPTION_KINDS[kind as usize - 1]
+    }
+
+    /// A win the walk matches floor for floor gives up no decision as
+    /// unfaithful, and each row takes what the record took: as many heals
+    /// and smiths as the record's rest sites.
+    #[test]
+    fn imitation_keeps_a_matching_run() {
+        let run: Value = serde_json::from_str(include_str!("../testdata/run-TBL5VNYN4M.run")).unwrap();
+        let im = imitate(&run);
+        assert!(!im.left_out.keys().any(|k| k.starts_with("the walk differs")), "{:?}", im.left_out);
+        assert!(im.rows.iter().all(|r| r.streamed));
+        let count = |kind| im.rows.iter().filter(|r| taken(r) == kind).count();
+        assert_eq!((count(runobs::OptionKind::RestHeal), count(runobs::OptionKind::RestSmith)), (5, 4));
+    }
+
+    /// Hidden information (docs/run-env.md): every decision two real runs
+    /// put, encoded from a copy of the run whose seed, streams and plan are
+    /// another run's, but for the acts' bosses the map shows, encodes the
+    /// same as the run itself.
+    #[test]
+    fn imitation_rows_hold_no_hidden_information() {
+        #[derive(Default)]
+        struct Reseeded(std::collections::BTreeSet<i64>);
+        impl Witness for Reseeded {
+            fn decision(&mut self, run: &RunState, decision: Decision<'_>, _: usize, _: bool) {
+                let mut other = run.clone();
+                other.rngs = crate::game_rng::RunRngs::new("RESEEDED");
+                let acts: Vec<Act> = run.plan.acts.iter().map(|a| a.act).collect();
+                other.plan = crate::plan::RunPlan::generate(other.rngs.seed, acts.try_into().unwrap(), run.ascension, &Unlocks::default());
+                for (o, a) in other.plan.acts.iter_mut().zip(&run.plan.acts) {
+                    (o.boss, o.second_boss) = (a.boss, a.second_boss);
+                }
+                assert_ne!(other.plan.acts[run.act].normal, run.plan.acts[run.act].normal);
+                let obs = runobs::observe(run, decision);
+                assert_eq!(obs, runobs::observe(&other, decision), "{decision:?}");
+                self.0.insert(obs.ids[0]);
+            }
+            fn verdict(&mut self, _: bool, _: bool) {}
+        }
+        let mut seen = Reseeded::default();
+        for text in [include_str!("../testdata/run-TBL5VNYN4M.run"), include_str!("../testdata/run-5J5VMZX7UB.run")] {
+            walk(&serde_json::from_str(text).unwrap(), true, &mut seen);
+        }
+        let kinds: Vec<&str> = seen.0.iter().map(|&k| runobs::DECISIONS[k as usize - 1]).collect();
+        assert_eq!(kinds, ["Path", "Relic", "Card", "Potion", "Rest", "Ancient", "Deck", "Shop", "Event"]);
     }
 }

@@ -59,6 +59,27 @@ fn playable(offer: &Offer) -> bool {
     sim_card(offer.id).is_some_and(|id| !UNSUPPORTED_CARDS.iter().any(|(u, _)| *u == id))
 }
 
+/// Whether `Playable` puts `decision` to its chooser whole: it offers no
+/// card the sim cannot play.
+pub fn shown_whole(decision: Decision<'_>) -> bool {
+    match decision {
+        Decision::Card(offers) => offers.iter().all(playable),
+        Decision::Bundle(bundles) => bundles.iter().flatten().all(playable),
+        Decision::Shop(wares) => wares.iter().all(|w| !matches!(&w.item, Item::Card(c) if !playable(c))),
+        _ => true,
+    }
+}
+
+/// The map points the player can go to from `point`: its children, or
+/// with Winged Boots any point of the next row, three times
+/// (`MapTravel.GetTravelablePointsFrom`, `WingedBoots.AfterRoomEntered`).
+pub fn path_options(map: &ActMap, point: PointId, state: &RunState) -> Vec<PointId> {
+    let children: Vec<PointId> = map[point].children.iter().collect();
+    let boots = state.relics.iter().any(|r| r.id == "WINGED_BOOTS" && r.counter < 3);
+    let row: Vec<PointId> = map.grid_points().filter(|&p| map[p].row == map[point].row + 1).collect();
+    if boots && !row.is_empty() { row } else { children }
+}
+
 /// A chooser that never sees a card the sim cannot play: those are left
 /// out of card and bundle offers and off the shop's shelves before `inner`
 /// chooses.
@@ -268,13 +289,10 @@ impl Run {
         }
     }
 
-    /// Steps to the next map point: one of the current point's children,
-    /// or the next act's start. False past the last act. Winged Boots let
-    /// the player go to any point of the next row, three times
-    /// (`MapTravel.GetTravelablePointsFrom`, `WingedBoots.AfterRoomEntered`).
+    /// Steps to the next map point (`path_options`), or the next act's
+    /// start. False past the last act.
     fn move_on(&mut self, chooser: &mut impl Chooser) -> bool {
-        let children: Vec<PointId> = self.map[self.point].children.iter().collect();
-        if children.is_empty() {
+        if self.map[self.point].children.is_empty() {
             let act = self.state.act + 1;
             let Some(plan) = self.state.plan.acts.get(act) else { return false };
             self.map = ActMap::generate(self.state.rngs.seed, plan.act, self.state.ascension);
@@ -283,10 +301,7 @@ impl Run {
             self.passed.push((StartPoint::Entrance(act), self.state.carried()));
             return true;
         }
-        let boots = self.state.relics.iter().any(|r| r.id == "WINGED_BOOTS" && r.counter < 3);
-        let row = self.map[self.point].row + 1;
-        let row: Vec<PointId> = self.map.grid_points().filter(|&p| self.map[p].row == row).collect();
-        let options = if boots && !row.is_empty() { row } else { children };
+        let options = path_options(&self.map, self.point, &self.state);
         let i = chooser.choose(&self.state, Decision::Path(&self.map, &options));
         let next = options[i.min(options.len() - 1)];
         if !self.map[self.point].children.contains(next) {

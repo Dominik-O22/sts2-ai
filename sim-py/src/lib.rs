@@ -4,7 +4,7 @@
 //! are numpy arrays the caller allocates once; `observe` and `step` fill
 //! them in place with the GIL released.
 
-use numpy::{PyReadonlyArray1, PyReadwriteArray1, PyReadwriteArray2};
+use numpy::{IntoPyArray, PyArray1, PyReadonlyArray1, PyReadwriteArray1, PyReadwriteArray2};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use serde_json::Value;
@@ -695,6 +695,29 @@ fn generate_run(seed: u64, floor: u32) -> String {
     sim::gen::generate(&mut sim::rng::Rng::new(seed), floor, sim::types::Ascension(10)).run_json().to_string()
 }
 
+/// Rows, options taken, floors, streamed flags and what was left out (`imitation`).
+type Imitation<'py> = (Bound<'py, PyArray1<f32>>, Bound<'py, PyArray1<i64>>, Vec<usize>, Vec<usize>, Vec<bool>, std::collections::BTreeMap<String, usize>);
+
+/// A run history's decisions as the run policy would see them, where the
+/// walk is faithful to the record (`sim::history::imitate`), or None for a
+/// run the port cannot walk: run rows `floats [n * RUN_FLOATS]` and `ids [n
+/// * RUN_IDS]`, the option token taken, the floor, whether the Rewards
+/// stream was still followed, and the decisions left out by why.
+#[pyfunction]
+fn imitation<'py>(py: Python<'py>, run: &str) -> PyResult<Option<Imitation<'py>>> {
+    let run: Value = serde_json::from_str(run).map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+    if !sim::history::eligible(&run) {
+        return Ok(None);
+    }
+    let im = py.detach(|| sim::history::imitate(&run));
+    let floats: Vec<f32> = im.rows.iter().flat_map(|r| r.obs.floats.iter().copied()).collect();
+    let ids: Vec<i64> = im.rows.iter().flat_map(|r| r.obs.ids.iter().copied()).collect();
+    let option = im.rows.iter().map(|r| r.option).collect();
+    let floor = im.rows.iter().map(|r| r.floor).collect();
+    let streamed = im.rows.iter().map(|r| r.streamed).collect();
+    Ok(Some((floats.into_pyarray(py), ids.into_pyarray(py), option, floor, streamed, im.left_out)))
+}
+
 /// Game ids of the cards the sim refuses to play (`card::UNSUPPORTED_CARDS`).
 #[pyfunction]
 fn unsupported_cards() -> Vec<String> {
@@ -775,6 +798,7 @@ fn _sim(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(game_ids, m)?)?;
     m.add_function(wrap_pyfunction!(generate_run, m)?)?;
     m.add_function(wrap_pyfunction!(unsupported_cards, m)?)?;
+    m.add_function(wrap_pyfunction!(imitation, m)?)?;
     m.add_function(wrap_pyfunction!(monster_names, m)?)?;
     m.add_function(wrap_pyfunction!(encounters, m)?)?;
     m.add_function(wrap_pyfunction!(transform_options, m)?)?;
