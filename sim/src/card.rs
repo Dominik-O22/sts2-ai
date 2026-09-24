@@ -30,7 +30,8 @@ pub const UNSUPPORTED_CARDS: &[(CardId, &str)] = &[
     // which the sim has.
     (CardId::Splash, "offers attacks from other characters' card pools"),
     // MadScience.cs: its type and rider are picked at the Tinker Time event
-    // and saved on the card; the recorded deck carries neither.
+    // and saved on the card. With both known the card is one of the
+    // `MadScience*` ids; this one is a deck entry that carried neither.
     (CardId::MadScience, "type and rider come from Tinker Time and are not recorded"),
 ];
 
@@ -306,6 +307,16 @@ defs! {
     MinionSacrifice: 0, Skill, Special, Self_, kw = [Exhaust];
     MinionStrike: 0, Attack, Special, AnyEnemy, kw = [Exhaust], tags = [Strike];
     SweepingGaze: 0, Attack, Special, RandomEnemy, kw = [Ethereal, Exhaust];
+    // MadScience.cs: Type and TargetType follow TinkerTimeType.
+    MadScienceSapping: 1, Attack, Special, AnyEnemy;
+    MadScienceViolence: 1, Attack, Special, AnyEnemy;
+    MadScienceChoking: 1, Attack, Special, AnyEnemy;
+    MadScienceEnergized: 1, Skill, Special, Self_;
+    MadScienceWisdom: 1, Skill, Special, Self_;
+    MadScienceChaos: 1, Skill, Special, Self_;
+    MadScienceExpertise: 1, Power, Special, Self_;
+    MadScienceCurious: 1, Power, Special, Self_;
+    MadScienceImprovement: 1, Power, Special, Self_;
 }
 
 /// The Ironclad card pool in `IroncladCardPool.cs` order, for generation.
@@ -554,6 +565,12 @@ impl Card {
                 (Scrawl, Keyword::Retain) => return true,
                 (Anointed | GoldAxe, Keyword::Retain) | (BeaconOfHope | Entropy, Keyword::Innate) => return true,
                 (Discovery | Mimic, Keyword::Exhaust) => return false,
+                // MadScience.OnUpgrade, every variant.
+                (
+                    MadScienceSapping | MadScienceViolence | MadScienceChoking | MadScienceEnergized | MadScienceWisdom
+                    | MadScienceChaos | MadScienceExpertise | MadScienceCurious | MadScienceImprovement,
+                    Keyword::Innate,
+                ) => return true,
                 _ => {}
             }
         }
@@ -648,6 +665,17 @@ impl Card {
             MinionSacrifice => Vars { block: pick(8.0, 11.0), ..d() },
             MinionStrike => Vars { damage: pick(6.0, 9.0), cards: 1, ..d() },
             SweepingGaze => Vars { damage: pick(10.0, 15.0), ..d() },
+            // MadScience.cs `CanonicalVars`, each variant the ones its type
+            // and rider read; the upgrade changes none of them.
+            MadScienceSapping => Vars { damage: 12.0, magic: 2.0, ..d() },
+            MadScienceViolence => Vars { damage: 12.0, hits: 3, ..d() },
+            MadScienceChoking => Vars { damage: 12.0, magic: 6.0, ..d() },
+            MadScienceEnergized => Vars { block: 8.0, energy: 2, ..d() },
+            MadScienceWisdom => Vars { block: 8.0, cards: 3, ..d() },
+            MadScienceChaos => Vars { block: 8.0, ..d() },
+            MadScienceExpertise => Vars { magic: 2.0, ..d() },
+            MadScienceCurious => Vars { magic: 1.0, ..d() },
+            MadScienceImprovement => d(),
             // Colorless cards the Ironclad can meet outside its pool.
             Nostalgia | Prolong | Scrawl | SecretTechnique | SecretWeapon | Splash | Stratagem => d(),
             Omnislice => Vars { damage: pick(8.0, 11.0), ..d() },
@@ -887,6 +915,29 @@ impl Card {
             HelloWorld => vec![self_power(PowerId::HelloWorld, 1)],
             // Unsupported, see UNSUPPORTED_CARDS.
             MadScience => vec![],
+            // MadScience.OnPlay: the type's effect, then the rider. Violence
+            // is three separate `DamageCmd.Attack`s, not one of three hits.
+            MadScienceSapping => vec![attack(1), power(t(), PowerId::Weak, m), power(t(), PowerId::Vulnerable, m)],
+            MadScienceViolence => (0..v.hits).map(|_| attack(1)).collect(),
+            MadScienceChoking => vec![attack(1), power(t(), PowerId::Strangle, m)],
+            MadScienceEnergized => vec![block(), Effect::GainEnergy { amount: v.energy }],
+            MadScienceWisdom => vec![block(), draw(v.cards)],
+            // `GetDistinctForCombat` over the character's whole pool, set
+            // free this turn, as Discovery offers.
+            MadScienceChaos => vec![
+                block(),
+                Effect::GenerateRandom {
+                    pool: GenPool::Ironclad,
+                    count: 1,
+                    to: Pile::Hand,
+                    free_this_turn: true,
+                    distinct: true,
+                    upgraded: false,
+                },
+            ],
+            MadScienceExpertise => vec![self_power(PowerId::Strength, m), self_power(PowerId::Dexterity, m)],
+            MadScienceCurious => vec![self_power(PowerId::Curious, m)],
+            MadScienceImprovement => vec![self_power(PowerId::Improvement, 1)],
             // Maul.cs: after the hits, every Maul in combat grows by this
             // one's Increase.
             Maul => vec![attack(v.hits), Effect::GrowDamage { id: Maul, amount: v.magic }],

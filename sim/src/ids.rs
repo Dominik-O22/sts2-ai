@@ -274,6 +274,17 @@ pub enum CardId {
     MinionSacrifice,
     MinionStrike,
     SweepingGaze,
+    // Mad Science (MadScience.cs), one per Tinker Time type and rider:
+    // the game saves both on the card, the sim makes each pair its own id.
+    MadScienceSapping,
+    MadScienceViolence,
+    MadScienceChoking,
+    MadScienceEnergized,
+    MadScienceWisdom,
+    MadScienceChaos,
+    MadScienceExpertise,
+    MadScienceCurious,
+    MadScienceImprovement,
 }
 
 /// `Models/Powers/<Name>Power.cs`.
@@ -549,6 +560,14 @@ pub enum PowerId {
     BattlewornDummyTimeLimit,
     /// `TemporaryStrengthPower`, positive (Reptile Trinket).
     ReptileTrinket,
+    /// Hurts its owner after each card its applier plays (Mad Science's
+    /// Choking rider).
+    Strangle,
+    /// The owner's Power cards cost less (Mad Science's Curious rider).
+    Curious,
+    /// Upgrades deck cards once combat is won; nothing in combat (Mad
+    /// Science's Improvement rider).
+    Improvement,
 }
 
 /// `Models/Monsters/<Name>.cs`.
@@ -895,6 +914,15 @@ pub const ALL_CARDS: &[CardId] = &[
     CardId::MinionSacrifice,
     CardId::MinionStrike,
     CardId::SweepingGaze,
+    CardId::MadScienceSapping,
+    CardId::MadScienceViolence,
+    CardId::MadScienceChoking,
+    CardId::MadScienceEnergized,
+    CardId::MadScienceWisdom,
+    CardId::MadScienceChaos,
+    CardId::MadScienceExpertise,
+    CardId::MadScienceCurious,
+    CardId::MadScienceImprovement,
 ];
 
 pub const ALL_POWERS: &[PowerId] = &[
@@ -1036,6 +1064,9 @@ pub const ALL_POWERS: &[PowerId] = &[
     PowerId::Mayhem,
     PowerId::BattlewornDummyTimeLimit,
     PowerId::ReptileTrinket,
+    PowerId::Strangle,
+    PowerId::Curious,
+    PowerId::Improvement,
 ];
 
 pub const ALL_MONSTERS: &[MonsterId] = &[
