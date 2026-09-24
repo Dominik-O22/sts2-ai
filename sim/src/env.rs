@@ -5,16 +5,18 @@
 //! caller-owned buffers laid out per `encode`, so the Python side can hand
 //! over numpy arrays without copies.
 
+use std::sync::{Arc, Mutex};
+
 use rayon::prelude::*;
 
 use crate::combat::{After, Combat, Outcome};
 use crate::encode::{self, N_ACTIONS, N_FLOATS, N_IDS};
 use crate::encounter::{Encounter, Kind};
-use crate::forward::{self, Fought, Next, Run};
+use crate::forward::{self, Fought, Next, Run, StartPoint, START_POINTS};
 use crate::gen::{act_floor, encounter_of_kind, generate, generate_against, FightSetup, BOSS_FLOOR, LAST_FLOOR};
 use crate::rng::{CombatRngs, Rng};
 use crate::rooms::{Chooser, Decision, First, Random};
-use crate::run::RunState;
+use crate::run::{Carried, RunState};
 use crate::runobs::{self, RunObs, RUN_FLOATS, RUN_IDS};
 use crate::potion::PotionId;
 use crate::relic::RelicId;
@@ -75,6 +77,76 @@ pub struct RunFight {
     /// How the run ended, when it ended with this fight: the fight lost,
     /// the last boss beaten, or the next fight one the sim cannot build.
     pub end: Option<forward::End>,
+    /// Where the run started.
+    pub began: Began,
+}
+
+/// Where a run started: floor 1, or a start point with a generated player
+/// or one the env's own runs carried there (`Starts`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Began {
+    Floor1,
+    Generated(StartPoint),
+    Own(StartPoint),
+}
+
+/// States kept per start point for `Starts`; past this the oldest go.
+pub const START_POOL: usize = 2048;
+
+/// Where run-mode runs start (docs/training.md, The run policy): floor 1
+/// with chance `full`, else at a start point drawn by `weights` (in
+/// `START_POINTS` order), from a state the env's runs passed there with
+/// chance `own` when the pool holds any, else from a generated one. The
+/// caller sets the chances; the runs fill the pools.
+pub struct Starts {
+    pub full: f32,
+    pub weights: [f32; START_POINTS.len()],
+    pub own: [f32; START_POINTS.len()],
+    pool: [Vec<Carried>; START_POINTS.len()],
+    /// Where each full pool's next state goes.
+    next: [usize; START_POINTS.len()],
+}
+
+impl Default for Starts {
+    fn default() -> Self {
+        Self { full: 1.0, weights: [0.0; START_POINTS.len()], own: [0.0; START_POINTS.len()], pool: Default::default(), next: [0; START_POINTS.len()] }
+    }
+}
+
+impl Starts {
+    /// Where the next run starts, and the state it starts with when it is
+    /// the env's own. Draws nothing while every run starts at floor 1.
+    fn pick(&self, rng: &mut Rng) -> (Began, Option<Carried>) {
+        let total: f32 = self.weights.iter().sum();
+        if self.full >= 1.0 || total <= 0.0 || rng.next_float(1.0) < self.full {
+            return (Began::Floor1, None);
+        }
+        let mut x = rng.next_float(total);
+        let i = (0..START_POINTS.len()).find(|&i| {
+            x -= self.weights[i];
+            x < 0.0
+        });
+        let i = i.unwrap_or(START_POINTS.len() - 1);
+        let pool = &self.pool[i];
+        if !pool.is_empty() && rng.next_float(1.0) < self.own[i] {
+            return (Began::Own(START_POINTS[i]), Some(pool[rng.next_int(pool.len())].clone()));
+        }
+        (Began::Generated(START_POINTS[i]), None)
+    }
+
+    fn keep(&mut self, at: StartPoint, carried: Carried) {
+        let i = at.index();
+        if self.pool[i].len() < START_POOL {
+            self.pool[i].push(carried);
+        } else {
+            self.pool[i][self.next[i]] = carried;
+            self.next[i] = (self.next[i] + 1) % START_POOL;
+        }
+    }
+
+    pub fn pool_sizes(&self) -> [usize; START_POINTS.len()] {
+        self.pool.each_ref().map(Vec::len)
+    }
 }
 
 /// What a potion kept is worth: about the 16 HP it is worth to the fights
@@ -296,12 +368,28 @@ struct RunSlot {
     seed: u64,
     /// Runs the slot has started.
     started: u64,
+    began: Began,
+    /// Draws where runs start, never on a run's streams.
+    rng: Rng,
+    starts: Arc<Mutex<Starts>>,
 }
 
 impl RunSlot {
-    fn new(asc: Ascension, base: u64, index: usize, choices: RunChoices) -> Self {
+    fn new(asc: Ascension, base: u64, index: usize, choices: RunChoices, starts: Arc<Mutex<Starts>>) -> Self {
         let seed = base + index as u64;
-        Self { run: Run::new(&run_seed(seed), asc), chooser: Choosing::of(choices, seed), choices, asc, base, seed, started: 1 }
+        let mut rng = Rng::new(seed.wrapping_mul(0x2545_F491_4F6C_DD1D) ^ 0x57A7);
+        let (run, began) = begin(&starts, &mut rng, seed, asc);
+        Self { run, chooser: Choosing::of(choices, seed), choices, asc, base, seed, started: 1, began, rng, starts }
+    }
+
+    /// Hands the start points the run passed to the pools.
+    fn keep_passed(&mut self) {
+        if !self.run.passed.is_empty() {
+            let mut starts = self.starts.lock().expect("start pools");
+            for (at, carried) in self.run.passed.drain(..) {
+                starts.keep(at, carried);
+            }
+        }
     }
 
     /// The decision the run waits at for the caller, if it does.
@@ -313,7 +401,7 @@ impl RunSlot {
     }
 
     fn report(&self, deck: usize) -> RunFight {
-        RunFight { seed: self.seed, act: self.run.state.act as u32, floor: self.run.state.floor as u32, deck: deck as u32, end: None }
+        RunFight { seed: self.seed, act: self.run.state.act as u32, floor: self.run.state.floor as u32, deck: deck as u32, end: None, began: self.began }
     }
 
     /// Writes the fight `setup` started back into the run, now that it is
@@ -365,6 +453,7 @@ impl RunSlot {
                     }
                 }
             };
+            self.keep_passed();
             match next {
                 Next::Fight(setup) => return (Some(setup), report),
                 Next::End(end) => {
@@ -374,12 +463,31 @@ impl RunSlot {
                     }
                     self.seed = self.base + index as u64 + self.started * n as u64;
                     self.started += 1;
-                    self.run = Run::new(&run_seed(self.seed), self.asc);
+                    (self.run, self.began) = begin(&self.starts, &mut self.rng, self.seed, self.asc);
                     self.chooser = Choosing::of(self.choices, self.seed);
                 }
             }
         }
     }
+}
+
+/// Run seed index `seed`, started where `starts` picks: a generated
+/// player is rolled for the floor the start point stands at, as the
+/// generator counts floors (sixteen an act).
+fn begin(starts: &Mutex<Starts>, rng: &mut Rng, seed: u64, asc: Ascension) -> (Run, Began) {
+    let (began, own) = starts.lock().expect("start pools").pick(rng);
+    let run = match (began, own) {
+        (Began::Own(at), Some(carried)) => Run::start_at(&run_seed(seed), asc, at, carried),
+        (Began::Generated(at), _) => {
+            let floor = match at {
+                StartPoint::Entrance(act) => BOSS_FLOOR * act as u32,
+                StartPoint::BossDoor(act) => BOSS_FLOOR * act as u32 + BOSS_FLOOR - 1,
+            };
+            Run::start_at(&run_seed(seed), asc, at, Carried::generated(&generate(rng, floor, asc)))
+        }
+        _ => Run::new(&run_seed(seed), asc),
+    };
+    (run, began)
 }
 
 /// The game seed of run seed index `seed`.
@@ -503,6 +611,8 @@ impl Slot {
 
 pub struct VecEnv {
     slots: Vec<Slot>,
+    /// Where run-mode runs start, shared with every slot's run.
+    starts: Arc<Mutex<Starts>>,
     cfg: EnvConfig,
     /// When set, resets cycle through these instead of generating.
     fixed: Vec<FightSetup>,
@@ -524,7 +634,7 @@ impl VecEnv {
         for (i, s) in slots.iter_mut().enumerate() {
             s.reset(i, n, &cfg, &[], &[]);
         }
-        Self { slots, cfg, fixed: vec![], hard: vec![] }
+        Self { slots, cfg, fixed: vec![], hard: vec![], starts: Default::default() }
     }
 
     pub fn len(&self) -> usize {
@@ -576,12 +686,23 @@ impl VecEnv {
     pub fn set_runs(&mut self, asc: Ascension, base: u64, choices: RunChoices) {
         self.fixed.clear();
         let n = self.slots.len();
-        let (cfg, hard) = (self.cfg, &self.hard);
+        let (cfg, hard, starts) = (self.cfg, &self.hard, &self.starts);
         self.slots.par_iter_mut().enumerate().for_each(|(i, s)| {
             s.resets = 0;
-            s.run = Some(RunSlot::new(asc, base, i, choices));
+            s.run = Some(RunSlot::new(asc, base, i, choices, starts.clone()));
             s.reset(i, n, &cfg, &[], hard);
         });
+    }
+
+    /// Where the runs that start from now on start (`Starts`).
+    pub fn set_starts(&mut self, full: f32, weights: [f32; START_POINTS.len()], own: [f32; START_POINTS.len()]) {
+        let mut starts = self.starts.lock().expect("start pools");
+        (starts.full, starts.weights, starts.own) = (full, weights, own);
+    }
+
+    /// States kept per start point, in `START_POINTS` order.
+    pub fn start_pools(&self) -> [usize; START_POINTS.len()] {
+        self.starts.lock().expect("start pools").pool_sizes()
     }
 
     /// The envs whose run waits at a decision for the caller.
@@ -1369,6 +1490,40 @@ mod tests {
             }
         }
         (played, reports)
+    }
+
+    /// With every run sent to the last boss door, the runs after each
+    /// env's first start there with a generated player and say so; a pool
+    /// holding a state hands it out once `own` asks for it.
+    #[test]
+    fn runs_start_where_the_starts_say() {
+        let n = 4;
+        let mut env = VecEnv::new(n, 5, EnvConfig::default());
+        env.set_runs(Ascension(10), 100, RunChoices::First);
+        let door = StartPoint::BossDoor(2);
+        let mut weights = [0.0; START_POINTS.len()];
+        weights[door.index()] = 1.0;
+        env.set_starts(0.0, weights, [1.0; START_POINTS.len()]);
+        let (mut floats, mut ids, mut mask) = (vec![0.0; n * N_FLOATS], vec![0; n * N_IDS], vec![false; n * N_ACTIONS]);
+        let (mut rewards, mut dones) = (vec![0.0; n], vec![false; n]);
+        env.observe(&mut floats, &mut ids, &mut mask);
+        let mut late = vec![];
+        while late.len() < 8 {
+            let actions: Vec<i64> = (0..n).map(|i| mask[i * N_ACTIONS..][..N_ACTIONS].iter().position(|&m| m).unwrap() as i64).collect();
+            for e in env.step(&actions, &mut floats, &mut ids, &mut mask, &mut rewards, &mut dones) {
+                let run = e.run.expect("a run fight");
+                if run.began != Began::Floor1 {
+                    assert_eq!(run.began, Began::Generated(door), "an empty pool falls back to a generated player");
+                    assert!(run.floor >= 47, "a fight past the boss door on floor {}", run.floor);
+                    late.push(run);
+                }
+            }
+        }
+
+        let mut starts = Starts { full: 0.0, weights, own: [1.0; START_POINTS.len()], ..Default::default() };
+        let carried = Run::new("KEPT", Ascension(10)).state.carried();
+        starts.keep(door, carried.clone());
+        assert_eq!(starts.pick(&mut Rng::new(1)), (Began::Own(door), Some(carried)));
     }
 
     /// Run mode plays runs across fight boundaries as `forward::play` does

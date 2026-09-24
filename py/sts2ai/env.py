@@ -129,6 +129,14 @@ class RunFight(NamedTuple):
     deck: int  # cards in the deck the fight was fought with
     # How the run ended with this fight: "won", "died", "stuck: <why>".
     end: str | None
+    # Where the run started: its place in `START_POINTS`, None for floor 1;
+    # and whether from the envs' own state there, not a generated one.
+    start: int | None
+    own: bool
+
+
+# The points a run can start at besides floor 1, the latest first.
+START_POINTS: list[str] = _sim.start_points()
 
 
 class End(NamedTuple):
@@ -209,6 +217,17 @@ class Envs:
             self.run_floats = pinned((self.n, self.run_layout.run_floats), torch.float32)
             self.run_ids = pinned((self.n, self.run_layout.run_ids), torch.int64)
         self.sim.observe(self.floats, self.ids, self.mask)
+
+    def set_starts(self, full: float, weights: list[float], own: list[float]) -> None:
+        """Where the runs that start from now on start: floor 1 with chance
+        `full`, else a start point by `weights`, from the envs' own state
+        there with chance `own` when they have one; both lists in
+        `START_POINTS` order."""
+        self.sim.set_starts(full, weights, own)
+
+    def start_pools(self) -> list[int]:
+        """States the runs have kept per start point."""
+        return self.sim.start_pools()
 
     def run_waiting(self) -> list[int]:
         """The envs whose run waits at a decision. A combat `step` leaves

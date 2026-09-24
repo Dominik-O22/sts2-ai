@@ -32,17 +32,25 @@ struct VecEnv {
 type End = (usize, bool, f32, f32, u32, u32, u32, String, String, f32, Option<RunFight>);
 
 /// A run fight's place in its run: (seed index, act, floor, deck size, how
-/// the run ended with it: "won", "died", "stuck: <why>", or None).
-type RunFight = (u64, u32, u32, u32, Option<String>);
+/// the run ended with it: "won", "died", "stuck: <why>", or None; where the
+/// run started: its place in `start_points()`, None for floor 1; whether
+/// from the envs' own state there, not a generated one).
+type RunFight = (u64, u32, u32, u32, Option<String>, Option<usize>, bool);
 
 fn run_fight(r: sim::env::RunFight) -> RunFight {
+    use sim::env::Began;
     use sim::forward::End;
     let end = r.end.map(|end| match end {
         End::Won => "won".into(),
         End::Died => "died".into(),
         End::Stuck(why) => format!("stuck: {why}"),
     });
-    (r.seed, r.act, r.floor, r.deck, end)
+    let (start, own) = match r.began {
+        Began::Floor1 => (None, false),
+        Began::Generated(at) => (Some(at.index()), false),
+        Began::Own(at) => (Some(at.index()), true),
+    };
+    (r.seed, r.act, r.floor, r.deck, end, start, own)
 }
 
 impl VecEnv {
@@ -146,6 +154,21 @@ impl VecEnv {
         };
         py.detach(|| self.inner.set_runs(Ascension(asc), seed, choices));
         Ok(())
+    }
+
+    /// Where the runs that start from now on start: floor 1 with chance
+    /// `full`, else a start point by `weights`, from the envs' own state
+    /// there with chance `own` when they have one (`sim::env::Starts`;
+    /// both lists in `start_points()` order).
+    fn set_starts(&mut self, full: f32, weights: Vec<f32>, own: Vec<f32>) -> PyResult<()> {
+        let per_point = |v: Vec<f32>| v.try_into().map_err(|_| pyo3::exceptions::PyValueError::new_err("a value per start point"));
+        self.inner.set_starts(full, per_point(weights)?, per_point(own)?);
+        Ok(())
+    }
+
+    /// States the envs' runs have kept per start point.
+    fn start_pools(&self) -> Vec<usize> {
+        self.inner.start_pools().to_vec()
     }
 
     /// The envs whose run waits at a decision for the caller.
@@ -525,6 +548,20 @@ fn layout(py: Python<'_>) -> PyResult<Bound<'_, PyDict>> {
     Ok(d)
 }
 
+/// The points a run can start at besides floor 1, the latest first
+/// (`sim::forward::START_POINTS`): "act 3 boss", "act 3 entrance", ...
+#[pyfunction]
+fn start_points() -> Vec<String> {
+    use sim::forward::StartPoint;
+    sim::forward::START_POINTS
+        .iter()
+        .map(|p| match p {
+            StartPoint::Entrance(act) => format!("act {} entrance", act + 1),
+            StartPoint::BossDoor(act) => format!("act {} boss", act + 1),
+        })
+        .collect()
+}
+
 /// Offsets and sizes of the run observation (`sim::runobs`), by name.
 #[pyfunction]
 fn run_layout(py: Python<'_>) -> PyResult<Bound<'_, PyDict>> {
@@ -701,6 +738,7 @@ fn _sim(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(layout, m)?)?;
     m.add_function(wrap_pyfunction!(run_layout, m)?)?;
     m.add_function(wrap_pyfunction!(run_names, m)?)?;
+    m.add_function(wrap_pyfunction!(start_points, m)?)?;
     m.add_function(wrap_pyfunction!(card_names, m)?)?;
     m.add_function(wrap_pyfunction!(card_ids, m)?)?;
     m.add_function(wrap_pyfunction!(game_ids, m)?)?;
