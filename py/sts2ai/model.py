@@ -140,6 +140,9 @@ class Arch:
     pointer: bool = False
     piles: bool = False
     choice_attn: bool = False
+    # An auxiliary head predicting the damage the player takes this enemy
+    # turn (`forward_incoming`), trained beside the policy.
+    incoming: bool = False
 
 
 class Policy(nn.Module):
@@ -275,12 +278,13 @@ class SlotAttention(Policy):
         pointer: bool = False,
         piles: bool = False,
         choice_attn: bool = False,
+        incoming: bool = False,
     ):
         super().__init__()
         L = layout
         assert L.targets == L.max_enemies + 1
         self.layout = L
-        self.arch = Arch("attn", hidden, depth, pointer, piles, choice_attn)
+        self.arch = Arch("attn", hidden, depth, pointer, piles, choice_attn, incoming)
         d = hidden
         self.card = nn.Embedding(L.card_vocab, card_dim, padding_idx=0)
         self.monster = nn.Embedding(L.monster_vocab, monster_dim, padding_idx=0)
@@ -324,10 +328,24 @@ class SlotAttention(Policy):
         self.choose = KeyedHead(d, d, 1)
         self.end_or_skip = _head(d, 2)
         self.v = nn.Linear(d, 1)
+        if incoming:
+            # Auxiliary: the damage this enemy turn deals, given the play so far.
+            self.incoming = nn.Linear(d, 1)
         nn.init.orthogonal_(self.v.weight, gain=1.0)
         nn.init.zeros_(self.v.bias)
 
     def forward(self, floats: Tensor, ids: Tensor) -> tuple[Tensor, Tensor]:
+        logits, g = self.trunk(floats, ids)
+        return logits, self.v(g).squeeze(-1)
+
+    def forward_incoming(self, floats: Tensor, ids: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+        """`forward` and the damage the player is about to take this enemy
+        turn (`incoming` head, a thirtieth of the HP), for its auxiliary loss."""
+        logits, g = self.trunk(floats, ids)
+        return logits, self.v(g).squeeze(-1), self.incoming(g).squeeze(-1)
+
+    def trunk(self, floats: Tensor, ids: Tensor) -> tuple[Tensor, Tensor]:
+        """The action logits and the encoded global token."""
         L = self.layout
         B = floats.shape[0]
         H, E, P, C = L.max_hand, L.max_enemies, L.max_potions, L.max_choices
@@ -378,7 +396,7 @@ class SlotAttention(Policy):
         choose = self.choose(g, choices).squeeze(2)
         end_skip = self.end_or_skip(g)
         logits = torch.cat([play, use, end_skip[:, :1], choose, end_skip[:, 1:]], dim=1)
-        return logits, self.v(g).squeeze(-1)
+        return logits, g
 
     def pile_tokens(self, floats: Tensor) -> Tensor:
         """`[B, 3, d]`: the draw, discard and exhaust piles, from their
@@ -395,7 +413,7 @@ def build_policy(layout: Layout, arch: Arch) -> Policy:
     if arch.kind == "slots":
         return SlotMLP(layout, hidden=arch.hidden, depth=arch.depth)
     if arch.kind == "attn":
-        return SlotAttention(layout, arch.hidden, arch.depth, pointer=arch.pointer, piles=arch.piles, choice_attn=arch.choice_attn)
+        return SlotAttention(layout, arch.hidden, arch.depth, pointer=arch.pointer, piles=arch.piles, choice_attn=arch.choice_attn, incoming=arch.incoming)
     raise ValueError(f"unknown architecture {arch.kind!r}: slots or attn")
 
 
