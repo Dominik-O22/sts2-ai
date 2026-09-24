@@ -444,4 +444,29 @@ mod tests {
             assert_eq!(first.0, Some(opens), "{at:?}");
         }
     }
+
+    /// A generated player, in game ids, builds every fight of the run it
+    /// is put into: no id is lost between the sim's names and the game's.
+    #[test]
+    fn generated_players_build_their_fights() {
+        let mut rng = Rng::new(11);
+        for seed in 0..40 {
+            for at in START_POINTS {
+                let setup = crate::gen::generate(&mut rng, 16 * at.act() as u32 + 15, Ascension(10));
+                let carried = Carried::generated(&setup);
+                assert_eq!(carried.deck.len(), setup.deck.len());
+                let played = {
+                    let mut run = Run::start_at(&format!("GEN{seed}"), Ascension(10), at, carried);
+                    let mut fought = None;
+                    loop {
+                        match run.next(fought, &mut First) {
+                            Next::Fight(setup) => fought = Some(stub_fight(&mut run.state, setup)),
+                            Next::End(end) => break end,
+                        }
+                    }
+                };
+                assert!(!matches!(&played, End::Stuck(why) if why.starts_with("unknown")), "seed {seed} {at:?}: {played:?}");
+            }
+        }
+    }
 }
