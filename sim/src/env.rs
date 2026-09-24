@@ -64,16 +64,26 @@ fn potion_value(c: &Combat) -> f32 {
     }
 }
 
+/// What a lost fight pays per fraction of the enemies' HP taken.
+///
+/// A flat -1 made every line of a lost fight worth the same, so once the
+/// value head read a fight as lost the policy stopped trying (it ended turns
+/// with Defends in hand against Aeonglass), and search, which scores lines
+/// by the same rewards and value, tied every option there. The best loss
+/// still pays -0.8, far under any win.
+const LOSS_DAMAGE: f32 = 0.2;
+
 /// Stopgap terminal reward (DESIGN.md, Decision engine): a win is worth 1
 /// plus the HP fraction kept at `hp_weight` and `POTION_VALUE` per unused
-/// potion; a loss or a timed-out fight is -1.
+/// potion; a loss or a timed-out fight is -1 plus `LOSS_DAMAGE` per
+/// fraction of the enemies' HP taken.
 pub fn terminal_reward(c: &Combat) -> f32 {
     match c.outcome {
         Some(Outcome::Won) => {
             let hp = c.player.creature.hp as f32 / c.player.creature.max_hp.max(1) as f32;
             1.0 + hp_weight(c) * hp + potion_value(c) * potions_held(c) as f32
         }
-        _ => -1.0,
+        _ => -1.0 + LOSS_DAMAGE * enemy_hp_taken(c).min(1.0),
     }
 }
 

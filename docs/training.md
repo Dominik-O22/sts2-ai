@@ -67,7 +67,10 @@ maturin from `sim-py/` into the package `sts2ai._sim`.
   held-out set: ten generated fights per encounter from a fixed seed
   (`gen::holdout`), or on run recordings (Real decks, below).
 - Reward (`env.rs`): the terminal reward is a win at `1 + w * hp_frac +
-  0.1 * potions_left`, a loss or a 500-step timeout at -1. `w` is 0.5,
+  0.1 * potions_left`, a loss or a 500-step timeout at `-1 + 0.2 *
+  enemy_hp_taken` (capped at -0.8). Under a flat -1 every line of a lost
+  fight paid the same, so the policy folded once its value read a fight as
+  lost, and search tied every option there. `w` is 0.5,
   except after an act boss, where the next act's Ancient heals 80% of the
   missing HP at A10 and only the other 20% counts (0.1). A potion at 0.1 is
   about 16 HP. On top of it, potential-based shaping: each step pays the
