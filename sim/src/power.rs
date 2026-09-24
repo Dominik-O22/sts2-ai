@@ -89,6 +89,7 @@ pub fn is_debuff(id: PowerId) -> bool {
             | PowerId::TheGambit
             | PowerId::DarkShackles
             | PowerId::Knockdown
+            | PowerId::Strangle
     )
 }
 
@@ -590,6 +591,8 @@ impl Power {
             {
                 remove()
             }
+            // StranglePower.AfterSideTurnEnd: gone once its owner's side is done.
+            PowerId::Strangle if own_side => remove(),
             // TenderPower.cs: the turn's Strength and Dexterity come back.
             PowerId::Tender if own_side => {
                 let n = std::mem::take(&mut self.data);

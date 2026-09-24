@@ -221,6 +221,15 @@ card MinionDiveBomb
 card MinionSacrifice
 card MinionStrike
 card SweepingGaze
+card MadScienceSapping
+card MadScienceViolence
+card MadScienceChoking
+card MadScienceEnergized
+card MadScienceWisdom
+card MadScienceChaos
+card MadScienceExpertise
+card MadScienceCurious
+card MadScienceImprovement
 power Strength
 power Dexterity
 power Vulnerable
@@ -359,6 +368,9 @@ power Knockdown
 power Mayhem
 power BattlewornDummyTimeLimit
 power ReptileTrinket
+power Strangle
+power Curious
+power Improvement
 monster Nibbit
 monster FuzzyWurmCrawler
 monster ShrinkerBeetle
