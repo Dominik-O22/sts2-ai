@@ -4,6 +4,7 @@ as far as the page keeps it, so the run layer can walk it
 
     python3 scripts/tracker.py            # paste run URLs one at a time, Enter on an empty line to stop
     python3 scripts/tracker.py URL...     # the same for the URLs given
+    python3 scripts/tracker.py --reconvert  # rewrite the saved runs after a change here
 
 Run URLs look like https://ststracker.app/<steam id>/runs/<start time>.run.
 Each run is saved as `<steam id>-<start time>.run` in OUT (`--out`, default
@@ -79,12 +80,18 @@ def event_pages(dirs: list[Path]) -> dict[tuple[str, str], str]:
     return pages
 
 
-def room_type(point: str, model: str | None) -> str:
-    """The history's `room_type`: an unknown point is the room it became."""
+def room_type(floor: dict) -> str:
+    """The history's `room_type`: an unknown point is the room it became,
+    which the page names only for events and fights. A shop lays out cards
+    or relics to buy; a chest gives one relic."""
+    point, model = floor["mapPointType"], floor["modelId"]
     if model and model.startswith("EVENT."):
         return "event"
     if model and model.startswith("ENCOUNTER."):
         return "boss" if model.endswith("_BOSS") else "elite" if model.endswith("_ELITE") else "monster"
+    if point == "unknown":
+        shelf = floor["cardsSkipped"] or floor["relicsSkipped"] or floor["goldSpent"]
+        return "shop" if shelf else "treasure"
     return point
 
 
@@ -101,7 +108,7 @@ def convert(page: dict, pages: dict[tuple[str, str], str]) -> dict:
     history = [[] for _ in run["acts"]]
     for f in timeline:
         model = f["modelId"]
-        room = {"room_type": room_type(f["mapPointType"], model), "turns_taken": f["turnsTaken"]}
+        room = {"room_type": room_type(f), "turns_taken": f["turnsTaken"]}
         if model:
             room["model_id"] = model
         if f["monsterIds"]:
@@ -174,33 +181,44 @@ def fetch(url: str) -> dict:
     return unflatten(nodes[-1]["data"])
 
 
-def save(url: str, out: Path, pages: dict[tuple[str, str], str]) -> None:
-    """Fetches the run at `url`, writes it into `out` and says what it is."""
-    parts = url.strip().rstrip("/").split("/")
-    if len(parts) < 3 or parts[-2] != "runs" or not parts[-1].endswith(".run"):
-        raise ValueError("not a run URL (…/<steam id>/runs/<start time>.run)")
-    player_id, name = parts[-3], parts[-1]
-    page = fetch(url.strip())
+def write(page: dict, path: Path, pages: dict[tuple[str, str], str]) -> None:
+    """Writes the page's run to `path` and says what it is."""
     run = page["runDetail"]
-    path = out / f"{player_id}-{name}"
     path.write_text(json.dumps(convert(page, pages)))
     character = run["players"][0]["characterId"].split(".")[-1].lower()
     outcome = "won" if run["win"] else f"lost to {run['killedByEncounter'].split('.')[-1].lower()}"
     print(f"  {path.name}: {character} A{run['ascension']} {run['buildId']}, {outcome} on floor {len(page['floorTimeline'])}, seed {run['seed']}")
-    if run["buildId"] != "v0.107.1" or character != "ironclad" or len(run["players"]) != 1:
-        print("  (runcheck skips it: only solo Ironclad runs on v0.107.1)")
+    if run["buildId"] != "v0.107.1" or character != "ironclad" or len(run["players"]) != 1 or run["modifiers"]:
+        print("  (runcheck skips it: only solo Ironclad runs on v0.107.1 without modifiers)")
     missing = sorted({f"{c['eventId']}.{c['choiceId']}" for f in page["floorTimeline"] for c in f["eventChoices"]} - {f"{e}.{o}" for e, o in pages})
     if missing:
         print(f"  event page unknown, INITIAL assumed: {', '.join(missing)}")
+
+
+def save(url: str, out: Path, pages: dict[tuple[str, str], str]) -> None:
+    """Fetches the run at `url` and writes it into `out`, keeping the page's
+    data in `out/pages` so `--reconvert` can redo it."""
+    parts = url.strip().rstrip("/").split("/")
+    if len(parts) < 3 or parts[-2] != "runs" or not parts[-1].endswith(".run"):
+        raise ValueError("not a run URL (…/<steam id>/runs/<start time>.run)")
+    name = f"{parts[-3]}-{parts[-1]}"
+    page = fetch(url.strip())
+    (out / "pages" / f"{name}.json").write_text(json.dumps(page))
+    write(page, out / name, pages)
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Save ststracker.app runs as .run history files.")
     ap.add_argument("urls", nargs="*", help="run pages; without any, read them from the prompt")
     ap.add_argument("--out", type=Path, default=GAME_DATA / "sts2ai/tracker")
+    ap.add_argument("--reconvert", action="store_true", help="rewrite every saved run from its kept page, fetching nothing")
     args = ap.parse_args()
-    args.out.mkdir(parents=True, exist_ok=True)
+    (args.out / "pages").mkdir(parents=True, exist_ok=True)
     pages = event_pages(list(HISTORY.glob("**/saves/history")))
+    if args.reconvert:
+        for kept in sorted((args.out / "pages").glob("*.json")):
+            write(json.loads(kept.read_text()), args.out / kept.stem, pages)
+        return
     urls = iter(args.urls) if args.urls else iter(lambda: input("run URL (Enter to stop): "), "")
     for url in urls:
         try:

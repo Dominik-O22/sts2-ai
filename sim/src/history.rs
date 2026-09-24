@@ -42,11 +42,13 @@ use crate::shop::{Item, Ware};
 use crate::types::Ascension;
 
 /// Whether the port can walk the run: a standard singleplayer Ironclad run
-/// on the pinned game version.
+/// on the pinned game version, with no modifiers (Hextech Mayhem and the
+/// like, which a run can carry with its mode still "standard").
 pub fn eligible(run: &Value) -> bool {
     let character = run["players"][0]["character"].as_str().unwrap_or("");
     let solo = run["players"].as_array().map_or(0, Vec::len) == 1;
-    run["build_id"] == "v0.107.1" && run["game_mode"] == "standard" && character == "CHARACTER.IRONCLAD" && solo
+    let plain = run["modifiers"].as_array().is_none_or(Vec::is_empty);
+    run["build_id"] == "v0.107.1" && run["game_mode"] == "standard" && character == "CHARACTER.IRONCLAD" && solo && plain
 }
 
 /// What walking a run found.
