@@ -24,7 +24,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 from sts2ai.env import DEFAULT_RECORDINGS, End, Envs, has_recordings
 from sts2ai.evaluate import evaluate
-from sts2ai.model import Arch, Policy, build_policy, checkpoint_arch, checkpoint_layout, checkpoint_vocab, load_state, masked_logits
+from sts2ai.model import Arch, Policy, build_policy, checkpoint_arch, checkpoint_layout, checkpoint_vocab, load_state, masked_logits, warm_start
 from sts2ai.search import rollout, spread
 from sts2ai.vocab import current_text
 
@@ -121,6 +121,18 @@ class Config:
     arch: str = "slots"
     hidden: int = 512
     depth: int = 2
+    # `attn` options (`model.Arch`).
+    pointer: bool = False
+    piles: bool = False
+    choice_attn: bool = False
+    # Start a new network from a checkpoint's weights where the names and
+    # shapes match (`model.warm_start`), with a fresh optimizer, counting
+    # iterations on from it. For an architecture change; `resume` is for
+    # the same one.
+    init_from: Path | None = None
+    # Stop after this many minutes of training (the last iteration saves
+    # and evaluates as the `iters`th would), for comparisons at equal time.
+    minutes: float | None = None
 
 
 class Rollout:
@@ -309,7 +321,8 @@ def train(cfg: Config) -> Policy:
     device = torch.device(cfg.device)
     envs = Envs(cfg.envs, seed=cfg.seed, max_floor=cfg.floor_start)
     ck = torch.load(cfg.resume, map_location=device) if cfg.resume else None
-    policy = build_policy(envs.layout, checkpoint_arch(ck) if ck else Arch(cfg.arch, cfg.hidden, cfg.depth)).to(device)
+    arch = checkpoint_arch(ck) if ck else Arch(cfg.arch, cfg.hidden, cfg.depth, cfg.pointer, cfg.piles, cfg.choice_attn)
+    policy = build_policy(envs.layout, arch).to(device)
     opt = torch.optim.Adam(policy.parameters(), lr=cfg.lr, eps=1e-5)
     # `net` is what runs; `policy` keeps the plain module for checkpoints.
     net = torch.compile(policy) if cfg.compile and device.type == "cuda" else policy
@@ -342,6 +355,13 @@ def train(cfg: Config) -> Policy:
             opt.load_state_dict(ck["optimizer"])
         start_iter, global_step = ck["iter"] + 1, ck["global_step"]
         print(f"resumed {cfg.resume} at iteration {ck['iter']}")
+    elif cfg.init_from:
+        init = torch.load(cfg.init_from, map_location=device)
+        if checkpoint_vocab(init, None) != current_text():
+            raise ValueError(f"{cfg.init_from} was trained on another vocabulary; warm starts need the same one")
+        fresh = warm_start(policy, init["policy"])
+        start_iter, global_step = init["iter"] + 1, init["global_step"]
+        print(f"started from {cfg.init_from} at iteration {init['iter']}; new: {', '.join(fresh) or 'nothing'}")
     cfg.run_dir.mkdir(parents=True, exist_ok=True)
     writer = SummaryWriter(str(cfg.run_dir))
     print(f"training {policy.arch} on {device}, {cfg.envs} envs x {cfg.steps} steps, logs in {cfg.run_dir}")
@@ -502,7 +522,8 @@ def train(cfg: Config) -> Policy:
                 f"kl {losses['approx_kl'] / n_updates:6.4f} {sps:8.0f} sps "
                 f"(rollout {t_rollout:.2f} s, sim {t_sim:.2f} s, update {t_update:.2f} s)"
             )
-        if it % cfg.eval_every == 0 or it == start_iter + cfg.iters - 1:
+        out_of_time = cfg.minutes is not None and time.time() - t0 > cfg.minutes * 60
+        if it % cfg.eval_every == 0 or it == start_iter + cfg.iters - 1 or out_of_time:
             save_checkpoint(cfg.run_dir / "latest.pt", policy, opt, it, global_step)
             if cfg.keep_every and it % cfg.keep_every == 0:
                 shutil.copy(cfg.run_dir / "latest.pt", cfg.run_dir / f"it{it}.pt")
@@ -515,5 +536,8 @@ def train(cfg: Config) -> Policy:
             if has_recordings(cfg.recordings):
                 win, _, _ = evaluate(policy, device, 8, "recordings", cfg.recordings)
                 writer.add_scalar("eval/recorded_win_rate", win, global_step)
+        if out_of_time:
+            print(f"stopped after {cfg.minutes:g} minutes at iteration {it}")
+            break
     writer.close()
     return policy
