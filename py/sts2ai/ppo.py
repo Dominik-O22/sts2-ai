@@ -362,6 +362,8 @@ def train(cfg: Config) -> Policy:
             group["lr"] = lr
 
         # Rollout.
+        t_rollout = time.perf_counter()
+        t_sim = 0.0
         search_go.clear()
         policy.eval()
         with torch.no_grad():
@@ -376,7 +378,10 @@ def train(cfg: Config) -> Policy:
                 dist = torch.distributions.Categorical(logits=masked_logits(logits.float(), mask), validate_args=False)
                 action = dist.sample()
                 roll.actions[t], roll.logp[t], roll.values[t] = action, dist.log_prob(action), value.float()
-                ends = envs.step(action.cpu().numpy())
+                picked = action.cpu().numpy()
+                sim_start = time.perf_counter()
+                ends = envs.step(picked)
+                t_sim += time.perf_counter() - sim_start
                 roll.rewards[t].copy_(torch.from_numpy(envs.rewards), non_blocking=True)
                 roll.dones[t].copy_(torch.from_numpy(envs.dones), non_blocking=True)
                 stats.add(ends)
@@ -386,6 +391,7 @@ def train(cfg: Config) -> Policy:
                 _, last_value = net(floats, ids)
             adv, returns = roll.advantages(last_value.float(), cfg.gamma, cfg.lam)
         search_go.set()
+        t_rollout = time.perf_counter() - t_rollout
         global_step += cfg.steps * cfg.envs
         # A search still running when the rollout ends keeps running, and
         # this iteration starts none, unless `search_sync`.
@@ -403,6 +409,7 @@ def train(cfg: Config) -> Policy:
                 wait([pending])
 
         # Update.
+        t_update = time.perf_counter()
         policy.train()
         B = cfg.steps * cfg.envs
         flat = {
@@ -471,6 +478,7 @@ def train(cfg: Config) -> Policy:
             torch.compiler.set_stance("eager_on_recompile")
 
         losses = {k: v.item() for k, v in losses.items()}
+        t_update = time.perf_counter() - t_update
 
         # Logging.
         summary = stats.summary()
@@ -482,12 +490,17 @@ def train(cfg: Config) -> Policy:
         writer.add_scalar("curriculum/max_floor", max_floor, global_step)
         writer.add_scalar("perf/sps", sps, global_step)
         writer.add_scalar("perf/searches_per_iter", searches / (it - start_iter + 1), global_step)
+        # Seconds per iteration: the rollout, the sim's share of it, the update.
+        writer.add_scalar("perf/rollout_s", t_rollout, global_step)
+        writer.add_scalar("perf/rollout_sim_s", t_sim, global_step)
+        writer.add_scalar("perf/update_s", t_update, global_step)
         if it % 10 == 0 or it == start_iter:
             win = summary.get("win_rate", float("nan"))
             print(
                 f"it {it:5d} step {global_step:>10d} floor<={max_floor:2d} win {win:6.1%} "
                 f"reward {summary.get('reward', float('nan')):6.3f} ent {losses['entropy'] / n_updates:5.3f} "
-                f"kl {losses['approx_kl'] / n_updates:6.4f} {sps:8.0f} sps"
+                f"kl {losses['approx_kl'] / n_updates:6.4f} {sps:8.0f} sps "
+                f"(rollout {t_rollout:.2f} s, sim {t_sim:.2f} s, update {t_update:.2f} s)"
             )
         if it % cfg.eval_every == 0 or it == start_iter + cfg.iters - 1:
             save_checkpoint(cfg.run_dir / "latest.pt", policy, opt, it, global_step)
