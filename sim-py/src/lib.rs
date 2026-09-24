@@ -41,7 +41,7 @@ impl VecEnv {
     #[new]
     #[pyo3(signature = (n, seed=0, asc=10, min_floor=1, max_floor=LAST_FLOOR, max_steps=500, hard_frac=0.0))]
     fn new(n: usize, seed: u64, asc: u8, min_floor: u32, max_floor: u32, max_steps: u32, hard_frac: f32) -> Self {
-        let cfg = EnvConfig { asc: Ascension(asc), min_floor, max_floor, max_steps, hard_frac, real_frac: 0.0 };
+        let cfg = EnvConfig { asc: Ascension(asc), min_floor, max_floor, max_steps, hard_frac };
         Self { inner: Inner::new(n, seed, cfg) }
     }
 
@@ -101,15 +101,19 @@ impl VecEnv {
         n
     }
 
-    /// Fights of played runs (`sim::gen::run_setups`: one JSON object a
-    /// line) for `frac` of the resets from here on, each drawn with its
-    /// enemies rolled afresh. Returns how many there are.
-    #[pyo3(signature = (setups, frac, seed=0))]
-    fn use_real(&mut self, setups: &str, frac: f32, seed: u64) -> PyResult<usize> {
-        let setups = sim::gen::run_setups(setups, &Ids::new(), seed).map_err(pyo3::exceptions::PyValueError::new_err)?;
-        let n = setups.len();
-        self.inner.set_real(setups, frac);
-        Ok(n)
+    /// Pools of played runs' fights (`sim::gen::run_setups`: one JSON
+    /// object a line), each with the share of the resets it takes from here
+    /// on, each fight drawn with its enemies rolled afresh. Returns each
+    /// pool's size.
+    #[pyo3(signature = (pools, seed=0))]
+    fn use_real(&mut self, pools: Vec<(String, f32)>, seed: u64) -> PyResult<Vec<usize>> {
+        let pools = pools
+            .into_iter()
+            .map(|(text, share)| Ok((sim::gen::run_setups(&text, &Ids::new(), seed).map_err(pyo3::exceptions::PyValueError::new_err)?, share)))
+            .collect::<PyResult<Vec<_>>>()?;
+        let sizes = pools.iter().map(|(p, _)| p.len()).collect();
+        self.inner.set_real(pools);
+        Ok(sizes)
     }
 
     /// Switch to cycling through fights of played runs (as `use_real`

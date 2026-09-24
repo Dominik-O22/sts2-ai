@@ -200,11 +200,13 @@ mostly).
 ```
 uv run python -m sts2ai.setups                                               # pages -> setups/train.jsonl, holdout.jsonl
 uv run python -m sts2ai.evaluate runs/<time>/latest.pt --source setups       # win rate on held-out winners' fights
-uv run python -m sts2ai.train ... --real-setups ~/.local/share/SlayTheSpire2/sts2ai/tracker/setups/train.jsonl --real-frac 0.3
+uv run python -m sts2ai.evaluate runs/<time>/latest.pt --source easy         # HP lost in weak and normal fights, against the winners
+uv run python -m sts2ai.train ... --real-setups $S/train.jsonl:0.25,$S/easy-train.jsonl:0.1   # S=~/.local/share/SlayTheSpire2/sts2ai/tracker/setups
 ```
 
-With `--real-setups`, `real_frac` of the resets take one of those fights,
-its enemies rolled afresh; training evaluates on the held-out ones beside
+With `--real-setups`, each file takes its share of the resets (after the
+colon, `--real-frac` where none is given), one of its fights drawn with its
+enemies rolled afresh; training evaluates on the held-out ones beside
 the generated set. They are all wins, so they only show decks that got
 through; the generator keeps the weak ones. set-14 on them, greedy: act 1
 elites 92%, bosses 69%; act 2 88%, 67%; act 3 86%, 48%, against 15% on the
