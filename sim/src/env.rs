@@ -27,11 +27,14 @@ pub struct EnvConfig {
     /// floor from 5 up) or the boss instead, half each. The rest of the
     /// resets still roll elites and bosses at their natural rate.
     pub hard_frac: f32,
+    /// Fraction of resets that take a fight of a played run
+    /// (`VecEnv::set_real`) instead, when there are any.
+    pub real_frac: f32,
 }
 
 impl Default for EnvConfig {
     fn default() -> Self {
-        Self { asc: Ascension(10), min_floor: 1, max_floor: LAST_FLOOR, max_steps: 500, hard_frac: 0.0 }
+        Self { asc: Ascension(10), min_floor: 1, max_floor: LAST_FLOOR, max_steps: 500, hard_frac: 0.0, real_frac: 0.0 }
     }
 }
 
@@ -185,21 +188,23 @@ impl Slot {
     /// Start the next fight. One already over before the first decision
     /// (Whispering Earring can win turn 1 on its own) is skipped: there is
     /// nothing in it to act on.
-    fn reset(&mut self, index: usize, n: usize, cfg: &EnvConfig, fixed: &[FightSetup], hard: &[(Encounter, f32)]) {
+    fn reset(&mut self, index: usize, n: usize, cfg: &EnvConfig, pools: Pools) {
         loop {
-            self.roll(index, n, cfg, fixed, hard);
+            self.roll(index, n, cfg, pools);
             if !self.combat.is_over() {
                 return;
             }
         }
     }
 
-    fn roll(&mut self, index: usize, n: usize, cfg: &EnvConfig, fixed: &[FightSetup], hard: &[(Encounter, f32)]) {
+    fn roll(&mut self, index: usize, n: usize, cfg: &EnvConfig, Pools { fixed, hard, real }: Pools) {
         let acts = act_floor(cfg.min_floor).0..=act_floor(cfg.max_floor).0;
         let weighted: Vec<(Encounter, f32)> =
             hard.iter().copied().filter(|(e, _)| acts.contains(&(e.act().index() as u32))).collect();
         self.setup = if !fixed.is_empty() {
             fixed[(index + self.resets * n) % fixed.len()].clone()
+        } else if !real.is_empty() && self.rng.next_float(1.0) < cfg.real_frac {
+            real[self.rng.next_int(real.len())].rerolled(&mut self.rng)
         } else if self.rng.next_float(1.0) < cfg.hard_frac && !weighted.is_empty() {
             // Elites and bosses by weight: the ones the policy loses most.
             let total: f32 = weighted.iter().map(|(_, w)| w).sum();
@@ -250,14 +255,25 @@ impl Slot {
     }
 }
 
+/// Where a reset can take its fight from besides the generator.
+#[derive(Clone, Copy)]
+struct Pools<'a> {
+    /// When set, resets cycle through these instead of generating.
+    fixed: &'a [FightSetup],
+    /// When set, the `hard_frac` share of fights draws its elite or boss
+    /// by these weights instead of evenly.
+    hard: &'a [(Encounter, f32)],
+    /// Fights of played runs, the `real_frac` share of resets drawing one
+    /// with its enemies rolled afresh.
+    real: &'a [FightSetup],
+}
+
 pub struct VecEnv {
     slots: Vec<Slot>,
     cfg: EnvConfig,
-    /// When set, resets cycle through these instead of generating.
     fixed: Vec<FightSetup>,
-    /// When set, the `hard_frac` share of fights draws its elite or boss
-    /// by these weights instead of evenly.
     hard: Vec<(Encounter, f32)>,
+    real: Vec<FightSetup>,
 }
 
 impl VecEnv {
@@ -271,9 +287,9 @@ impl VecEnv {
             })
             .collect();
         for (i, s) in slots.iter_mut().enumerate() {
-            s.reset(i, n, &cfg, &[], &[]);
+            s.reset(i, n, &cfg, Pools { fixed: &[], hard: &[], real: &[] });
         }
-        Self { slots, cfg, fixed: vec![], hard: vec![] }
+        Self { slots, cfg, fixed: vec![], hard: vec![], real: vec![] }
     }
 
     pub fn len(&self) -> usize {
@@ -310,11 +326,19 @@ impl VecEnv {
     pub fn set_fixed(&mut self, setups: Vec<FightSetup>) {
         self.fixed = setups;
         let n = self.slots.len();
-        let (cfg, fixed, hard) = (self.cfg, &self.fixed, &self.hard);
+        let cfg = self.cfg;
+        let pools = Pools { fixed: &self.fixed, hard: &self.hard, real: &self.real };
         for (i, s) in self.slots.iter_mut().enumerate() {
             s.resets = 0;
-            s.reset(i, n, &cfg, fixed, hard);
+            s.reset(i, n, &cfg, pools);
         }
+    }
+
+    /// Fights of played runs for `frac` of the resets from here on
+    /// (`EnvConfig::real_frac`), their enemies rolled afresh each time.
+    pub fn set_real(&mut self, setups: Vec<FightSetup>, frac: f32) {
+        self.real = setups;
+        self.cfg.real_frac = frac.clamp(0.0, 1.0);
     }
 
     pub fn combat(&self, i: usize) -> &Combat {
@@ -351,7 +375,8 @@ impl VecEnv {
         self.check_buffers(floats, ids, mask);
         let n = self.slots.len();
         assert!(actions.len() == n && rewards.len() == n && dones.len() == n, "batch size mismatch");
-        let (cfg, fixed, hard) = (self.cfg, &self.fixed, &self.hard);
+        let cfg = self.cfg;
+        let pools = Pools { fixed: &self.fixed, hard: &self.hard, real: &self.real };
         self.slots
             .par_iter_mut()
             .enumerate()
@@ -372,7 +397,7 @@ impl VecEnv {
                 *r = step_reward(before, &s.combat, s.base, over);
                 *d = over;
                 if over {
-                    s.reset(i, n, &cfg, fixed, hard);
+                    s.reset(i, n, &cfg, pools);
                 }
                 encode::encode(&s.combat, f, ids, m);
                 end
@@ -1019,10 +1044,9 @@ mod tests {
         let cfg = EnvConfig { hard_frac: 1.0, ..Default::default() };
         let mut env = VecEnv::new(4, 3, cfg);
         env.set_hard_weights(vec![(Encounter::KnowledgeDemonBoss, 1.0), (Encounter::VantomBoss, 0.0)]);
-        let fixed = vec![];
         for s in env.slots.iter_mut() {
             for _ in 0..20 {
-                s.reset(0, 4, &cfg, &fixed, &env.hard);
+                s.reset(0, 4, &cfg, Pools { fixed: &[], hard: &env.hard, real: &[] });
                 assert_eq!(s.setup.encounter, Encounter::KnowledgeDemonBoss);
                 assert_eq!(act_floor(s.setup.floor), (1, BOSS_FLOOR));
             }
@@ -1046,7 +1070,25 @@ mod tests {
         env.set_fixed(setups.clone());
         assert_eq!(env.slots[0].setup.encounter, setups[0].encounter);
         assert_eq!(env.slots[1].setup.encounter, setups[1].encounter);
-        env.slots[0].reset(0, 2, &env.cfg, &env.fixed, &[]);
+        env.slots[0].reset(0, 2, &env.cfg, Pools { fixed: &env.fixed, hard: &[], real: &[] });
         assert_eq!(env.slots[0].setup.encounter, setups[2].encounter);
+    }
+
+    /// A played run's fight keeps its deck, HP, encounter and floor each
+    /// time it is drawn.
+    #[test]
+    fn real_setups_keep_the_run() {
+        let ids = crate::replay::Ids::new();
+        let line = r#"{"start": {"ascension": 10, "deck": [{"id": "BASH", "up": true}, {"id": "STRIKE_IRONCLAD"}], "relics": ["BURNING_BLOOD"], "potions": [null, null]}, "hp": 41, "max_hp": 80, "encounter": "QUEEN_BOSS", "floor": 48}"#;
+        let real = crate::gen::run_setups(line, &ids, 1).unwrap();
+        let mut env = VecEnv::new(8, 5, EnvConfig::default());
+        env.set_real(real, 1.0);
+        let pools = Pools { fixed: &[], hard: &[], real: &env.real };
+        for s in env.slots.iter_mut() {
+            s.reset(0, 8, &env.cfg, pools);
+            assert_eq!((s.setup.encounter, s.setup.hp, s.setup.max_hp, s.setup.floor), (Encounter::QueenBoss, 41, 80, 48));
+            assert_eq!(s.setup.deck.len(), 2);
+            assert!(s.setup.deck[0].upgraded);
+        }
     }
 }

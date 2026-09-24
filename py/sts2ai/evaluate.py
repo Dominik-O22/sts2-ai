@@ -1,6 +1,6 @@
 """Greedy win rate of a policy on a held-out set.
 
-    uv run python -m sts2ai.evaluate runs/<name>/latest.pt [--source holdout|recordings]
+    uv run python -m sts2ai.evaluate runs/<name>/latest.pt [--source holdout|recordings|setups]
 
 `holdout` is a fixed generated set: ten fights per encounter on floors
 that encounter appears on, the same decks every time; `--acts 1` keeps it
@@ -8,6 +8,8 @@ to act 1, the set checkpoints before set-4 were measured on. `recordings`
 are fights the recorder mod saw in real runs: the decks a person built,
 which is the number that says whether the advisor can be trusted. The
 generator's decks are not those decks (docs/training.md, Real decks).
+`setups` are the elite and boss fights of other players' winning runs
+held out of training (`sts2ai.setups`): the decks that beat the game.
 """
 
 from __future__ import annotations
@@ -22,6 +24,7 @@ import torch
 
 from sts2ai.env import DEFAULT_RECORDINGS, End, Envs, has_recordings
 from sts2ai.model import Policy, load_policy, masked_logits
+from sts2ai.setups import HOLDOUT
 
 HOLDOUT_PER_ENCOUNTER = 10
 
@@ -41,18 +44,23 @@ def play(
     recordings: Path = DEFAULT_RECORDINGS,
     seed: int = 12345,
     acts: int = 3,
+    setups: Path = HOLDOUT,
 ) -> list[End]:
     """Plays every setup in the set `repeats` times (different shuffles),
     one env per setup so each gets exactly that many fights, greedy."""
     if source == "recordings" and not has_recordings(recordings):
         raise SystemExit(f"no run recordings in {recordings}; play with the recorder mod on (dev-console fights sit in dev/)")
-    probe = Envs(1, seed=seed)
-    n = probe.use_holdout(seed, HOLDOUT_PER_ENCOUNTER, acts) if source == "holdout" else probe.load_recordings(recordings)
+
+    def load(envs: Envs) -> int:
+        if source == "holdout":
+            return envs.use_holdout(seed, HOLDOUT_PER_ENCOUNTER, acts)
+        if source == "setups":
+            return envs.use_setups(setups, 1, seed)
+        return envs.load_recordings(recordings)
+
+    n = load(Envs(1, seed=seed))
     envs = Envs(n, seed=seed)
-    if source == "holdout":
-        envs.use_holdout(seed, HOLDOUT_PER_ENCOUNTER, acts)
-    else:
-        envs.load_recordings(recordings)
+    load(envs)
     per_env = [0] * n
     ends: list[End] = []
     while min(per_env) < repeats:
@@ -88,10 +96,11 @@ def evaluate(
     recordings: Path = DEFAULT_RECORDINGS,
     seed: int = 12345,
     acts: int = 3,
+    setups: Path = HOLDOUT,
 ) -> tuple[float, dict[str, tuple[int, int]], dict[str, float]]:
     """`play`, summed up: the overall win rate, per-encounter (wins,
     fights), and per-kind win rates."""
-    ends = play(policy, device, repeats, source, recordings, seed, acts)
+    ends = play(policy, device, repeats, source, recordings, seed, acts, setups)
     by_enc: dict[str, tuple[int, int]] = defaultdict(lambda: (0, 0))
     for e in ends:
         w, n = by_enc[e.encounter]
@@ -103,15 +112,16 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("checkpoint", type=Path)
     ap.add_argument("--old-vocab", type=Path, default=None, help="vocab.txt the checkpoint was trained with, if it predates the current sim")
-    ap.add_argument("--source", choices=["holdout", "recordings"], default="holdout")
+    ap.add_argument("--source", choices=["holdout", "recordings", "setups"], default="holdout")
     ap.add_argument("--repeats", type=int, default=2, help="fights per setup")
     ap.add_argument("--recordings", type=Path, default=DEFAULT_RECORDINGS)
     ap.add_argument("--acts", type=int, default=3, help="acts the holdout covers")
+    ap.add_argument("--setups", type=Path, default=HOLDOUT, help="played runs' fights, for --source setups")
     args = ap.parse_args()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     policy = load_policy(args.checkpoint, device, args.old_vocab)
     policy.eval()
-    win, by_enc, kinds = evaluate(policy, device, args.repeats, args.source, args.recordings, acts=args.acts)
+    win, by_enc, kinds = evaluate(policy, device, args.repeats, args.source, args.recordings, acts=args.acts, setups=args.setups)
     for enc, (w, n) in sorted(by_enc.items()):
         print(f"{enc:32s} {w:4d}/{n:<4d} {w / n:6.1%}")
     print("  ".join(f"{k} {v:.1%}" for k, v in kinds.items()))
