@@ -927,7 +927,10 @@ fn drawn_as_recorded(
         // reward's card among them if the Fysh came first.
         let cards = stats["cards_gained"].as_array().map_or(0, Vec::len) as i32;
         let fysh = state.has_relic("LUCKY_FYSH") && (gained - gold) % 15 == 0 && (0..=cards).contains(&((gained - gold) / 15));
-        if gained != gold && !fysh {
+        // Bowler Hat adds a quarter, truncated (`RunState::gain_gold`), unless
+        // the gold was taken before the Hat on the same screen.
+        let hat = state.has_relic("BOWLER_HAT") && gained == (f64::from(gold) * 1.25) as i32;
+        if gained != gold && !fysh && !hat {
             return Err(format!("gold {gold}, the run gained {gained}"));
         }
     }
