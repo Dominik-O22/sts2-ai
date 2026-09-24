@@ -198,7 +198,13 @@ OUT.run` turns a run page into this format, minus what the page drops
 (potion offers, the ancients' unchosen options, transforms, enchantments
 made on the way). Its first run, an A10 win (seed ZQY94FARS9), walks
 from its seed with the rooms and the Rewards stream matching on all 49
-floors; the effects differ only where the page is silent.
+floors; the effects differ only where the page is silent. The walk keeps
+every potion a page's floor offers and takes the port's potions as the
+player's, since which events come up depends on the potions held, and
+counts a page's ancient as matching when the option taken was among the
+port's. Over the 1,193 crawled wins (2026-09-25): rooms match in 912
+of the 1,099 runs it counts, ancients' options in 3,196 of 3,476,
+and effects differ on 2,677 of 35,599 floors compared.
 
 Fights draw on the run's Niche stream: `CombatState.CreateCreature`
 rolls each enemy's max HP there. The run draws once per enemy a fight
@@ -337,8 +343,10 @@ The run policy (`sts2ai.runmodel`) is a small transformer over the tokens
 (128 wide, 2 layers), a pointer head scoring each option token against
 the global token, and a value head on the global token. Its card
 embedding starts from the combat checkpoint's. A run checkpoint records
-its arch, the run layout and the vocabulary, and refuses to load when
-either moved: there is no remap for run checkpoints yet.
+its arch, the run layout and the vocabulary. When ids were appended since,
+each embedding's rows move to their names' new indices
+(`runmodel.remap_run_state`, checked by `python -m sts2ai.vocab`); a
+change to the layout otherwise is refused.
 
 ### Fights
 
@@ -386,9 +394,79 @@ skilled human could know.
   (`runobs::tests::hidden_information_does_not_reach_the_encoding`): two
   runs with different seeds, streams and plans but the same visible state
   encode identically at a map step, a card reward, a relic reward and a
-  deck pick.
+  deck pick. `history::tests::imitation_rows_hold_no_hidden_information`
+  does the same for every decision two recorded runs put, of all nine
+  kinds: each encodes the same from a copy of the run whose seed, streams
+  and plan are another seed's (the acts' bosses kept, which the map shows).
 
 The exact streams are for checking the port against real runs.
+
+### Winners' decisions
+
+The run policy learned only from its own runs and settled around floor
+23, healing at nearly every rest site and never walking into an elite.
+Winners do neither: in their recorded runs they heal at 30% of the rest
+sites where they choose between healing and smithing, and 17% of their
+map steps go into an elite. `history::imitate` turns their runs into
+rows to start the policy from (`sts2ai.imitation`, docs/training.md).
+
+It walks a run as the history check does, with the effects live, and
+encodes every decision the record makes with `runobs::observe` as the
+run policy would see it, with the option the player took. A decision
+the policy would not be asked is left out: one with a single option, one
+`Playable` would cut a card from, and one whose choice the record does
+not keep (a page's potion offers, transforms and enchantments).
+
+A floor's decisions count when:
+
+- its room and every room before it are the record's (after a room
+  differs, the unknown-room odds and the event pool are the port's, not
+  the game's);
+- what the floor drew is what the record shows (`drawn_as_recorded`), and
+  every choice the record made there was on offer;
+- the effects leave the player as the record has them, or were not
+  compared only because the Rewards stream was already lost.
+
+Map steps are not recorded, only the type of each point, so a map step
+counts where one point fits the record's types at the floor it leaves
+(`points_on_paths`), and one of the points the player could go to from
+it (`forward::path_options`) fits at the next; and the rooms so far
+matched.
+
+The walk does not stop at the first floor whose draws differ from the
+record, as runcheck's stream check does. The walk sets the player back to
+the record after every floor it does not match, so a later floor whose
+own draws are the record's (a rest site, most events, an ancient) or a
+map step still shows the player what the game did. What drifts after
+that floor is the port's card rarity offset and potion drop odds, two
+floats of the global token. Each row says whether it came before the
+first mismatch (`streamed`), so training can keep to those.
+
+Two approximations remain. The rewards screen after a fight sees the
+record's HP after the floor, which holds what a relic taken there adds.
+A shop's buys are asked relics first, then cards, potions and the
+removal, since the record does not keep their order.
+
+Over the 1,193 tracker wins (2026-09-25), 1,183 runs give 63,283 rows.
+Split by player as the fight setups are (15% of players held out):
+
+| Decision | train | holdout | before the first mismatch (train / holdout) |
+|---|---|---|---|
+| Path | 13,969 | 3,333 | 7,549 / 1,807 |
+| Card | 12,290 | 2,755 | 10,229 / 2,346 |
+| Rest | 6,237 | 1,411 | 3,797 / 868 |
+| Deck | 5,395 | 1,213 | 3,408 / 779 |
+| Relic | 4,975 | 1,073 | 3,999 / 870 |
+| Event | 3,804 | 883 | 2,853 / 660 |
+| Shop | 3,110 | 694 | 2,149 / 523 |
+| Ancient | 1,729 | 379 | 1,263 / 290 |
+| Bundle | 28 | 5 | 28 / 5 |
+| all | 51,537 (963 runs, 187 players) | 11,746 (220 runs, 38 players) | 35,275 / 8,148 |
+
+Left out: 13,390 potion decisions a page does not keep, 1,537 of its
+transforms and enchantments, 31,916 decisions on floors where the walk
+differs from the record, 421 whose recorded choice the port did not
+offer, 252 that offer a card the sim cannot play.
 
 ### Exactness
 

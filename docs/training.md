@@ -278,6 +278,65 @@ uv run python -m sts2ai.runplay runs/ab-attn/latest.pt --choices first     # or 
   decision (paths by room type, heal or smith, take or skip a card, shop
   buys), and `--show N` prints N decisions with the odds for each option.
 
+### Starting from winners' decisions
+
+PPO alone left the run policy healing at 95% of rest sites and stepping
+into an elite on 1% of map steps, around floor 23. Winners heal at 30%
+and step into an elite on 17% (docs/run-env.md, Winners' decisions). The
+policy can first clone their decisions, then go on with PPO:
+
+```
+uv run python -m sts2ai.imitation build                    # tracker/*.run -> tracker/imitation/{train,holdout}.npz
+I=~/.local/share/SlayTheSpire2/sts2ai/tracker/imitation
+uv run python -m sts2ai.runtrain runs/set-14/it40000.pt --run-dir runs/imitate-1 --imitate $I/train.npz --minutes 0
+uv run python -m sts2ai.imitation agree runs/run-4/latest.pt runs/imitate-1/imitated.pt   # holdout agreement by kind
+uv run python -m sts2ai.runtrain runs/set-14/it40000.pt --run-dir runs/run-6 --imitate $I/train.npz --minutes 60   # then PPO
+```
+
+`--imitate` trains on cross-entropy over the chosen option, with the
+policy's own option masking, `--imitate-epochs` (8) passes of batches of
+256 at lr 1e-3. It leaves the value head alone, so PPO starts with an
+untrained critic. Eight epochs take 40 seconds on the GPU; holdout
+agreement is 65% after the first and 67% from the third on.
+
+Top-1 agreement with the winners on the held-out players' 11,746
+decisions, 2026-09-25 (chance is a uniform pick among the options shown;
+the untrained policy is a fresh `RunPolicy`; run-4 and run-5 are the PPO
+runs of 2026-09-24, loaded across the Mad Science ids):
+
+| Decision | rows | chance | untrained | run-4 (PPO) | run-5 (PPO) | imitate-1 |
+|---|---|---|---|---|---|---|
+| Path | 3,333 | 46.0% | 34.5% | 59.3% | 59.8% | 75.6% |
+| Card | 2,755 | 24.7% | 24.6% | 30.9% | 29.0% | 52.1% |
+| Rest | 1,411 | 48.8% | 31.6% | 32.5% | 31.8% | 79.6% |
+| Deck | 1,213 | 6.8% | 14.3% | 15.2% | 15.6% | 52.1% |
+| Relic | 1,073 | 49.9% | 7.4% | 86.0% | 84.4% | 99.5% |
+| Event | 883 | 48.2% | 51.0% | 48.0% | 47.9% | 64.0% |
+| Shop | 694 | 14.8% | 17.1% | 14.3% | 12.4% | 40.3% |
+| Ancient | 379 | 33.3% | 31.1% | 33.5% | 35.6% | 57.3% |
+| Bundle | 5 | 33.3% | 20.0% | 40.0% | 40.0% | 40.0% |
+| all | 11,746 | 35.6% | 27.4% | 42.9% | 42.4% | 66.8% |
+
+On the same holdout rows run-4 would heal at 97.6% of rest sites and
+step into an elite on 0.3% of map steps; imitate-1 heals at 28.3% and
+steps into an elite on 20.0%, against the winners' 31.8% and 15.3%.
+
+Played greedy (`runplay`, 256 envs, each env's first 2 runs, 512 runs,
+set-14's it40000 playing the fights greedy, 2026-09-25):
+
+| Run policy | floor mean (p10 / p90) | reached act 2 / 3 | won | map steps into an elite | rest sites healed | act 1 elites won | potions kept |
+|---|---|---|---|---|---|---|---|
+| run-4 (PPO) | 25.1 (17 / 33) | 71% / 7% | 0 | 0.3% | 99% | 96% of 447 | 77% |
+| imitate-1 (cloned only) | 17.2 (7 / 33) | 26% / 5% | 1 | 16.7% | 42% | 75% of 885 | 46% |
+
+The cloned policy walks and rests like the winners, and dies earlier for
+it: the combat policy wins three act 1 elites in four where the winners'
+decks win them all, and it takes twice as many. It also throws half its
+potions away, since the pages keep no potion offers and the clone never
+saw one. It won one run of the 512. PPO from
+the cloned policy (the last command above) is the next step: it has to
+keep the potions and learn how many elites this combat policy can take.
+
 ## What to watch
 
 `episode/win_rate` and `episode/win_boss` (also `win_elite`) in TensorBoard, and
