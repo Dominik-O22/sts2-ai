@@ -712,13 +712,18 @@ mod tests {
         assert!(a.iter().all(|s| act_floor(s.floor).0 == s.encounter.act().index() as u32));
     }
 
+    /// Played runs reach an act boss at about 60% HP: the rest site before it
+    /// often smiths rather than heals.
     #[test]
-    fn boss_fights_start_rested() {
+    fn boss_fights_start_as_played_runs_reach_them() {
         let mut rng = Rng::new(5);
-        for _ in 0..100 {
-            let s = generate(&mut rng, BOSS_FLOOR, Ascension(10));
-            assert!(s.hp >= (s.max_hp as f32 * 0.7).round() as i32, "boss start hp {}", s.hp);
-        }
+        let fractions: Vec<f32> = (0..400)
+            .map(|_| generate(&mut rng, BOSS_FLOOR, Ascension(10)))
+            .map(|s| s.hp as f32 / s.max_hp as f32)
+            .collect();
+        assert!(fractions.iter().all(|f| (0.39..=0.86).contains(f)), "a boss start outside 40-85%");
+        let mean = fractions.iter().sum::<f32>() / fractions.len() as f32;
+        assert!((0.58..=0.67).contains(&mean), "mean boss start {mean}");
     }
 
     #[test]
