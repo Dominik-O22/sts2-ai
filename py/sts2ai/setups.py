@@ -43,8 +43,17 @@ def walkable(run: dict) -> bool:
     return len(player) == 1 and player[0]["characterId"] == "CHARACTER.IRONCLAD" and run["buildId"] == BUILD and not run["modifiers"]
 
 
+# `TinkerTime.RiderEffect` in order. Each rider belongs to one card type
+# (`TinkerTime.cs`), so the rider alone names the sim's Mad Science card.
+RIDERS = ["NONE", "SAPPING", "VIOLENCE", "CHOKING", "ENERGIZED", "WISDOM", "CHAOS", "EXPERTISE", "CURIOUS", "IMPROVEMENT"]
+
+
 def card(c: dict, upgraded: bool) -> dict:
-    out = {"id": strip(c["id"]), "up": upgraded}
+    name = strip(c["id"])
+    props = {p["name"]: p["value"] for p in (c.get("props") or {}).get("ints", [])}
+    if name == "MAD_SCIENCE" and props.get("TinkerTimeRider"):
+        name = f"MAD_SCIENCE_{RIDERS[props['TinkerTimeRider']]}"
+    out = {"id": name, "up": upgraded}
     if ench := c.get("enchantment"):
         out["ench"] = [strip(ench["id"]), ench["amount"], False]
     return out
