@@ -168,10 +168,10 @@ impl PotionId {
         }
     }
 
-    /// `PotionUsage.CombatOnly` or `AnyTime`. Entropic Brew is out of combat
-    /// only and Fairy in a Bottle is automatic.
+    /// `PotionUsage.CombatOnly` or `AnyTime`: all but Fairy in a Bottle,
+    /// which drinks itself.
     pub fn usable_in_combat(self) -> bool {
-        !matches!(self, PotionId::EntropicBrew | PotionId::FairyInABottle)
+        self != PotionId::FairyInABottle
     }
 
     /// `CanBeGeneratedInCombat`.
@@ -221,7 +221,8 @@ impl PotionId {
             DropletOfPrecognition => vec![choose(Pile::DrawTop, CardFilter::Any, Then::MoveTo(Pile::Hand), false)],
             Duplicator => vec![self_power(PowerId::Duplication, 1)],
             EnergyPotion => vec![Effect::GainEnergy { amount: 2 }],
-            EntropicBrew | FairyInABottle => vec![],
+            EntropicBrew => vec![Effect::FillPotionSlots],
+            FairyInABottle => vec![],
             ExplosiveAmpoule => vec![Effect::DamageAllEnemies { amount: 10.0, props: ValueProp::UNPOWERED, dealer: me }],
             FirePotion => vec![Effect::Damage {
                 target: enemy(),

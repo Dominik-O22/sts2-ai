@@ -558,21 +558,22 @@ pub fn generate_against(rng: &mut Rng, floor: u32, asc: Ascension, encounter: En
     // Most runs commit to a plan; the rest take whatever, so the policy
     // still sees unfocused decks.
     let plan = (rng.next_int(5) != 0).then(|| PLANS[rng.next_int(PLANS.len())]);
-    // Act 1 rates per floor are set from the four played runs recorded by
-    // 2026-09-23 (`scripts/deckstats.py --gen`): act 1 decks carry well
-    // under one upgrade, enchantment and removal. Later acts had one played
-    // run between them, too few to set anything from.
+    // Rates per floor, by act, are set from the played runs
+    // (`scripts/deckstats.py --gen`): act 1 from the four played by
+    // 2026-09-23, acts 2 and 3 from the eight tagged by 2026-09-24 (six
+    // reached act 2, three act 3). Played decks keep taking cards, smith
+    // more each act, enchant mostly in act 2 (its Ancients and events), and
+    // remove about one card a run.
     for f in 1..floor {
-        // Later acts have more rest sites spent on smithing, and more shops
-        // and events that remove cards.
-        let later = act_floor(f).0 > 0;
-        if rng.next_int(3) < 2 {
+        let act = act_floor(f).0 as usize;
+        let [take, smith, enchant] = [[3, 20, 30], [5, 10, 5], [5, 4, 12]][act.min(2)];
+        if rng.next_int(take) < take - 1 {
             if let Some(id) = card_reward(rng, &pool, act_floor(f).0, &deck, plan) {
                 deck.push(Card::new(0, id, rng.next_int(20) == 0));
             }
         }
         // Smiths go to the cards that matter, not to Strikes.
-        if rng.next_int(if later { 4 } else { 20 }) == 0 {
+        if rng.next_int(smith) == 0 {
             let good: Vec<usize> = (0..deck.len())
                 .filter(|&i| !deck[i].upgraded && !matches!(def(deck[i].id).rarity, CardRarity::Basic | CardRarity::Special))
                 .collect();
@@ -585,17 +586,16 @@ pub fn generate_against(rng: &mut Rng, floor: u32, asc: Ascension, encounter: En
             }
         }
         // Removals take Strikes first, then Defends.
-        if rng.next_int(if later { 5 } else { 16 }) == 0 {
+        if rng.next_int(30) == 0 {
             let strikes = deck.iter().filter(|c| c.id == CardId::StrikeIronclad).count();
             let first = if strikes > 0 { CardId::StrikeIronclad } else { CardId::DefendIronclad };
             if let Some(i) = deck.iter().position(|c| c.id == first) {
                 deck.remove(i);
             }
         }
-        // Relics and events hand out enchantments; act 1 rarely sees more
-        // than one or two, and they only ever land on a card that accepts
-        // them (`EnchantmentModel.CanEnchant`).
-        if rng.next_int(30) == 0 {
+        // Relics and events hand out enchantments, only ever onto a card
+        // that accepts them (`EnchantmentModel.CanEnchant`).
+        if rng.next_int(enchant) == 0 {
             enchant_one(rng, &mut deck);
         }
     }
@@ -632,14 +632,16 @@ pub fn generate_against(rng: &mut Rng, floor: u32, asc: Ascension, encounter: En
     };
     // Events, relics and Ancients raise max HP by roughly this much an act.
     let max_hp = IRONCLAD_HP + (0..act_floor(floor).0).map(|_| 5 + rng.next_int(8) as i32).sum::<i32>();
-    // The floor before the boss is a rest site, so boss fights start
-    // rested; the second of two starts with what the first left. Played
-    // runs reach elites and other fights at about 65%.
+    // Played runs reach a boss at about 60% (the rest site before it often
+    // smiths), elites at about 55%, and other fights at 60% in act 1 and
+    // over 75% later; a second boss starts with what the first left.
     let (lo, span) = match encounter.kind() {
         Kind::Boss if second => (0.25, 0.5),
-        Kind::Boss => (0.7, 0.3),
+        Kind::Boss => (0.4, 0.45),
+        Kind::Elite => (0.3, 0.5),
         _ if floor == 1 => (1.0, 0.0),
-        _ => (0.35, 0.6),
+        _ if act_floor(floor).0 == 0 => (0.35, 0.5),
+        _ => (0.55, 0.45),
     };
     let hp = (max_hp as f32 * (lo + rng.next_float(span))).round() as i32;
     FightSetup {
@@ -710,13 +712,18 @@ mod tests {
         assert!(a.iter().all(|s| act_floor(s.floor).0 == s.encounter.act().index() as u32));
     }
 
+    /// Played runs reach an act boss at about 60% HP: the rest site before it
+    /// often smiths rather than heals.
     #[test]
-    fn boss_fights_start_rested() {
+    fn boss_fights_start_as_played_runs_reach_them() {
         let mut rng = Rng::new(5);
-        for _ in 0..100 {
-            let s = generate(&mut rng, BOSS_FLOOR, Ascension(10));
-            assert!(s.hp >= (s.max_hp as f32 * 0.7).round() as i32, "boss start hp {}", s.hp);
-        }
+        let fractions: Vec<f32> = (0..400)
+            .map(|_| generate(&mut rng, BOSS_FLOOR, Ascension(10)))
+            .map(|s| s.hp as f32 / s.max_hp as f32)
+            .collect();
+        assert!(fractions.iter().all(|f| (0.39..=0.86).contains(f)), "a boss start outside 40-85%");
+        let mean = fractions.iter().sum::<f32>() / fractions.len() as f32;
+        assert!((0.58..=0.67).contains(&mean), "mean boss start {mean}");
     }
 
     #[test]
