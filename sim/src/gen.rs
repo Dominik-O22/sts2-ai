@@ -196,6 +196,24 @@ impl FightSetup {
         })
     }
 
+    /// The same run against the same encounter on the same floor, its
+    /// enemies rolled afresh with `rng` as the generator would.
+    pub fn rerolled(&self, rng: &mut Rng) -> Self {
+        let rolled = generate_against(rng, self.floor, self.asc, self.encounter);
+        Self {
+            deck: self.deck.clone(),
+            hp: self.hp,
+            max_hp: self.max_hp,
+            max_energy: self.max_energy,
+            relics: self.relics.clone(),
+            potions: self.potions.clone(),
+            gold: self.gold,
+            asc: self.asc,
+            after: self.after,
+            ..rolled
+        }
+    }
+
     /// This fight in the recorder's `start` format (deck, relics, potions,
     /// HP, the encounter and room), so tools that read recordings read
     /// generated fights too (`examples/gendump.rs`, the deck-value labels).
@@ -243,6 +261,30 @@ pub fn run_fights(start: &Value, ids: &Ids, hp: i32, max_hp: i32, encounters: &[
         }
     }
     Ok(setups)
+}
+
+/// Fights of played runs, one JSON object a line: `start` (the run's
+/// fields, as `run_against` reads them), `hp`, `max_hp`, `encounter` (game
+/// name), `floor` (the generator's numbering, `act_floor`) and `second`
+/// (the last act's second boss). Their enemies are rolled from `seed`;
+/// `rerolled` rolls them again.
+pub fn run_setups(lines: &str, ids: &Ids, seed: u64) -> Result<Vec<FightSetup>, String> {
+    let mut rng = Rng::new(seed);
+    lines
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .enumerate()
+        .map(|(i, line)| {
+            let v: Value = serde_json::from_str(line).map_err(|e| format!("line {}: {e}", i + 1))?;
+            let name = v["encounter"].as_str().ok_or_else(|| format!("line {}: no encounter", i + 1))?;
+            let &enc = ids.encounters.get(name).ok_or_else(|| format!("line {}: unknown encounter {name}", i + 1))?;
+            let int = |k: &str| v[k].as_i64().ok_or_else(|| format!("line {}: no {k}", i + 1));
+            let mut setup = FightSetup::run_against(&v["start"], ids, int("hp")? as i32, int("max_hp")? as i32, enc, int("floor")? as u32, &mut rng)
+                .map_err(|e| format!("line {}: {e}", i + 1))?;
+            setup.after = after(enc, setup.asc, v["second"].as_bool().unwrap_or(false));
+            Ok(setup)
+        })
+        .collect()
 }
 
 /// What a card can become when transformed, by game name

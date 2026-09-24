@@ -136,6 +136,13 @@ class Envs:
         self.sim.observe(self.floats, self.ids, self.mask)
         return n
 
+    def use_setups(self, path: Path, repeats: int = 1, seed: int = 0) -> int:
+        """Cycle through played runs' fights (`sts2ai.setups`), `repeats`
+        of each."""
+        n = self.sim.use_setups(path.read_text(), repeats, seed)
+        self.sim.observe(self.floats, self.ids, self.mask)
+        return n
+
     def load_recordings(self, directory: Path = DEFAULT_RECORDINGS) -> int:
         """Cycle through recorded fights instead of generated ones."""
         n, errors = self.sim.load_recordings(str(directory))

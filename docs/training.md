@@ -186,6 +186,26 @@ potions and starting HP per fight and on average by encounter kind. The
 constants in `gen.rs` (`generate_against`) should follow those numbers
 once there are a few dozen run fights.
 
+Other players' winning runs come from ststracker.app (`scripts/tracker.py
+--crawl`, 1,193 A10 Ironclad wins on 2026-09-24). `sts2ai.setups` turns
+each run's elite and boss fights into setups, the deck rebuilt at that
+floor from the final one, and splits them by player: 7,560 to train on and
+1,649 held out (2,801 more hold a card the sim lacks, Mad Science and Splash
+mostly).
+
+```
+uv run python -m sts2ai.setups                                               # pages -> setups/train.jsonl, holdout.jsonl
+uv run python -m sts2ai.evaluate runs/<time>/latest.pt --source setups       # win rate on held-out winners' fights
+uv run python -m sts2ai.train ... --real-setups ~/.local/share/SlayTheSpire2/sts2ai/tracker/setups/train.jsonl --real-frac 0.3
+```
+
+With `--real-setups`, `real_frac` of the resets take one of those fights,
+its enemies rolled afresh; training evaluates on the held-out ones beside
+the generated set. They are all wins, so they only show decks that got
+through; the generator keeps the weak ones. set-14 on them, greedy: act 1
+elites 92%, bosses 69%; act 2 88%, 67%; act 3 86%, 48%, against 15% on the
+generated act 3 bosses, whose decks are far weaker than a winner's.
+
 ## Speed
 
 Measured 2026-09-23 on the RTX 5070 Ti (8-core Ryzen 9850X3D, SMT off in

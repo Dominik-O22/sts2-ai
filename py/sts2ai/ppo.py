@@ -24,6 +24,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 from sts2ai.env import DEFAULT_RECORDINGS, End, Envs, has_recordings
 from sts2ai.evaluate import evaluate
+from sts2ai.setups import HOLDOUT as REAL_HOLDOUT
 from sts2ai.model import Arch, Policy, build_policy, checkpoint_arch, checkpoint_layout, checkpoint_vocab, load_state, masked_logits, warm_start
 from sts2ai.search import rollout, spread
 from sts2ai.vocab import current_text
@@ -130,6 +131,12 @@ class Config:
     # iterations on from it. For an architecture change; `resume` is for
     # the same one.
     init_from: Path | None = None
+    # Played runs' elite and boss fights (`sts2ai.setups`) for `real_frac`
+    # of the resets, beside the generator's; `real_holdout` is evaluated
+    # with the held-out set when it exists.
+    real_setups: Path | None = None
+    real_frac: float = 0.3
+    real_holdout: Path = REAL_HOLDOUT
     # Stop after this many minutes of training (the last iteration saves
     # and evaluates as the `iters`th would), for comparisons at equal time.
     minutes: float | None = None
@@ -320,6 +327,9 @@ def train(cfg: Config) -> Policy:
     np.random.seed(cfg.seed)
     device = torch.device(cfg.device)
     envs = Envs(cfg.envs, seed=cfg.seed, max_floor=cfg.floor_start)
+    if cfg.real_setups:
+        n_real = envs.sim.use_real(cfg.real_setups.read_text(), cfg.real_frac, cfg.seed)
+        print(f"{n_real} played runs' fights for {cfg.real_frac:.0%} of the resets")
     ck = torch.load(cfg.resume, map_location=device) if cfg.resume else None
     arch = checkpoint_arch(ck) if ck else Arch(cfg.arch, cfg.hidden, cfg.depth, cfg.pointer, cfg.piles, cfg.choice_attn)
     policy = build_policy(envs.layout, arch).to(device)
@@ -536,6 +546,12 @@ def train(cfg: Config) -> Policy:
             if has_recordings(cfg.recordings):
                 win, _, _ = evaluate(policy, device, 8, "recordings", cfg.recordings)
                 writer.add_scalar("eval/recorded_win_rate", win, global_step)
+            if cfg.real_holdout.exists():
+                win, _, by_kind = evaluate(policy, device, cfg.eval_repeats, "setups", setups=cfg.real_holdout)
+                writer.add_scalar("eval/real_win_rate", win, global_step)
+                for k, v in by_kind.items():
+                    writer.add_scalar(f"eval/real_win_{k}", v, global_step)
+                print(f"eval on played runs: {win:.1%}  " + "  ".join(f"{k} {v:.1%}" for k, v in by_kind.items()))
         if out_of_time:
             print(f"stopped after {cfg.minutes:g} minutes at iteration {it}")
             break
