@@ -21,7 +21,9 @@ transformer, so a card's encoding has seen the enemies and the rest of the
 hand before the heads score it. Empty slots are masked. Choice options stay
 out of the sequence: there are 20 slots, almost always empty, and they
 would double its length; their pooled encoding joins the global token and
-each is scored against the encoded global token.
+each is scored against the encoded global token. Its `Arch` options
+replace what it kept from `SlotMLP`: dot-product target heads, the piles
+as tokens of card embeddings, choices that attend to the board.
 """
 
 from __future__ import annotations
@@ -95,6 +97,32 @@ class PairHead(nn.Module):
         return self.out(h).squeeze(-1)
 
 
+class PointerHead(nn.Module):
+    """Scores every (item, target) pair by the dot product of the item's
+    query and the target's key, plus the item's own bias; a learned key
+    stands for "no target". The tokens have already attended to each other
+    and to the global token, so the pair needs no hidden layer of its own:
+    `PairHead` built one 128 wide per pair, as much work as the encoder."""
+
+    def __init__(self, dim: int):
+        super().__init__()
+        self.query = nn.Linear(dim, dim, bias=False)
+        self.key = nn.Linear(dim, dim, bias=False)
+        self.none = nn.Parameter(torch.zeros(dim))
+        self.bias = nn.Linear(dim, 1)
+        # Near-uniform logits at the start, as `PairHead`'s small output layer gives.
+        nn.init.orthogonal_(self.query.weight, gain=0.01)
+        nn.init.zeros_(self.bias.weight)
+        nn.init.zeros_(self.bias.bias)
+        self.scale = dim**-0.5
+
+    def forward(self, items: Tensor, targets: Tensor) -> Tensor:
+        """`[B, K, dim]` items and `[B, E, dim]` targets to `[B, K, E + 1]`
+        logits, target 0 being "no target"."""
+        keys = torch.cat([self.none.expand(items.shape[0], 1, -1), self.key(targets)], dim=1)
+        return torch.einsum("bkd,bed->bke", self.query(items), keys) * self.scale + self.bias(items)
+
+
 @dataclass(frozen=True)
 class Arch:
     """Which network and how big: `slots` (`SlotMLP`, `hidden` wide, `depth`
@@ -104,6 +132,14 @@ class Arch:
     kind: str = "slots"
     hidden: int = 512
     depth: int = 2
+    # `attn` only. `pointer`: play and potion targets scored by a dot
+    # product of the encoded tokens (`PointerHead`), not a hidden layer per
+    # pair. `piles`: the draw, discard and exhaust piles as three more
+    # tokens, built from the card embeddings. `choice_attn`: choice options
+    # attend to the encoded tokens before they are scored.
+    pointer: bool = False
+    piles: bool = False
+    choice_attn: bool = False
 
 
 class Policy(nn.Module):
@@ -236,12 +272,15 @@ class SlotAttention(Policy):
         potion_dim: int = 8,
         enchant_dim: int = 4,
         enemy_dim: int = 64,
+        pointer: bool = False,
+        piles: bool = False,
+        choice_attn: bool = False,
     ):
         super().__init__()
         L = layout
         assert L.targets == L.max_enemies + 1
         self.layout = L
-        self.arch = Arch("attn", hidden, depth)
+        self.arch = Arch("attn", hidden, depth, pointer, piles, choice_attn)
         d = hidden
         self.card = nn.Embedding(L.card_vocab, card_dim, padding_idx=0)
         self.monster = nn.Embedding(L.monster_vocab, monster_dim, padding_idx=0)
@@ -263,8 +302,25 @@ class SlotAttention(Policy):
         self.choice_in = nn.Linear(card_dim + L.choice_feats, d)
         layer = nn.TransformerEncoderLayer(d, heads, 4 * d, dropout=0.0, batch_first=True, norm_first=True)
         self.encoder = nn.TransformerEncoder(layer, depth, norm=nn.LayerNorm(d), enable_nested_tensor=False)
-        self.play = PairHead(d, d, d)
-        self.use_potion = PairHead(d, d, d)
+        if piles:
+            # A pile's token: the mean embedding of its cards (an upgraded
+            # copy shifted by `pile_up`) and its size, then which pile it is.
+            # Zero at the start, so a warm start from a network without
+            # them only gains three blank tokens.
+            self.pile_up = nn.Parameter(torch.zeros(card_dim))
+            self.pile_in = nn.Linear(card_dim + 1, d)
+            self.pile_kind = nn.Parameter(torch.zeros(3, d))
+            nn.init.zeros_(self.pile_in.weight)
+            nn.init.zeros_(self.pile_in.bias)
+        if choice_attn:
+            self.choice_norm = nn.LayerNorm(d)
+            self.choice_attn = nn.MultiheadAttention(d, heads, batch_first=True)
+            # A residual that starts as nothing: choices score as before
+            # until it learns something.
+            nn.init.zeros_(self.choice_attn.out_proj.weight)
+            nn.init.zeros_(self.choice_attn.out_proj.bias)
+        self.play = PointerHead(d) if pointer else PairHead(d, d, d)
+        self.use_potion = PointerHead(d) if pointer else PairHead(d, d, d)
         self.choose = KeyedHead(d, d, 1)
         self.end_or_skip = _head(d, 2)
         self.v = nn.Linear(d, 1)
@@ -299,31 +355,47 @@ class SlotAttention(Policy):
                 self.hand_in(torch.cat([self.card(hand_ids), self.enchant(ids[:, L.i_enchants : L.i_enchants + H]), hand_feats], dim=2)),
                 self.enemy_in(enemies),
                 self.potion_in(torch.cat([self.potion(potion_ids), potion_feats], dim=2)),
-            ],
+            ]
+            + ([self.pile_tokens(floats)] if self.arch.piles else []),
             dim=1,
         )
         # True where a slot is empty. The global token never is, so every
-        # row attends to something.
+        # row attends to something; nor are the piles.
         empty = torch.cat(
-            [torch.zeros_like(hand_ids[:, :1], dtype=torch.bool), hand_ids == 0, enemy_floats[:, :, 0] == 0, potion_ids == 0],
+            [torch.zeros_like(hand_ids[:, :1], dtype=torch.bool), hand_ids == 0, enemy_floats[:, :, 0] == 0, potion_ids == 0]
+            + ([torch.zeros_like(hand_ids[:, :3], dtype=torch.bool)] if self.arch.piles else []),
             dim=1,
         )
         x = self.encoder(tokens, src_key_padding_mask=empty)
-        g, hand, enemy, potion = x.split([1, H, E, P], dim=1)
+        g, hand, enemy, potion = x[:, : 1 + H + E + P].split([1, H, E, P], dim=1)
         g = g.squeeze(1)
-        play = self.play(g, hand, enemy).flatten(1)
-        use = self.use_potion(g, potion, enemy).flatten(1)
+        if self.arch.pointer:
+            play, use = self.play(hand, enemy).flatten(1), self.use_potion(potion, enemy).flatten(1)
+        else:
+            play, use = self.play(g, hand, enemy).flatten(1), self.use_potion(g, potion, enemy).flatten(1)
+        if self.arch.choice_attn:
+            choices = choices + self.choice_attn(self.choice_norm(choices), x, x, key_padding_mask=empty, need_weights=False)[0]
         choose = self.choose(g, choices).squeeze(2)
         end_skip = self.end_or_skip(g)
         logits = torch.cat([play, use, end_skip[:, :1], choose, end_skip[:, 1:]], dim=1)
         return logits, self.v(g).squeeze(-1)
+
+    def pile_tokens(self, floats: Tensor) -> Tensor:
+        """`[B, 3, d]`: the draw, discard and exhaust piles, from their
+        counts per (card, upgraded) through the card embedding."""
+        L = self.layout
+        counts = floats[:, L.f_piles : L.f_piles + 3 * 2 * L.n_cards].view(-1, 3, L.n_cards, 2)
+        cards = self.card.weight[1:].to(counts.dtype)
+        summed = counts[..., 0] @ cards + counts[..., 1] @ (cards + self.pile_up.to(counts.dtype))
+        size = counts.sum(dim=(2, 3)).unsqueeze(2)
+        return self.pile_in(torch.cat([summed / size.clamp(min=1), size / 10], dim=2)) + self.pile_kind
 
 
 def build_policy(layout: Layout, arch: Arch) -> Policy:
     if arch.kind == "slots":
         return SlotMLP(layout, hidden=arch.hidden, depth=arch.depth)
     if arch.kind == "attn":
-        return SlotAttention(layout, hidden=arch.hidden, depth=arch.depth)
+        return SlotAttention(layout, arch.hidden, arch.depth, pointer=arch.pointer, piles=arch.piles, choice_attn=arch.choice_attn)
     raise ValueError(f"unknown architecture {arch.kind!r}: slots or attn")
 
 
@@ -365,6 +437,16 @@ def load_state(policy: Policy, state: dict[str, Tensor], old_vocab: str | None, 
 
     policy.load_state_dict(remap_state(state, parse(old_vocab), parse(current_text()), own, policy.layout))
     return True
+
+
+def warm_start(policy: Policy, state: dict[str, Tensor]) -> list[str]:
+    """Loads every tensor of `state` whose name and shape `policy` shares,
+    for a new architecture that starts from a trained one's torso. Returns
+    the names left as initialised."""
+    own = policy.state_dict()
+    kept = {k: t for k, t in state.items() if k in own and own[k].shape == t.shape}
+    policy.load_state_dict(kept, strict=False)
+    return sorted(set(own) - set(kept))
 
 
 def checkpoint_vocab(ck: object, fallback: Path | None) -> str | None:
