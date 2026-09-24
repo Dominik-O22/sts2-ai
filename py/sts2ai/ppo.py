@@ -132,10 +132,12 @@ class Config:
     # iterations on from it. For an architecture change; `resume` is for
     # the same one.
     init_from: Path | None = None
-    # Played runs' elite and boss fights (`sts2ai.setups`) for `real_frac`
-    # of the resets, beside the generator's; `real_holdout` is evaluated
-    # with the held-out set when it exists.
-    real_setups: Path | None = None
+    # Played runs' fights (`sts2ai.setups`) beside the generator's: files,
+    # comma separated, each with the share of the resets it takes after a
+    # colon (`train.jsonl:0.25,easy-train.jsonl:0.1`), `real_frac` where none
+    # is given. `real_holdout` is evaluated with the held-out set when it
+    # exists.
+    real_setups: str | None = None
     real_frac: float = 0.3
     real_holdout: Path = REAL_HOLDOUT
     # Stop after this many minutes of training (the last iteration saves
@@ -329,8 +331,10 @@ def train(cfg: Config) -> Policy:
     device = torch.device(cfg.device)
     envs = Envs(cfg.envs, seed=cfg.seed, max_floor=cfg.floor_start)
     if cfg.real_setups:
-        n_real = envs.sim.use_real(cfg.real_setups.read_text(), cfg.real_frac, cfg.seed)
-        print(f"{n_real} played runs' fights for {cfg.real_frac:.0%} of the resets")
+        pools = [(Path(path), float(share) if share else cfg.real_frac) for path, _, share in (p.partition(":") for p in cfg.real_setups.split(","))]
+        sizes = envs.sim.use_real([(path.read_text(), share) for path, share in pools], cfg.seed)
+        for (path, share), n in zip(pools, sizes):
+            print(f"{n} played runs' fights from {path.name} for {share:.0%} of the resets")
     ck = torch.load(cfg.resume, map_location=device) if cfg.resume else None
     arch = checkpoint_arch(ck) if ck else Arch(cfg.arch, cfg.hidden, cfg.depth, cfg.pointer, cfg.piles, cfg.choice_attn)
     policy = build_policy(envs.layout, arch).to(device)

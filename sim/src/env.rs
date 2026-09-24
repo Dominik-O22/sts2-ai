@@ -27,14 +27,11 @@ pub struct EnvConfig {
     /// floor from 5 up) or the boss instead, half each. The rest of the
     /// resets still roll elites and bosses at their natural rate.
     pub hard_frac: f32,
-    /// Fraction of resets that take a fight of a played run
-    /// (`VecEnv::set_real`) instead, when there are any.
-    pub real_frac: f32,
 }
 
 impl Default for EnvConfig {
     fn default() -> Self {
-        Self { asc: Ascension(10), min_floor: 1, max_floor: LAST_FLOOR, max_steps: 500, hard_frac: 0.0, real_frac: 0.0 }
+        Self { asc: Ascension(10), min_floor: 1, max_floor: LAST_FLOOR, max_steps: 500, hard_frac: 0.0 }
     }
 }
 
@@ -208,8 +205,8 @@ impl Slot {
             hard.iter().copied().filter(|(e, _)| acts.contains(&(e.act().index() as u32))).collect();
         self.setup = if !fixed.is_empty() {
             fixed[(index + self.resets * n) % fixed.len()].clone()
-        } else if !real.is_empty() && self.rng.next_float(1.0) < cfg.real_frac {
-            real[self.rng.next_int(real.len())].rerolled(&mut self.rng)
+        } else if let Some(pool) = self.real_pool(real) {
+            pool[self.rng.next_int(pool.len())].rerolled(&mut self.rng)
         } else if self.rng.next_float(1.0) < cfg.hard_frac && !weighted.is_empty() {
             // Elites and bosses by weight: the ones the policy loses most.
             let total: f32 = weighted.iter().map(|(_, w)| w).sum();
@@ -242,6 +239,20 @@ impl Slot {
         self.base = Baseline::of(&self.combat);
     }
 
+    /// The pool of played fights this reset draws from, each taking its
+    /// share of the resets; none for the rest. Draws nothing without pools.
+    fn real_pool<'a>(&mut self, real: &'a [(Vec<FightSetup>, f32)]) -> Option<&'a [FightSetup]> {
+        if real.is_empty() {
+            return None;
+        }
+        let mut x = self.rng.next_float(1.0);
+        real.iter().find(|(_, share)| {
+            x -= share;
+            x < 0.0
+        })
+        .map(|(pool, _)| pool.as_slice())
+    }
+
     fn end(&self, index: usize) -> EpisodeEnd {
         let c = &self.combat;
         EpisodeEnd {
@@ -268,9 +279,9 @@ struct Pools<'a> {
     /// When set, the `hard_frac` share of fights draws its elite or boss
     /// by these weights instead of evenly.
     hard: &'a [(Encounter, f32)],
-    /// Fights of played runs, the `real_frac` share of resets drawing one
-    /// with its enemies rolled afresh.
-    real: &'a [FightSetup],
+    /// Pools of played runs' fights, each drawn for its share of the
+    /// resets with its enemies rolled afresh.
+    real: &'a [(Vec<FightSetup>, f32)],
 }
 
 pub struct VecEnv {
@@ -278,7 +289,7 @@ pub struct VecEnv {
     cfg: EnvConfig,
     fixed: Vec<FightSetup>,
     hard: Vec<(Encounter, f32)>,
-    real: Vec<FightSetup>,
+    real: Vec<(Vec<FightSetup>, f32)>,
 }
 
 impl VecEnv {
@@ -339,11 +350,12 @@ impl VecEnv {
         }
     }
 
-    /// Fights of played runs for `frac` of the resets from here on
-    /// (`EnvConfig::real_frac`), their enemies rolled afresh each time.
-    pub fn set_real(&mut self, setups: Vec<FightSetup>, frac: f32) {
-        self.real = setups;
-        self.cfg.real_frac = frac.clamp(0.0, 1.0);
+    /// Pools of played runs' fights, each for its share of the resets from
+    /// here on (the shares sum to at most 1), their enemies rolled afresh
+    /// each time.
+    pub fn set_real(&mut self, pools: Vec<(Vec<FightSetup>, f32)>) {
+        assert!(pools.iter().map(|p| p.1).sum::<f32>() <= 1.0 + 1e-6, "played fights' shares sum past 1");
+        self.real = pools.into_iter().filter(|(pool, share)| !pool.is_empty() && *share > 0.0).collect();
     }
 
     pub fn combat(&self, i: usize) -> &Combat {
@@ -1082,6 +1094,30 @@ mod tests {
         assert_eq!(env.slots[0].setup.encounter, setups[2].encounter);
     }
 
+    /// Each pool of played fights takes its share of the resets, and the
+    /// generator the rest.
+    #[test]
+    fn real_pools_take_their_shares() {
+        let ids = crate::replay::Ids::new();
+        let line = |enc: &str| format!(r#"{{"start": {{"ascension": 10, "deck": [{{"id": "BASH"}}], "relics": [], "potions": [null, null]}}, "hp": 50, "max_hp": 80, "encounter": "{enc}", "floor": 48}}"#);
+        let pool = |enc: &str| crate::gen::run_setups(&line(enc), &ids, 1).unwrap();
+        let mut env = VecEnv::new(1, 5, EnvConfig::default());
+        env.set_real(vec![(pool("QUEEN_BOSS"), 0.25), (pool("AEONGLASS_BOSS"), 0.5)]);
+        let pools = Pools { fixed: &[], hard: &[], real: &env.real };
+        let mut counts = [0; 3];
+        for _ in 0..4000 {
+            env.slots[0].roll(0, 1, &env.cfg, pools);
+            counts[match env.slots[0].setup.encounter {
+                Encounter::QueenBoss if env.slots[0].setup.hp == 50 => 0,
+                Encounter::AeonglassBoss if env.slots[0].setup.hp == 50 => 1,
+                _ => 2,
+            }] += 1;
+        }
+        for (n, share) in counts.iter().zip([0.25, 0.5, 0.25]) {
+            assert!((*n as f32 / 4000.0 - share).abs() < 0.03, "{counts:?}");
+        }
+    }
+
     /// A played run's fight keeps its deck, HP, encounter and floor each
     /// time it is drawn.
     #[test]
@@ -1090,7 +1126,7 @@ mod tests {
         let line = r#"{"start": {"ascension": 10, "deck": [{"id": "BASH", "up": true}, {"id": "STRIKE_IRONCLAD"}], "relics": ["BURNING_BLOOD"], "potions": [null, null]}, "hp": 41, "max_hp": 80, "encounter": "QUEEN_BOSS", "floor": 48}"#;
         let real = crate::gen::run_setups(line, &ids, 1).unwrap();
         let mut env = VecEnv::new(8, 5, EnvConfig::default());
-        env.set_real(real, 1.0);
+        env.set_real(vec![(real, 1.0)]);
         let pools = Pools { fixed: &[], hard: &[], real: &env.real };
         for s in env.slots.iter_mut() {
             s.reset(0, 8, &env.cfg, pools);
