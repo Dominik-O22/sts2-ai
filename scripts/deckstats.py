@@ -127,11 +127,12 @@ def main() -> None:
     ap.add_argument("dirs", nargs="*", type=Path, default=[RECORDINGS])
     ap.add_argument("--gen", type=Path, help="generated fights (gendump) to set beside the recordings")
     ap.add_argument("--all", action="store_true", help="count recordings from before runs carried a seed, split into runs by time")
+    ap.add_argument("--ascension", type=int, default=10, help="only runs at this ascension, the one the generator plays")
     args = ap.parse_args()
     rows, seedless = [], []
     for d in args.dirs:
         for path in sorted(d.glob("*.jsonl")):
-            if (start := start_record(path)) is None or start.get("scripted"):
+            if (start := start_record(path)) is None or start.get("scripted") or start.get("ascension", args.ascension) != args.ascension:
                 continue
             r = stats(start)
             r["time"] = path.stat().st_mtime
