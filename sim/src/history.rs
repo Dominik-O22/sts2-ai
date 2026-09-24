@@ -854,6 +854,9 @@ fn drawn_as_recorded(
         }
     }
     let relic_picks: Vec<String> = choices(stats, "relic_choices", "choice").into_iter().filter(|c| c.1).map(|c| c.0).collect();
+    // A record rebuilt from a run page that lists no potion offers
+    // (`potions_unrecorded`): the potions drawn are taken as offered.
+    let potions_recorded = stats["potions_unrecorded"] != true;
 
     // An event's own gifts (a named relic, a curse) are read off the record,
     // not drawn. What it drew is checked as far as the record shows it: the
@@ -879,7 +882,7 @@ fn drawn_as_recorded(
             return Err(format!("relics {relics_offered:?}, the run took {relic_picks:?}"));
         }
         let want_potions: Vec<String> = choices(stats, "potion_choices", "choice").into_iter().map(|c| c.0).collect();
-        if !potions_offered.is_empty() && !same_set(want_potions.clone(), potions_offered.clone()) {
+        if potions_recorded && !potions_offered.is_empty() && !same_set(want_potions.clone(), potions_offered.clone()) {
             return Err(format!("potions {potions_offered:?}, the run was offered {want_potions:?}"));
         }
         return if cards_offered.is_empty() { Ok(()) } else { Err(format!("a relic taken at the event offered {cards_offered:?}")) };
@@ -918,7 +921,7 @@ fn drawn_as_recorded(
             want_potions.remove(i);
         }
     }
-    if !ancient && !same_set(want_potions.clone(), potions_offered.clone()) {
+    if potions_recorded && !ancient && !same_set(want_potions.clone(), potions_offered.clone()) {
         return Err(format!("potions {potions_offered:?}, the run was offered {want_potions:?}"));
     }
     if let Some(gold) = gold {
