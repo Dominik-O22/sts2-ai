@@ -16,6 +16,10 @@ next decision, which waits for the next batch.
 
 With `--start-full` below 1 the other runs start later in a run
 (`Curriculum`); the log splits floors and wins by where runs started.
+
+With `--imitate TRAIN_ROWS` the policy first clones winners' decisions
+(`sts2ai.imitation`), checked against the `holdout.npz` beside the rows,
+and saves `imitated.pt`; `--minutes 0` stops there.
 """
 
 from __future__ import annotations
@@ -34,7 +38,8 @@ from torch.utils.tensorboard import SummaryWriter
 from sts2ai import _sim
 from sts2ai.deckvalue import RunPotential
 from sts2ai.deckvalue import load as load_deckvalue
-from sts2ai.env import START_POINTS, End, Envs, RunFight
+from sts2ai.env import START_POINTS, End, Envs, RunFight, RunLayout
+from sts2ai.imitation import Rows, pretrain
 from sts2ai.model import Policy, load_policy, masked_logits
 from sts2ai.runmodel import RunArch, RunPolicy, load_run_policy, save_run_policy
 
@@ -151,6 +156,12 @@ class Config:
     # there once its pool holds `own_ramp` of them (less before).
     own_max: float = 0.75
     own_ramp: int = 512
+    # Winners' decisions to clone before PPO (`sts2ai.imitation`); empty
+    # skips it.
+    imitate: str = ""
+    imitate_epochs: int = 8
+    imitate_lr: float = 1e-3
+    imitate_batch: int = 256
 
 
 @dataclass
@@ -281,18 +292,24 @@ def train(combat_path: Path, run_dir: Path, cfg: Config, resume: Path | None) ->
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     torch.manual_seed(cfg.seed)
     combat = load_policy(combat_path, device).eval()
-    envs = Envs(cfg.envs, seed=cfg.seed)
-    envs.use_runs(cfg.seed * 1_000_000, choices="caller")
     if resume:
         policy, ck = load_run_policy(resume, device)
     else:
-        policy, ck = RunPolicy(envs.run_layout, RunArch(cfg.hidden, cfg.depth)).to(device), None
+        policy, ck = RunPolicy(RunLayout.load(), RunArch(cfg.hidden, cfg.depth)).to(device), None
         if cfg.seed_cards:
             policy.seed_cards(combat)
     opt = torch.optim.Adam(policy.parameters(), lr=cfg.lr, eps=1e-5)
     if ck and ck.get("optimizer"):
         opt.load_state_dict(ck["optimizer"])
     run_dir.mkdir(parents=True, exist_ok=True)
+    if cfg.imitate:
+        holdout = Path(cfg.imitate).with_name("holdout.npz")
+        pretrain(policy, Rows.load(Path(cfg.imitate)), device, cfg.imitate_epochs, cfg.imitate_lr, cfg.imitate_batch, Rows.load(holdout) if holdout.exists() else None)
+        save_run_policy(run_dir / "imitated.pt", policy, None, config=asdict(cfg), combat=str(combat_path))
+        if cfg.minutes <= 0:
+            return
+    envs = Envs(cfg.envs, seed=cfg.seed)
+    envs.use_runs(cfg.seed * 1_000_000, choices="caller")
     writer = SummaryWriter(str(run_dir))
     loop = RunLoop(combat, device, envs, cfg.drain)
     trajs = [Trajectory() for _ in range(cfg.envs)]
