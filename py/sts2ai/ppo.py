@@ -127,6 +127,11 @@ class Config:
     pointer: bool = False
     piles: bool = False
     choice_attn: bool = False
+    # The incoming-damage head (`model.Arch.incoming`) and its loss's weight:
+    # every decision of a turn learns the damage that turn's enemy phase
+    # dealt, a thirtieth of the HP, as mean squared error.
+    incoming: bool = False
+    incoming_coef: float = 0.5
     # Start a new network from a checkpoint's weights where the names and
     # shapes match (`model.warm_start`), with a fresh optimizer, counting
     # iterations on from it. For an architecture change; `resume` is for
@@ -173,6 +178,26 @@ class Rollout:
             adv[t] = gae
             next_value = self.values[t]
         return adv, adv + self.values
+
+
+def incoming_targets(roll: Rollout, last_floats: Tensor, end_turn: int) -> Tensor:
+    """`[T, N]`: for each decision, the damage the enemy phase after its turn
+    dealt (HP when the turn ended minus HP at the next observation; all of
+    it if the fight was lost there, none if it was won mid-turn), a
+    thirtieth of the HP; NaN where the turn had not ended by the rollout's
+    end."""
+    hp = roll.floats[:, :, 0] * 100
+    hp_next = torch.cat([hp[1:], last_floats[None, :, 0] * 100])
+    done = roll.dones.bool()
+    lost = done & (roll.rewards < 0)
+    dmg = torch.where(done, torch.where(lost, hp, torch.zeros_like(hp)), hp - hp_next).clamp(min=0) / 30
+    ends = roll.actions == end_turn
+    out = torch.full_like(hp, float("nan"))
+    carry = torch.full_like(hp[0], float("nan"))
+    for t in reversed(range(hp.shape[0])):
+        carry = torch.where(ends[t] | done[t], dmg[t], carry)
+        out[t] = carry
+    return out
 
 
 class Stats:
@@ -336,11 +361,13 @@ def train(cfg: Config) -> Policy:
         for (path, share), n in zip(pools, sizes):
             print(f"{n} played runs' fights from {path.name} for {share:.0%} of the resets")
     ck = torch.load(cfg.resume, map_location=device) if cfg.resume else None
-    arch = checkpoint_arch(ck) if ck else Arch(cfg.arch, cfg.hidden, cfg.depth, cfg.pointer, cfg.piles, cfg.choice_attn)
+    arch = checkpoint_arch(ck) if ck else Arch(cfg.arch, cfg.hidden, cfg.depth, cfg.pointer, cfg.piles, cfg.choice_attn, cfg.incoming)
     policy = build_policy(envs.layout, arch).to(device)
     opt = torch.optim.Adam(policy.parameters(), lr=cfg.lr, eps=1e-5)
     # `net` is what runs; `policy` keeps the plain module for checkpoints.
     net = torch.compile(policy) if cfg.compile and device.type == "cuda" else policy
+    aux = policy.arch.incoming
+    aux_net = (torch.compile(policy.forward_incoming) if cfg.compile and device.type == "cuda" else policy.forward_incoming) if aux else None
     autocast = torch.autocast(device.type, dtype=torch.bfloat16, enabled=cfg.bf16 and device.type == "cuda")
     roll = Rollout(cfg, envs, device)
     searched = SearchTargets(cfg.search_buffer, envs.layout, device) if cfg.search_states else None
@@ -425,6 +452,7 @@ def train(cfg: Config) -> Policy:
             with autocast:
                 _, last_value = net(floats, ids)
             adv, returns = roll.advantages(last_value.float(), cfg.gamma, cfg.lam)
+            incoming = incoming_targets(roll, floats, envs.layout.a_end_turn) if aux else None
         search_go.set()
         t_rollout = time.perf_counter() - t_rollout
         global_step += cfg.steps * cfg.envs
@@ -457,18 +485,23 @@ def train(cfg: Config) -> Policy:
             "adv": adv.reshape(B),
             "returns": returns.reshape(B),
         }
+        if incoming is not None:
+            flat["incoming"] = incoming.reshape(B)
         mb = B // cfg.minibatches
         # Summed on the GPU and read once after the update: a read per
         # minibatch (or `Categorical`'s argument check) waits for the GPU,
         # and the update stalls whenever the search holds the GPU or CPU.
-        losses = {k: torch.zeros((), device=device) for k in ("policy", "value", "entropy", "clipfrac", "approx_kl", "search")}
+        losses = {k: torch.zeros((), device=device) for k in ("policy", "value", "entropy", "clipfrac", "approx_kl", "search", "incoming")}
         n_updates = 0
         for _ in range(cfg.epochs):
             perm = torch.randperm(B, device=device)
             for start in range(0, B, mb):
                 idx = perm[start : start + mb]
                 with autocast:
-                    logits, value = net(flat["floats"][idx], flat["ids"][idx])
+                    if aux:
+                        logits, value, predicted = aux_net(flat["floats"][idx], flat["ids"][idx])
+                    else:
+                        logits, value = net(flat["floats"][idx], flat["ids"][idx])
                 logits, value = logits.float(), value.float()
                 dist = torch.distributions.Categorical(logits=masked_logits(logits, flat["mask"][idx]), validate_args=False)
                 logp = dist.log_prob(flat["actions"][idx])
@@ -479,6 +512,12 @@ def train(cfg: Config) -> Policy:
                 vl = 0.5 * (value - flat["returns"][idx]).pow(2).mean()
                 ent = dist.entropy().mean()
                 loss = pg + cfg.value_coef * vl - cfg.entropy * ent
+                if aux:
+                    target = flat["incoming"][idx]
+                    known = ~torch.isnan(target)
+                    inc = (predicted.float() - target.nan_to_num()).pow(2).mul(known).sum() / known.sum().clamp(min=1)
+                    loss = loss + cfg.incoming_coef * inc
+                    losses["incoming"] += inc.detach()
                 if searched is not None:
                     # Runs before the warmup too, weighing nothing, so its
                     # forward and backward compile in the first iteration
