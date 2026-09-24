@@ -121,6 +121,11 @@ class Config:
     # Answer run decisions until none wait before each combat step
     # (`RunLoop`); without, one round per step.
     drain: bool = True
+    # Paid for each relic gained, at the decision it arrived after: about a
+    # floor's worth (1 / 49). A relic's worth shows many floors later, mixed
+    # with everything else, and without this the policy settled on avoiding
+    # elites. 0 turns it off.
+    relic_bonus: float = 0.0
 
 
 @dataclass
@@ -207,6 +212,8 @@ def train(combat_path: Path, run_dir: Path, cfg: Config, resume: Path | None) ->
     writer = SummaryWriter(str(run_dir))
     loop = RunLoop(combat, device, envs, cfg.drain)
     trajs = [Trajectory() for _ in range(cfg.envs)]
+    # Relics each env held at its last decision, for `relic_bonus`.
+    held: list[int | None] = [None] * cfg.envs
     stats = Stats()
     names = _sim.run_names()
     L = envs.run_layout
@@ -223,8 +230,12 @@ def train(combat_path: Path, run_dir: Path, cfg: Config, resume: Path | None) ->
         rows = np.arange(len(waiting))
         kinds = ids[rows, L.i_options + options * L.option_ids]
         rooms = ids[rows, L.i_options + options * L.option_ids + 4 + L.option_cards]
+        relics = (floats[:, L.f_relics : L.f_relics + L.max_relics * L.relic_floats : L.relic_floats] != 0).sum(1)
         for k, env in enumerate(waiting):
             t = trajs[env]
+            if cfg.relic_bonus and held[env] is not None and len(t) and not t.done[-1]:
+                t.reward[-1] += cfg.relic_bonus * max(int(relics[k]) - held[env], 0)
+            held[env] = int(relics[k])
             t.floats.append(floats[k].astype(np.float16))
             t.ids.append(ids[k].astype(np.int16))
             t.option.append(int(options[k]))
@@ -238,6 +249,7 @@ def train(combat_path: Path, run_dir: Path, cfg: Config, resume: Path | None) ->
 
     def run_ended(env: int, run: RunFight) -> None:
         stats.runs.append(run)
+        held[env] = None
         t = trajs[env]
         if len(t) and not t.done[-1]:
             reward = run_reward(run)
