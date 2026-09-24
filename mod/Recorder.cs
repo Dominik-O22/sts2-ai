@@ -29,6 +29,8 @@ using MegaCrit.Sts2.Core.GameActions;
 using MegaCrit.Sts2.Core.GameActions.Multiplayer;
 using MegaCrit.Sts2.Core.Modding;
 using MegaCrit.Sts2.Core.Models;
+using MegaCrit.Sts2.Core.Models.Cards;
+using MegaCrit.Sts2.Core.Models.Events;
 using MegaCrit.Sts2.Core.Models.Relics;
 using MegaCrit.Sts2.Core.Nodes.Combat;
 using MegaCrit.Sts2.Core.Nodes.Rooms;
@@ -437,11 +439,20 @@ public static class Recorder
     private static List<string?> AncientOptions(EventModel ancient) =>
         ancient.CurrentOptions.Select(o => o.Relic?.Id.Entry).ToList();
 
+    /// A card's id as the sim names it: the game's, but a Mad Science
+    /// (MadScience.cs) is one card per Tinker Time rider, which fixes its
+    /// type, so `MAD_SCIENCE_<RIDER>`. One whose rider was never set keeps
+    /// the plain id, which the sim refuses.
+    internal static string CardId(CardModel c) =>
+        c is MadScience m && m.TinkerTimeRider != TinkerTime.RiderEffect.None
+            ? $"{c.Id.Entry}_{m.TinkerTimeRider.ToString().ToUpperInvariant()}"
+            : c.Id.Entry;
+
     private static Dictionary<string, object?> CardRef(CardModel c)
     {
         var d = new Dictionary<string, object?>
         {
-            ["id"] = c.Id.Entry,
+            ["id"] = CardId(c),
             ["up"] = c.IsUpgraded,
         };
         if (c.Enchantment is { } e)
@@ -534,7 +545,7 @@ public static class Recorder
         Event(new()
         {
             ["t"] = "play",
-            ["id"] = cardPlay.Card.Id.Entry,
+            ["id"] = CardId(cardPlay.Card),
             ["up"] = cardPlay.Card.IsUpgraded,
             ["hand_idx"] = idx < 0 ? null : idx,
             ["target"] = EnemyIndex(cardPlay.Target),
@@ -552,7 +563,7 @@ public static class Recorder
         for (int i = 0; i < enemies.Count; i++)
             if (ReferenceEquals(enemies[i], target)) { idx = i; break; }
         if (idx < 0) return;
-        Event(new() { ["t"] = "hit", ["target"] = idx, ["amount"] = result.TotalDamage, ["card"] = card?.Id.Entry });
+        Event(new() { ["t"] = "hit", ["target"] = idx, ["amount"] = result.TotalDamage, ["card"] = card == null ? null : CardId(card) });
     }
 
     /// A card created mid-combat (Infernal Blade), so random generation can be scripted.
@@ -565,7 +576,7 @@ public static class Recorder
 
     internal static void OnGenerated(CardModel card)
     {
-        Event(new() { ["t"] = "gen", ["id"] = card.Id.Entry, ["up"] = card.IsUpgraded });
+        Event(new() { ["t"] = "gen", ["id"] = CardId(card), ["up"] = card.IsUpgraded });
     }
 
     /// Any exhaust, with the hand index at the last snapshot when known, so
@@ -573,7 +584,7 @@ public static class Recorder
     internal static void OnExhausted(CardModel card, bool ethereal)
     {
         int idx = _lastHand.FindIndex(c => ReferenceEquals(c, card));
-        Event(new() { ["t"] = "exhaust", ["id"] = card.Id.Entry, ["up"] = card.IsUpgraded, ["hand_idx"] = idx < 0 ? null : idx, ["ethereal"] = ethereal });
+        Event(new() { ["t"] = "exhaust", ["id"] = CardId(card), ["up"] = card.IsUpgraded, ["hand_idx"] = idx < 0 ? null : idx, ["ethereal"] = ethereal });
     }
 
     internal static void OnPotionUsed(PotionModel potion, Creature? target)

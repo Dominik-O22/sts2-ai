@@ -344,7 +344,7 @@ public static class Bridge
         string ench = want["ench"]?.ToJsonString() ?? "null";
         int? cost = want["cost"]?.GetValue<int>();
         return cards
-            .Where(c => c.Id.Entry == id && c.IsUpgraded == up)
+            .Where(c => Recorder.CardId(c) == id && c.IsUpgraded == up)
             .OrderByDescending(c => (Ench(c) == ench ? 2 : 0) + (cost == null || Cost(c) == cost ? 1 : 0))
             .FirstOrDefault();
     }
@@ -370,7 +370,7 @@ public static class Bridge
         var target = Target(state, msg["target"]);
         if (!card.TryManualPlay(target))
         {
-            Error($"{card.Id.Entry} cannot be played at {target?.Monster?.Id.Entry ?? "no target"}");
+            Error($"{Recorder.CardId(card)} cannot be played at {target?.Monster?.Id.Entry ?? "no target"}");
             return;
         }
         _awaiting = true;
