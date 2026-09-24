@@ -212,9 +212,13 @@ impl RunState {
     /// A merchant's room: the stock laid out (`shop`), Lord's Parasol
     /// buying everything on entry, then what the chooser buys, one ware at
     /// a time, until it leaves. The card removal asks which card, and
-    /// leaving that pick buys nothing. Returns the shop as left.
+    /// leaving that pick buys nothing and puts the removal out of reach for
+    /// the visit. The game lets it be opened again, but nothing comes of
+    /// that, and a chooser that always opens it and backs out (a greedy
+    /// policy) would never leave. Returns the shop as left.
     pub fn shop_room(&mut self, chooser: &mut impl Chooser, log: &mut Vec<Offered>) -> Shop {
         let mut shop = self.shop();
+        let mut removal_declined = false;
         log.push(Offered::Cards(shop.cards.iter().chain(&shop.colorless).flatten().map(|e| e.item).collect()));
         log.push(Offered::Relics(shop.relics.iter().flatten().map(|e| e.item.game_id()).collect()));
         log.push(Offered::Potions(shop.potions.iter().flatten().map(|e| e.item.to_string()).collect()));
@@ -222,13 +226,15 @@ impl RunState {
             self.buy_everything(&mut shop, chooser, log);
         }
         loop {
-            let wares = self.wares(&shop);
+            let mut wares = self.wares(&shop);
+            wares.retain(|w| !(removal_declined && w.item == Item::Removal));
             let Some(ware) = wares.get(chooser.choose(self, Decision::Shop(&wares))) else { break };
             if ware.item == Item::Removal {
                 let cards = self.pickable(DeckAction::Remove);
                 let pick = Decision::Deck { action: DeckAction::Remove, cards: &cards, optional: true };
-                if let Some(&card) = cards.get(chooser.choose(self, pick)) {
-                    self.remove_for(&mut shop, card, ware.price);
+                match cards.get(chooser.choose(self, pick)) {
+                    Some(&card) => self.remove_for(&mut shop, card, ware.price),
+                    None => removal_declined = true,
                 }
                 continue;
             }
