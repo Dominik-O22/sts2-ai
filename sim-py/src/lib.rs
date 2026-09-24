@@ -124,6 +124,34 @@ impl VecEnv {
         n
     }
 
+    /// Pools of played runs' fights (`sim::gen::run_setups`: one JSON
+    /// object a line), each with the share of the resets it takes from here
+    /// on, each fight drawn with its enemies rolled afresh. Returns each
+    /// pool's size.
+    #[pyo3(signature = (pools, seed=0))]
+    fn use_real(&mut self, pools: Vec<(String, f32)>, seed: u64) -> PyResult<Vec<usize>> {
+        let pools = pools
+            .into_iter()
+            .map(|(text, share)| Ok((sim::gen::run_setups(&text, &Ids::new(), seed).map_err(pyo3::exceptions::PyValueError::new_err)?, share)))
+            .collect::<PyResult<Vec<_>>>()?;
+        let sizes = pools.iter().map(|(p, _)| p.len()).collect();
+        self.inner.set_real(pools);
+        Ok(sizes)
+    }
+
+    /// Switch to cycling through fights of played runs (as `use_real`
+    /// reads them), `repeats` each with enemies rolled from `seed`: the
+    /// same file and seed give the same fights. Returns the number of fights.
+    #[pyo3(signature = (setups, repeats, seed=0))]
+    fn use_setups(&mut self, setups: &str, repeats: usize, seed: u64) -> PyResult<usize> {
+        let runs = sim::gen::run_setups(setups, &Ids::new(), seed).map_err(pyo3::exceptions::PyValueError::new_err)?;
+        let mut rng = sim::rng::Rng::new(seed);
+        let fights: Vec<_> = runs.iter().flat_map(|r| (0..repeats).map(|_| r.rerolled(&mut rng)).collect::<Vec<_>>()).collect();
+        let n = fights.len();
+        self.inner.set_fixed(fights);
+        Ok(n)
+    }
+
     /// Switch to cycling through fights of the run in `start` (JSON with a
     /// recorder `start` record's run fields: deck, relics, potions, gold,
     /// max_energy, ascension) at `hp` of `max_hp`: `repeats` fights against
@@ -207,9 +235,12 @@ impl VecEnv {
 
     /// Switch to cycling through the recordings in `dir` (the held-out
     /// set). Returns the number loaded and the files that failed to parse.
-    fn load_recordings(&mut self, dir: &str) -> PyResult<(usize, Vec<String>)> {
-        let (setups, errors) =
+    /// With `ascension`, only the fights recorded at it.
+    #[pyo3(signature = (dir, ascension=None))]
+    fn load_recordings(&mut self, dir: &str, ascension: Option<u8>) -> PyResult<(usize, Vec<String>)> {
+        let (mut setups, errors) =
             load_recordings(std::path::Path::new(dir)).map_err(pyo3::exceptions::PyIOError::new_err)?;
+        setups.retain(|s| ascension.is_none_or(|a| s.asc.0 == a));
         let n = setups.len();
         if n == 0 {
             return Err(pyo3::exceptions::PyValueError::new_err("no recordings loaded"));

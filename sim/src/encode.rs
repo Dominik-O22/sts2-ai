@@ -234,9 +234,10 @@ fn mask_in(c: &Combat, hand: &[usize], choices: &[(u32, &Card)], out: &mut [bool
     }
 }
 
+/// Each power as the number its icon shows, a tenth of it.
 fn powers_into(c: &Combat, r: CreatureRef, out: &mut [f32]) {
     for p in &c.creature(r).powers {
-        out[p.id as usize] = (p.amount as f32 / 10.0).clamp(-10.0, 10.0);
+        out[p.id as usize] = (p.display_amount() as f32 / 10.0).clamp(-10.0, 10.0);
     }
 }
 
@@ -575,6 +576,27 @@ mod tests {
         assert_eq!(uids(&c), vec![102, 103, 101]);
         c.player.hand.reverse();
         assert_eq!(uids(&c), vec![102, 103, 101]);
+    }
+
+    /// Aeonglass's icon counts down to the next Wither as cards are played,
+    /// and the observation shows that count, not the fixed six.
+    #[test]
+    fn withering_presence_shows_the_cards_left() {
+        use crate::encounter::Encounter;
+        use crate::gen::generate_against;
+        use crate::ids::PowerId;
+        let mut rng = Rng::new(5);
+        let mut c = generate_against(&mut rng, 48, Ascension(10), Encounter::AeonglassBoss).combat(1);
+        let (mut floats, mut ids, mut m) = (vec![0.0; N_FLOATS], vec![0; N_IDS], vec![false; N_ACTIONS]);
+        let shown = |floats: &[f32]| floats[F_ENEMIES + ENEMY_BASE + N_INTENTS + INTENT_NUMS + PowerId::WitheringPresence as usize];
+        encode(&c, &mut floats, &mut ids, &mut m);
+        assert_eq!(shown(&floats), 0.6);
+        for _ in 0..2 {
+            let play = c.legal_actions().into_iter().find(|a| matches!(a, Action::PlayCard { .. })).expect("a playable card");
+            c.step(play);
+        }
+        encode(&c, &mut floats, &mut ids, &mut m);
+        assert_eq!(shown(&floats), 0.4);
     }
 
     #[test]

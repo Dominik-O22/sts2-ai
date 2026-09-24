@@ -301,6 +301,9 @@ pub struct Stats {
     /// Cards whose play Nostalgia sends to the top of the draw pile instead
     /// of the discard; decided as the play starts, like the game's result pile.
     pub nostalgia_top: Vec<u32>,
+    /// `StranglePower`'s `amountsForPlayedCards`: for each card play in
+    /// flight, the enemy index and the Strangle it had as the play began.
+    pub strangle_pending: Vec<(u32, usize, i32)>,
     /// Thrumming Hatchets whose play finished this turn, and last turn.
     pub hatchets_played: Vec<u32>,
     pub hatchets_played_last_turn: Vec<u32>,
@@ -715,6 +718,9 @@ impl Combat {
         if self.player.creature.powers.iter().any(|p| p.free_card(card.ty())) || self.relic_makes_free(card) {
             return 0;
         }
+        // CuriousPower.cs: a power, so its hook runs ahead of the relics'.
+        let curious = self.player.creature.power_amount(PowerId::Curious);
+        let local = if card.ty() == CardType::Power && local > 0 { (local - curious).max(0) } else { local };
         let local = local + self.relic_cost_additive(card);
         // TangledPower.cs: every attack is afflicted with Entangled (+amount).
         if card.ty() == CardType::Attack {
@@ -2308,6 +2314,14 @@ impl Combat {
         if card.affliction == Some(Affliction::Bound) && !card.dupe {
             self.stats.bound_played = true;
         }
+        // StranglePower.BeforeCardPlayed: remember the amount as the card
+        // begins, so the card that applies or stacks it is hit by the old one.
+        for (i, e) in self.enemies.iter().enumerate() {
+            let strangle = e.creature.power(PowerId::Strangle).filter(|p| p.applier == Some(CreatureRef::Player));
+            if let Some(p) = strangle.filter(|_| e.creature.alive()) {
+                self.stats.strangle_pending.push((card.uid, i, p.amount));
+            }
+        }
         if card.ty() == CardType::Attack {
             if self.player.creature.power(PowerId::FreeAttack).is_some() {
                 out.push(Effect::DecrementPower { target: CreatureRef::Player, id: PowerId::FreeAttack });
@@ -2353,8 +2367,23 @@ impl Combat {
         if self.stats.skill_played_this_turn {
             self.spread_smog();
         }
+        let strangled: Vec<(usize, i32)> =
+            self.stats.strangle_pending.iter().filter(|s| s.0 == card.uid).map(|&(_, i, n)| (i, n)).collect();
+        self.stats.strangle_pending.retain(|s| s.0 != card.uid);
         for (i, e) in self.enemies.iter_mut().enumerate() {
+            let alive = e.creature.alive();
             for p in &mut e.creature.powers {
+                // StranglePower.AfterCardPlayed: unblockable, unpowered, for
+                // the amount it had as this card began.
+                if let Some(&(_, n)) = strangled.iter().find(|s| s.0 == i).filter(|_| p.id == PowerId::Strangle && alive) {
+                    out.push(Effect::Damage {
+                        target: CreatureRef::Enemy(i),
+                        amount: n as f64,
+                        props: ValueProp::UNBLOCKABLE.or(ValueProp::UNPOWERED),
+                        dealer: None,
+                        card: None,
+                    });
+                }
                 out.extend(p.after_card_played(CreatureRef::Enemy(i), card.ty(), card.id, card.upgraded));
             }
         }

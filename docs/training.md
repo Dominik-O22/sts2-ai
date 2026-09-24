@@ -66,14 +66,21 @@ maturin from `sim-py/` into the package `sts2ai._sim`.
   is a plain PPO with GAE. `evaluate.py` runs the policy greedily on the
   held-out set: ten generated fights per encounter from a fixed seed
   (`gen::holdout`), or on run recordings (Real decks, below).
-- Reward (`env.rs`): the terminal reward is a win at `1 + w * hp_frac +
-  0.1 * potions_left`, a loss or a 500-step timeout at -1. `w` is 0.5,
-  except after an act boss, where the next act's Ancient heals 80% of the
-  missing HP at A10 and only the other 20% counts (0.1). A potion at 0.1 is
-  about 16 HP. On top of it, potential-based shaping: each step pays the
+- Reward (`env.rs`): the terminal reward is a win at `1 + p * hp +
+  12p * potions_left`, a loss or a 500-step timeout at `-1 + 0.2 *
+  enemy_hp_taken` (capped at -0.8). Under a flat -1 every line of a lost
+  fight paid the same, so the policy folded once its value read a fight as
+  lost, and search tied every option there. `p` is 0.025 an HP point,
+  the same at any max HP, except after an act boss, where the next act's
+  Ancient heals 80% of the missing HP at A10 and only the other 20% counts.
+  It was 0.5 of the HP fraction (0.006 an HP at 80 max HP) until
+  2026-09-24, when the policy won its weak and normal fights but lost 5 HP
+  a fight more than the winners who played the same ones (`evaluate
+  --source easy`); a potion was 16 HP then and is 12 now. On top of it,
+  potential-based shaping: each step pays the
   change in half the enemy HP lost (a running count over the fight, as a
-  fraction of what the enemies started with) minus `w` times the player HP
-  fraction lost, plus 0.1 per potion gained (a drink counts as one lost),
+  fraction of what the enemies started with) minus `p` times the player HP
+  lost, plus `12p` per potion gained (a drink counts as one lost),
   measured from the fight's own start. Before the potion term a drink cost
   nothing until the fight ended, and the policy drank combat potions in
   weak fights it lost 5% HP in; with it, over 600 iterations from set-11,
@@ -182,6 +189,28 @@ uv run python scripts/deckstats.py                                          # wh
 potions and starting HP per fight and on average by encounter kind. The
 constants in `gen.rs` (`generate_against`) should follow those numbers
 once there are a few dozen run fights.
+
+Other players' winning runs come from ststracker.app (`scripts/tracker.py
+--crawl`, 1,193 A10 Ironclad wins on 2026-09-24). `sts2ai.setups` turns
+each run's elite and boss fights into setups, the deck rebuilt at that
+floor from the final one, and splits them by player: 7,560 to train on and
+1,649 held out (2,801 more hold a card the sim lacks, Mad Science and Splash
+mostly).
+
+```
+uv run python -m sts2ai.setups                                               # pages -> setups/train.jsonl, holdout.jsonl
+uv run python -m sts2ai.evaluate runs/<time>/latest.pt --source setups       # win rate on held-out winners' fights
+uv run python -m sts2ai.evaluate runs/<time>/latest.pt --source easy         # HP lost in weak and normal fights, against the winners
+uv run python -m sts2ai.train ... --real-setups $S/train.jsonl:0.25,$S/easy-train.jsonl:0.1   # S=~/.local/share/SlayTheSpire2/sts2ai/tracker/setups
+```
+
+With `--real-setups`, each file takes its share of the resets (after the
+colon, `--real-frac` where none is given), one of its fights drawn with its
+enemies rolled afresh; training evaluates on the held-out ones beside
+the generated set. They are all wins, so they only show decks that got
+through; the generator keeps the weak ones. set-14 on them, greedy: act 1
+elites 92%, bosses 69%; act 2 88%, 67%; act 3 86%, 48%, against 15% on the
+generated act 3 bosses, whose decks are far weaker than a winner's.
 
 ## Speed
 

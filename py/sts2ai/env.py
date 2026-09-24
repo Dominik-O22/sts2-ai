@@ -12,6 +12,9 @@ import torch
 from sts2ai import _sim
 
 DEFAULT_RECORDINGS = Path.home() / ".local/share/SlayTheSpire2/sts2ai/recordings"
+# The ascension the policy trains at (`EnvConfig::default`). Played fights
+# at another one are left out of what stands for its play.
+ASCENSION = 10
 
 
 def has_recordings(directory: Path = DEFAULT_RECORDINGS) -> bool:
@@ -247,9 +250,17 @@ class Envs:
         ended = self.sim.step_run(envs, np.ascontiguousarray(options, dtype=np.int64), self.floats, self.ids, self.mask)
         return [(env, RunFight(*r)) for env, r in ended]
 
-    def load_recordings(self, directory: Path = DEFAULT_RECORDINGS) -> int:
-        """Cycle through recorded fights instead of generated ones."""
-        n, errors = self.sim.load_recordings(str(directory))
+    def use_setups(self, path: Path, repeats: int = 1, seed: int = 0) -> int:
+        """Cycle through played runs' fights (`sts2ai.setups`), `repeats`
+        of each."""
+        n = self.sim.use_setups(path.read_text(), repeats, seed)
+        self.sim.observe(self.floats, self.ids, self.mask)
+        return n
+
+    def load_recordings(self, directory: Path = DEFAULT_RECORDINGS, ascension: int | None = None) -> int:
+        """Cycle through recorded fights instead of generated ones; with
+        `ascension`, only those played at it."""
+        n, errors = self.sim.load_recordings(str(directory), ascension)
         for e in errors:
             print(f"skipped {e}")
         self.sim.observe(self.floats, self.ids, self.mask)

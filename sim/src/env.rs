@@ -149,9 +149,17 @@ impl Starts {
     }
 }
 
-/// What a potion kept is worth: about the 16 HP it is worth to the fights
-/// ahead, at `hp_weight`. Nothing after the run's last fight.
-const POTION_VALUE: f32 = 0.1;
+/// What an HP point is worth when the run goes on: the same for every HP,
+/// whatever the max, in any fight. Against a win's 1, losing 10 HP to a weak
+/// fight costs 0.25. At 0.5 of the HP fraction (0.006 an HP at 80 max HP) the
+/// policy won its weak and normal fights but lost 5 HP a fight more than the
+/// winners who played the same ones (`evaluate --source easy`).
+const HP_PRICE: f32 = 0.025;
+
+/// What a potion kept is worth: about 12 HP to the fights ahead. At 16 HP
+/// the policy drank 0.05 potions in an easy fight against the winners' 0.25.
+/// Nothing after the run's last fight.
+const POTION_VALUE: f32 = 12.0 * HP_PRICE;
 
 fn potion_value(c: &Combat) -> f32 {
     if c.after == After::End {
@@ -161,16 +169,23 @@ fn potion_value(c: &Combat) -> f32 {
     }
 }
 
+/// What a lost fight pays per fraction of the enemies' HP taken.
+///
+/// A flat -1 made every line of a lost fight worth the same, so once the
+/// value head read a fight as lost the policy stopped trying (it ended turns
+/// with Defends in hand against Aeonglass), and search, which scores lines
+/// by the same rewards and value, tied every option there. The best loss
+/// still pays -0.8, far under any win.
+const LOSS_DAMAGE: f32 = 0.2;
+
 /// Stopgap terminal reward (DESIGN.md, Decision engine): a win is worth 1
-/// plus the HP fraction kept at `hp_weight` and `POTION_VALUE` per unused
-/// potion; a loss or a timed-out fight is -1.
+/// plus the HP kept at `hp_value` an HP and `POTION_VALUE` per unused
+/// potion; a loss or a timed-out fight is -1 plus `LOSS_DAMAGE` per
+/// fraction of the enemies' HP taken.
 pub fn terminal_reward(c: &Combat) -> f32 {
     match c.outcome {
-        Some(Outcome::Won) => {
-            let hp = c.player.creature.hp as f32 / c.player.creature.max_hp.max(1) as f32;
-            1.0 + hp_weight(c) * hp + potion_value(c) * potions_held(c) as f32
-        }
-        _ => -1.0,
+        Some(Outcome::Won) => 1.0 + hp_value(c) * c.player.creature.hp.max(0) as f32 + potion_value(c) * potions_held(c) as f32,
+        _ => -1.0 + LOSS_DAMAGE * enemy_hp_taken(c).min(1.0),
     }
 }
 
@@ -189,16 +204,16 @@ fn potions_held(c: &Combat) -> usize {
     c.potions.iter().flatten().filter(|&&p| !(free_rocks && p == PotionId::PotionShapedRock)).count()
 }
 
-/// What the HP fraction is worth: half a win, by what follows the fight.
+/// What an HP point is worth, by what follows the fight: `HP_PRICE`.
 /// After an act boss the Ancient that opens the next act heals all missing
 /// HP, or 80% of it under Weary Traveler, so only the part it leaves
 /// counts. Under Double Boss the last act's first boss is followed by the
 /// second with no rest, so its HP counts in full; after the run's last
 /// fight it counts for nothing.
-fn hp_weight(c: &Combat) -> f32 {
+fn hp_value(c: &Combat) -> f32 {
     match c.after {
-        After::Act | After::Boss => 0.5,
-        After::Ancient if c.asc.has(AscensionLevel::WearyTraveler) => 0.5 * 0.2,
+        After::Act | After::Boss => HP_PRICE,
+        After::Ancient if c.asc.has(AscensionLevel::WearyTraveler) => HP_PRICE * 0.2,
         After::Ancient | After::End => 0.0,
     }
 }
@@ -229,8 +244,8 @@ impl Baseline {
 }
 
 /// Potential for reward shaping: half the enemy HP taken since the
-/// baseline (`enemy_hp_taken`), minus the fraction of the player's HP lost
-/// and plus the potions gained (a drink counts as one lost) at the prices
+/// baseline (`enemy_hp_taken`), minus the player's HP lost and plus the
+/// potions gained (a drink counts as one lost) at the prices
 /// the terminal reward puts on them. Without the potion term a drink cost
 /// nothing until the fight ended, and the policy drank combat potions in
 /// weak fights it lost 5% HP in.
@@ -244,9 +259,9 @@ pub fn potential(c: &Combat, base: Baseline) -> f32 {
     if c.is_over() {
         return 0.0;
     }
-    let lost = (base.hp - c.player.creature.hp.max(0)) as f32 / c.player.creature.max_hp.max(1) as f32;
+    let lost = (base.hp - c.player.creature.hp.max(0)) as f32;
     let potions = potions_held(c) as f32 - base.potions as f32;
-    0.5 * (enemy_hp_taken(c) - base.taken) - hp_weight(c) * lost + potion_value(c) * potions
+    0.5 * (enemy_hp_taken(c) - base.taken) - hp_value(c) * lost + potion_value(c) * potions
 }
 
 /// The reward for a transition: the potential change, plus the terminal
@@ -506,10 +521,10 @@ impl Slot {
     /// nothing in it to act on. In run mode, returns the finished fight's
     /// place in its run; a run that waits at a decision for the caller
     /// starts no fight until `step_run` answers it.
-    fn reset(&mut self, index: usize, n: usize, cfg: &EnvConfig, fixed: &[FightSetup], hard: &[(Encounter, f32)]) -> Option<RunFight> {
+    fn reset(&mut self, index: usize, n: usize, cfg: &EnvConfig, pools: Pools) -> Option<RunFight> {
         let mut report = None;
         loop {
-            let rolled = self.roll(index, n, cfg, fixed, hard);
+            let rolled = self.roll(index, n, cfg, pools);
             report = report.or(rolled);
             if !self.combat.is_over() || self.waiting() {
                 return report;
@@ -531,14 +546,14 @@ impl Slot {
         if let Some(setup) = setup {
             self.start(setup);
             if self.combat.is_over() {
-                let later = self.reset(index, n, cfg, &[], &[]);
+                let later = self.reset(index, n, cfg, Pools { fixed: &[], hard: &[], real: &[] });
                 return report.filter(|r| r.end.is_some()).or(later.filter(|r| r.end.is_some()));
             }
         }
         report.filter(|r| r.end.is_some())
     }
 
-    fn roll(&mut self, index: usize, n: usize, cfg: &EnvConfig, fixed: &[FightSetup], hard: &[(Encounter, f32)]) -> Option<RunFight> {
+    fn roll(&mut self, index: usize, n: usize, cfg: &EnvConfig, Pools { fixed, hard, real }: Pools) -> Option<RunFight> {
         let acts = act_floor(cfg.min_floor).0..=act_floor(cfg.max_floor).0;
         let weighted: Vec<(Encounter, f32)> =
             hard.iter().copied().filter(|(e, _)| acts.contains(&(e.act().index() as u32))).collect();
@@ -552,6 +567,8 @@ impl Slot {
             }
         } else if !fixed.is_empty() {
             fixed[(index + self.resets * n) % fixed.len()].clone()
+        } else if let Some(pool) = self.real_pool(real) {
+            pool[self.rng.next_int(pool.len())].rerolled(&mut self.rng)
         } else if self.rng.next_float(1.0) < cfg.hard_frac && !weighted.is_empty() {
             // Elites and bosses by weight: the ones the policy loses most.
             let total: f32 = weighted.iter().map(|(_, w)| w).sum();
@@ -590,6 +607,20 @@ impl Slot {
         self.base = Baseline::of(&self.combat);
     }
 
+    /// The pool of played fights this reset draws from, each taking its
+    /// share of the resets; none for the rest. Draws nothing without pools.
+    fn real_pool<'a>(&mut self, real: &'a [(Vec<FightSetup>, f32)]) -> Option<&'a [FightSetup]> {
+        if real.is_empty() {
+            return None;
+        }
+        let mut x = self.rng.next_float(1.0);
+        real.iter().find(|(_, share)| {
+            x -= share;
+            x < 0.0
+        })
+        .map(|(pool, _)| pool.as_slice())
+    }
+
     fn end(&self, index: usize) -> EpisodeEnd {
         let c = &self.combat;
         EpisodeEnd {
@@ -609,16 +640,27 @@ impl Slot {
     }
 }
 
+/// Where a reset can take its fight from besides the generator.
+#[derive(Clone, Copy)]
+struct Pools<'a> {
+    /// When set, resets cycle through these instead of generating.
+    fixed: &'a [FightSetup],
+    /// When set, the `hard_frac` share of fights draws its elite or boss
+    /// by these weights instead of evenly.
+    hard: &'a [(Encounter, f32)],
+    /// Pools of played runs' fights, each drawn for its share of the
+    /// resets with its enemies rolled afresh.
+    real: &'a [(Vec<FightSetup>, f32)],
+}
+
 pub struct VecEnv {
     slots: Vec<Slot>,
     /// Where run-mode runs start, shared with every slot's run.
     starts: Arc<Mutex<Starts>>,
     cfg: EnvConfig,
-    /// When set, resets cycle through these instead of generating.
     fixed: Vec<FightSetup>,
-    /// When set, the `hard_frac` share of fights draws its elite or boss
-    /// by these weights instead of evenly.
     hard: Vec<(Encounter, f32)>,
+    real: Vec<(Vec<FightSetup>, f32)>,
 }
 
 impl VecEnv {
@@ -632,9 +674,9 @@ impl VecEnv {
             })
             .collect();
         for (i, s) in slots.iter_mut().enumerate() {
-            s.reset(i, n, &cfg, &[], &[]);
+            s.reset(i, n, &cfg, Pools { fixed: &[], hard: &[], real: &[] });
         }
-        Self { slots, cfg, fixed: vec![], hard: vec![], starts: Default::default() }
+        Self { slots, cfg, fixed: vec![], hard: vec![], real: vec![], starts: Default::default() }
     }
 
     pub fn len(&self) -> usize {
@@ -671,11 +713,12 @@ impl VecEnv {
     pub fn set_fixed(&mut self, setups: Vec<FightSetup>) {
         self.fixed = setups;
         let n = self.slots.len();
-        let (cfg, fixed, hard) = (self.cfg, &self.fixed, &self.hard);
+        let cfg = self.cfg;
+        let pools = Pools { fixed: &self.fixed, hard: &self.hard, real: &self.real };
         for (i, s) in self.slots.iter_mut().enumerate() {
             s.resets = 0;
             s.run = None;
-            s.reset(i, n, &cfg, fixed, hard);
+            s.reset(i, n, &cfg, pools);
         }
     }
 
@@ -690,7 +733,7 @@ impl VecEnv {
         self.slots.par_iter_mut().enumerate().for_each(|(i, s)| {
             s.resets = 0;
             s.run = Some(RunSlot::new(asc, base, i, choices, starts.clone()));
-            s.reset(i, n, &cfg, &[], hard);
+            s.reset(i, n, &cfg, Pools { fixed: &[], hard, real: &[] });
         });
     }
 
@@ -750,6 +793,14 @@ impl VecEnv {
             .collect()
     }
 
+    /// Pools of played runs' fights, each for its share of the resets from
+    /// here on (the shares sum to at most 1), their enemies rolled afresh
+    /// each time.
+    pub fn set_real(&mut self, pools: Vec<(Vec<FightSetup>, f32)>) {
+        assert!(pools.iter().map(|p| p.1).sum::<f32>() <= 1.0 + 1e-6, "played fights' shares sum past 1");
+        self.real = pools.into_iter().filter(|(pool, share)| !pool.is_empty() && *share > 0.0).collect();
+    }
+
     pub fn combat(&self, i: usize) -> &Combat {
         &self.slots[i].combat
     }
@@ -785,7 +836,8 @@ impl VecEnv {
         self.check_buffers(floats, ids, mask);
         let n = self.slots.len();
         assert!(actions.len() == n && rewards.len() == n && dones.len() == n, "batch size mismatch");
-        let (cfg, fixed, hard) = (self.cfg, &self.fixed, &self.hard);
+        let cfg = self.cfg;
+        let pools = Pools { fixed: &self.fixed, hard: &self.hard, real: &self.real };
         self.slots
             .par_iter_mut()
             .enumerate()
@@ -811,7 +863,7 @@ impl VecEnv {
                 *r = step_reward(before, &s.combat, s.base, over);
                 *d = over;
                 if let Some(end) = &mut end {
-                    end.run = s.reset(i, n, &cfg, fixed, hard);
+                    end.run = s.reset(i, n, &cfg, pools);
                 }
                 encode::encode(&s.combat, f, ids, m);
                 end
@@ -1401,11 +1453,14 @@ mod tests {
             c.after = after;
             terminal_reward(c)
         };
-        let half = 0.5 * c.player.creature.hp as f32 / c.player.creature.max_hp as f32;
-        assert_eq!(reward(&mut c, After::Act), 1.0 + half + 0.1);
-        assert_eq!(reward(&mut c, After::Boss), 1.0 + half + 0.1, "the second boss follows with no rest");
-        assert_eq!(reward(&mut c, After::Ancient), 1.0 + 0.2 * half + 0.1, "the Ancient heals 80% at A10");
+        let hp = HP_PRICE * c.player.creature.hp as f32;
+        assert_eq!(reward(&mut c, After::Act), 1.0 + hp + POTION_VALUE);
+        assert_eq!(reward(&mut c, After::Boss), 1.0 + hp + POTION_VALUE, "the second boss follows with no rest");
+        assert_eq!(reward(&mut c, After::Ancient), 1.0 + 0.2 * hp + POTION_VALUE, "the Ancient heals 80% at A10");
         assert_eq!(reward(&mut c, After::End), 1.0, "nothing is left to spend");
+        // An HP point is worth the same at any max HP.
+        c.player.creature.max_hp *= 2;
+        assert_eq!(reward(&mut c, After::Act), 1.0 + hp + POTION_VALUE);
     }
 
     #[test]
@@ -1636,10 +1691,9 @@ mod tests {
         let cfg = EnvConfig { hard_frac: 1.0, ..Default::default() };
         let mut env = VecEnv::new(4, 3, cfg);
         env.set_hard_weights(vec![(Encounter::KnowledgeDemonBoss, 1.0), (Encounter::VantomBoss, 0.0)]);
-        let fixed = vec![];
         for s in env.slots.iter_mut() {
             for _ in 0..20 {
-                s.reset(0, 4, &cfg, &fixed, &env.hard);
+                s.reset(0, 4, &cfg, Pools { fixed: &[], hard: &env.hard, real: &[] });
                 assert_eq!(s.setup.encounter, Encounter::KnowledgeDemonBoss);
                 assert_eq!(act_floor(s.setup.floor), (1, BOSS_FLOOR));
             }
@@ -1663,7 +1717,49 @@ mod tests {
         env.set_fixed(setups.clone());
         assert_eq!(env.slots[0].setup.encounter, setups[0].encounter);
         assert_eq!(env.slots[1].setup.encounter, setups[1].encounter);
-        env.slots[0].reset(0, 2, &env.cfg, &env.fixed, &[]);
+        env.slots[0].reset(0, 2, &env.cfg, Pools { fixed: &env.fixed, hard: &[], real: &[] });
         assert_eq!(env.slots[0].setup.encounter, setups[2].encounter);
+    }
+
+    /// Each pool of played fights takes its share of the resets, and the
+    /// generator the rest.
+    #[test]
+    fn real_pools_take_their_shares() {
+        let ids = crate::replay::Ids::new();
+        let line = |enc: &str| format!(r#"{{"start": {{"ascension": 10, "deck": [{{"id": "BASH"}}], "relics": [], "potions": [null, null]}}, "hp": 50, "max_hp": 80, "encounter": "{enc}", "floor": 48}}"#);
+        let pool = |enc: &str| crate::gen::run_setups(&line(enc), &ids, 1).unwrap();
+        let mut env = VecEnv::new(1, 5, EnvConfig::default());
+        env.set_real(vec![(pool("QUEEN_BOSS"), 0.25), (pool("AEONGLASS_BOSS"), 0.5)]);
+        let pools = Pools { fixed: &[], hard: &[], real: &env.real };
+        let mut counts = [0; 3];
+        for _ in 0..4000 {
+            env.slots[0].roll(0, 1, &env.cfg, pools);
+            counts[match env.slots[0].setup.encounter {
+                Encounter::QueenBoss if env.slots[0].setup.hp == 50 => 0,
+                Encounter::AeonglassBoss if env.slots[0].setup.hp == 50 => 1,
+                _ => 2,
+            }] += 1;
+        }
+        for (n, share) in counts.iter().zip([0.25, 0.5, 0.25]) {
+            assert!((*n as f32 / 4000.0 - share).abs() < 0.03, "{counts:?}");
+        }
+    }
+
+    /// A played run's fight keeps its deck, HP, encounter and floor each
+    /// time it is drawn.
+    #[test]
+    fn real_setups_keep_the_run() {
+        let ids = crate::replay::Ids::new();
+        let line = r#"{"start": {"ascension": 10, "deck": [{"id": "BASH", "up": true}, {"id": "STRIKE_IRONCLAD"}], "relics": ["BURNING_BLOOD"], "potions": [null, null]}, "hp": 41, "max_hp": 80, "encounter": "QUEEN_BOSS", "floor": 48}"#;
+        let real = crate::gen::run_setups(line, &ids, 1).unwrap();
+        let mut env = VecEnv::new(8, 5, EnvConfig::default());
+        env.set_real(vec![(real, 1.0)]);
+        let pools = Pools { fixed: &[], hard: &[], real: &env.real };
+        for s in env.slots.iter_mut() {
+            s.reset(0, 8, &env.cfg, pools);
+            assert_eq!((s.setup.encounter, s.setup.hp, s.setup.max_hp, s.setup.floor), (Encounter::QueenBoss, 41, 80, 48));
+            assert_eq!(s.setup.deck.len(), 2);
+            assert!(s.setup.deck[0].upgraded);
+        }
     }
 }

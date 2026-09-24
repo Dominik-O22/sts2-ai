@@ -27,7 +27,7 @@ from torch import Tensor, nn
 
 from sts2ai import _sim
 from sts2ai.cards import BOSS_FLOOR, fights, horizon
-from sts2ai.env import DEFAULT_RECORDINGS, RunLayout
+from sts2ai.env import ASCENSION, DEFAULT_RECORDINGS, RunLayout
 from sts2ai.model import Policy, load_policy
 
 ACTS = ["Overgrowth", "Underdocks", "Hive", "Glory"]
@@ -286,13 +286,15 @@ def pair_agreement(model: DeckValue, x, y: Tensor, mask: Tensor, pairs: Tensor, 
 def played_starts(paths: list[Path]) -> list[dict]:
     """The start record of each recording, with the first snapshot's HP
     when the record predates carrying it. Without paths, every played run's
-    fight: a start with a seed, and no console line in its run."""
+    fight at the trained ascension: a start with a seed, and no console
+    line in its run."""
     starts = []
     for path in paths or sorted(DEFAULT_RECORDINGS.glob("*.jsonl")):
         lines = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
         start = next((r for r in lines if r["t"] == "start"), None)
         snap = next((r for r in lines if r["t"] == "snapshot"), None)
-        if start is None or snap is None or (not paths and (not start.get("seed") or start.get("scripted"))):
+        played = start is not None and start.get("seed") and not start.get("scripted") and start.get("ascension") == ASCENSION
+        if start is None or snap is None or (not paths and not played):
             continue
         start.setdefault("hp", snap["hp"])
         start.setdefault("max_hp", snap["max_hp"])

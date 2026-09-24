@@ -1236,4 +1236,88 @@ mod tests {
             }
         }
     }
+
+    /// A Nibbit with 500 HP and no block, and `cards` in hand from uid 900.
+    fn mad_science(cards: &[(ids::CardId, bool)]) -> Combat {
+        let mut c = with_hand(&[one(MonsterId::Nibbit)], cards);
+        let e = &mut c.enemies[0].creature;
+        (e.hp, e.max_hp, e.block) = (500, 500, 0);
+        c
+    }
+
+    /// MadScience.OnPlay for Attacks: the hit, then the rider. Sapping's
+    /// Vulnerable lands after its own hit; Violence is three attack
+    /// commands, so Vigor boosts only the first.
+    #[test]
+    fn mad_science_attacks_hit_then_apply_their_rider() {
+        use ids::CardId::*;
+        let mut c = mad_science(&[(MadScienceSapping, false), (MadScienceViolence, false)]);
+        c.step(Action::PlayCard { hand_idx: hand_idx(&c, 900), target: Some(0) });
+        let e = &c.enemies[0].creature;
+        assert_eq!(e.hp, 500 - 12);
+        assert_eq!((e.power_amount(PowerId::Weak), e.power_amount(PowerId::Vulnerable)), (2, 2));
+        c.enemies[0].creature.powers.clear();
+        c.player.creature.powers.push(Power::new(PowerId::Vigor, 5));
+        c.step(Action::PlayCard { hand_idx: hand_idx(&c, 901), target: Some(0) });
+        assert_eq!(c.enemies[0].creature.hp, 488 - (17 + 12 + 12));
+    }
+
+    /// Skills block 8, then Energized gives 2 energy, Wisdom draws 3, and
+    /// Chaos hands over an Ironclad card that is free this turn.
+    #[test]
+    fn mad_science_skills_block_then_apply_their_rider() {
+        use ids::CardId::*;
+        let mut c = mad_science(&[(MadScienceEnergized, false), (MadScienceWisdom, false), (MadScienceChaos, true)]);
+        assert!(c.player.hand[hand_idx(&c, 902)].has(types::Keyword::Innate));
+        c.step(Action::PlayCard { hand_idx: hand_idx(&c, 900), target: None });
+        assert_eq!((c.player.creature.block, c.player.energy), (8, 11));
+        let held = c.player.hand.len();
+        c.step(Action::PlayCard { hand_idx: hand_idx(&c, 901), target: None });
+        assert_eq!((c.player.creature.block, c.player.hand.len()), (16, held - 1 + 3));
+        let before: Vec<u32> = c.player.hand.iter().map(|k| k.uid).collect();
+        c.step(Action::PlayCard { hand_idx: hand_idx(&c, 902), target: None });
+        let made: Vec<&card::Card> = c.player.hand.iter().filter(|k| !before.contains(&k.uid)).collect();
+        assert_eq!(made.len(), 1);
+        assert!(card::IRONCLAD_POOL.contains(&made[0].id));
+        assert_eq!((c.cost(made[0]), c.player.creature.block), (0, 24));
+    }
+
+    /// Powers apply their rider's power: Expertise Strength and Dexterity,
+    /// Curious a discount on Power cards (not other types, not below 0),
+    /// Improvement an inert power.
+    #[test]
+    fn mad_science_powers_apply_their_power() {
+        use ids::CardId::*;
+        let cards = [(MadScienceExpertise, false), (MadScienceCurious, false), (MadScienceImprovement, false), (Barricade, false), (Inflame, false), (Bludgeon, false)];
+        let mut c = mad_science(&cards);
+        for uid in [900, 901, 902] {
+            c.step(Action::PlayCard { hand_idx: hand_idx(&c, uid), target: None });
+        }
+        let p = &c.player.creature;
+        assert_eq!((p.power_amount(PowerId::Strength), p.power_amount(PowerId::Dexterity)), (2, 2));
+        assert_eq!((p.power_amount(PowerId::Curious), p.power_amount(PowerId::Improvement)), (1, 1));
+        let costs: Vec<i32> = [903, 904, 905].map(|u| c.cost(&c.player.hand[hand_idx(&c, u)])).to_vec();
+        assert_eq!(costs, vec![2, 0, 3]);
+    }
+
+    /// StranglePower: after each later card, unblockable damage for the
+    /// amount it had as that card began; never for the card that applied
+    /// it, and gone once the enemy turn ends.
+    #[test]
+    fn strangle_hits_after_later_cards_for_its_amount_before_them() {
+        use ids::CardId::*;
+        let mut c = mad_science(&[(MadScienceChoking, false), (DefendIronclad, false), (MadScienceChoking, false)]);
+        c.step(Action::PlayCard { hand_idx: hand_idx(&c, 900), target: Some(0) });
+        assert_eq!(c.enemies[0].creature.hp, 500 - 12);
+        assert_eq!(c.enemies[0].creature.power_amount(PowerId::Strangle), 6);
+        c.enemies[0].creature.block = 100;
+        c.step(Action::PlayCard { hand_idx: hand_idx(&c, 901), target: None });
+        assert_eq!((c.enemies[0].creature.hp, c.enemies[0].creature.block), (488 - 6, 100));
+        c.enemies[0].creature.block = 0;
+        c.step(Action::PlayCard { hand_idx: hand_idx(&c, 902), target: Some(0) });
+        assert_eq!(c.enemies[0].creature.hp, 482 - 12 - 6);
+        assert_eq!(c.enemies[0].creature.power_amount(PowerId::Strangle), 12);
+        c.step(Action::EndTurn);
+        assert!(c.enemies[0].creature.power(PowerId::Strangle).is_none());
+    }
 }

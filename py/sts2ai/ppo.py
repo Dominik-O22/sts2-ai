@@ -22,9 +22,11 @@ import torch
 from torch import Tensor
 from torch.utils.tensorboard import SummaryWriter
 
-from sts2ai.env import DEFAULT_RECORDINGS, End, Envs, has_recordings
-from sts2ai.evaluate import evaluate
-from sts2ai.model import Arch, Policy, build_policy, checkpoint_arch, checkpoint_layout, checkpoint_vocab, load_state, masked_logits
+from sts2ai.env import ASCENSION, DEFAULT_RECORDINGS, End, Envs, has_recordings
+from sts2ai.evaluate import easy, evaluate
+from sts2ai.setups import EASY_HOLDOUT
+from sts2ai.setups import HOLDOUT as REAL_HOLDOUT
+from sts2ai.model import Arch, Policy, build_policy, checkpoint_arch, checkpoint_layout, checkpoint_vocab, load_state, masked_logits, warm_start
 from sts2ai.search import rollout, spread
 from sts2ai.vocab import current_text
 
@@ -121,6 +123,26 @@ class Config:
     arch: str = "slots"
     hidden: int = 512
     depth: int = 2
+    # `attn` options (`model.Arch`).
+    pointer: bool = False
+    piles: bool = False
+    choice_attn: bool = False
+    # Start a new network from a checkpoint's weights where the names and
+    # shapes match (`model.warm_start`), with a fresh optimizer, counting
+    # iterations on from it. For an architecture change; `resume` is for
+    # the same one.
+    init_from: Path | None = None
+    # Played runs' fights (`sts2ai.setups`) beside the generator's: files,
+    # comma separated, each with the share of the resets it takes after a
+    # colon (`train.jsonl:0.25,easy-train.jsonl:0.1`), `real_frac` where none
+    # is given. `real_holdout` is evaluated with the held-out set when it
+    # exists.
+    real_setups: str | None = None
+    real_frac: float = 0.3
+    real_holdout: Path = REAL_HOLDOUT
+    # Stop after this many minutes of training (the last iteration saves
+    # and evaluates as the `iters`th would), for comparisons at equal time.
+    minutes: float | None = None
 
 
 class Rollout:
@@ -308,8 +330,14 @@ def train(cfg: Config) -> Policy:
     np.random.seed(cfg.seed)
     device = torch.device(cfg.device)
     envs = Envs(cfg.envs, seed=cfg.seed, max_floor=cfg.floor_start)
+    if cfg.real_setups:
+        pools = [(Path(path), float(share) if share else cfg.real_frac) for path, _, share in (p.partition(":") for p in cfg.real_setups.split(","))]
+        sizes = envs.sim.use_real([(path.read_text(), share) for path, share in pools], cfg.seed)
+        for (path, share), n in zip(pools, sizes):
+            print(f"{n} played runs' fights from {path.name} for {share:.0%} of the resets")
     ck = torch.load(cfg.resume, map_location=device) if cfg.resume else None
-    policy = build_policy(envs.layout, checkpoint_arch(ck) if ck else Arch(cfg.arch, cfg.hidden, cfg.depth)).to(device)
+    arch = checkpoint_arch(ck) if ck else Arch(cfg.arch, cfg.hidden, cfg.depth, cfg.pointer, cfg.piles, cfg.choice_attn)
+    policy = build_policy(envs.layout, arch).to(device)
     opt = torch.optim.Adam(policy.parameters(), lr=cfg.lr, eps=1e-5)
     # `net` is what runs; `policy` keeps the plain module for checkpoints.
     net = torch.compile(policy) if cfg.compile and device.type == "cuda" else policy
@@ -342,6 +370,13 @@ def train(cfg: Config) -> Policy:
             opt.load_state_dict(ck["optimizer"])
         start_iter, global_step = ck["iter"] + 1, ck["global_step"]
         print(f"resumed {cfg.resume} at iteration {ck['iter']}")
+    elif cfg.init_from:
+        init = torch.load(cfg.init_from, map_location=device)
+        if checkpoint_vocab(init, None) != current_text():
+            raise ValueError(f"{cfg.init_from} was trained on another vocabulary; warm starts need the same one")
+        fresh = warm_start(policy, init["policy"])
+        start_iter, global_step = init["iter"] + 1, init["global_step"]
+        print(f"started from {cfg.init_from} at iteration {init['iter']}; new: {', '.join(fresh) or 'nothing'}")
     cfg.run_dir.mkdir(parents=True, exist_ok=True)
     writer = SummaryWriter(str(cfg.run_dir))
     print(f"training {policy.arch} on {device}, {cfg.envs} envs x {cfg.steps} steps, logs in {cfg.run_dir}")
@@ -362,6 +397,8 @@ def train(cfg: Config) -> Policy:
             group["lr"] = lr
 
         # Rollout.
+        t_rollout = time.perf_counter()
+        t_sim = 0.0
         search_go.clear()
         policy.eval()
         with torch.no_grad():
@@ -376,7 +413,10 @@ def train(cfg: Config) -> Policy:
                 dist = torch.distributions.Categorical(logits=masked_logits(logits.float(), mask), validate_args=False)
                 action = dist.sample()
                 roll.actions[t], roll.logp[t], roll.values[t] = action, dist.log_prob(action), value.float()
-                ends = envs.step(action.cpu().numpy())
+                picked = action.cpu().numpy()
+                sim_start = time.perf_counter()
+                ends = envs.step(picked)
+                t_sim += time.perf_counter() - sim_start
                 roll.rewards[t].copy_(torch.from_numpy(envs.rewards), non_blocking=True)
                 roll.dones[t].copy_(torch.from_numpy(envs.dones), non_blocking=True)
                 stats.add(ends)
@@ -386,6 +426,7 @@ def train(cfg: Config) -> Policy:
                 _, last_value = net(floats, ids)
             adv, returns = roll.advantages(last_value.float(), cfg.gamma, cfg.lam)
         search_go.set()
+        t_rollout = time.perf_counter() - t_rollout
         global_step += cfg.steps * cfg.envs
         # A search still running when the rollout ends keeps running, and
         # this iteration starts none, unless `search_sync`.
@@ -403,6 +444,7 @@ def train(cfg: Config) -> Policy:
                 wait([pending])
 
         # Update.
+        t_update = time.perf_counter()
         policy.train()
         B = cfg.steps * cfg.envs
         flat = {
@@ -471,6 +513,7 @@ def train(cfg: Config) -> Policy:
             torch.compiler.set_stance("eager_on_recompile")
 
         losses = {k: v.item() for k, v in losses.items()}
+        t_update = time.perf_counter() - t_update
 
         # Logging.
         summary = stats.summary()
@@ -482,14 +525,20 @@ def train(cfg: Config) -> Policy:
         writer.add_scalar("curriculum/max_floor", max_floor, global_step)
         writer.add_scalar("perf/sps", sps, global_step)
         writer.add_scalar("perf/searches_per_iter", searches / (it - start_iter + 1), global_step)
+        # Seconds per iteration: the rollout, the sim's share of it, the update.
+        writer.add_scalar("perf/rollout_s", t_rollout, global_step)
+        writer.add_scalar("perf/rollout_sim_s", t_sim, global_step)
+        writer.add_scalar("perf/update_s", t_update, global_step)
         if it % 10 == 0 or it == start_iter:
             win = summary.get("win_rate", float("nan"))
             print(
                 f"it {it:5d} step {global_step:>10d} floor<={max_floor:2d} win {win:6.1%} "
                 f"reward {summary.get('reward', float('nan')):6.3f} ent {losses['entropy'] / n_updates:5.3f} "
-                f"kl {losses['approx_kl'] / n_updates:6.4f} {sps:8.0f} sps"
+                f"kl {losses['approx_kl'] / n_updates:6.4f} {sps:8.0f} sps "
+                f"(rollout {t_rollout:.2f} s, sim {t_sim:.2f} s, update {t_update:.2f} s)"
             )
-        if it % cfg.eval_every == 0 or it == start_iter + cfg.iters - 1:
+        out_of_time = cfg.minutes is not None and time.time() - t0 > cfg.minutes * 60
+        if it % cfg.eval_every == 0 or it == start_iter + cfg.iters - 1 or out_of_time:
             save_checkpoint(cfg.run_dir / "latest.pt", policy, opt, it, global_step)
             if cfg.keep_every and it % cfg.keep_every == 0:
                 shutil.copy(cfg.run_dir / "latest.pt", cfg.run_dir / f"it{it}.pt")
@@ -500,7 +549,25 @@ def train(cfg: Config) -> Policy:
                 writer.add_scalar(f"eval/holdout_win_{k}", v, global_step)
             print(f"eval on holdout: {win:.1%}  " + "  ".join(f"{k} {v:.1%}" for k, v in by_kind.items()))
             if has_recordings(cfg.recordings):
-                win, _, _ = evaluate(policy, device, 8, "recordings", cfg.recordings)
+                win, _, _ = evaluate(policy, device, 8, "recordings", cfg.recordings, ascension=ASCENSION)
                 writer.add_scalar("eval/recorded_win_rate", win, global_step)
+            if cfg.real_holdout.exists():
+                win, _, by_kind = evaluate(policy, device, cfg.eval_repeats, "setups", setups=cfg.real_holdout)
+                writer.add_scalar("eval/real_win_rate", win, global_step)
+                for k, v in by_kind.items():
+                    writer.add_scalar(f"eval/real_win_{k}", v, global_step)
+                print(f"eval on played runs: {win:.1%}  " + "  ".join(f"{k} {v:.1%}" for k, v in by_kind.items()))
+            if EASY_HOLDOUT.exists():
+                cheap = easy(policy, device, cfg.eval_repeats)
+                for group, r in cheap.items():
+                    writer.add_scalar(f"eval/easy_gap_{group}", r["gap"], global_step)
+                    writer.add_scalar(f"eval/easy_win_{group}", r["win"], global_step)
+                print(
+                    f"eval on easy fights: {cheap['all']['gap']:+.1f} HP a fight against the winners, won {cheap['all']['win']:.1%}  "
+                    + "  ".join(f"{g} {r['gap']:+.1f}" for g, r in cheap.items() if g != "all")
+                )
+        if out_of_time:
+            print(f"stopped after {cfg.minutes:g} minutes at iteration {it}")
+            break
     writer.close()
     return policy
