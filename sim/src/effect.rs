@@ -310,6 +310,10 @@ pub enum Effect {
     /// `PotionCmd.TryToProcure` of `PotionFactory.CreateRandomPotionInCombat`
     /// (Alchemize): into the first empty slot, if there is one.
     ProcureRandomPotion,
+    /// `EntropicBrew.OnUse`: while a potion slot is open, procure a random
+    /// potion out of combat's pool (`CreateRandomPotionOutOfCombat`), until
+    /// one fails (Sozu).
+    FillPotionSlots,
     /// `PlayerCmd.GainGold` (Hand of Greed).
     GainGold { amount: i32 },
 

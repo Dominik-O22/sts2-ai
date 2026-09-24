@@ -1719,8 +1719,19 @@ impl Combat {
                 self.stats.transformed.push((card.uid, was));
                 self.player.hand[i] = card;
             }
+            Effect::FillPotionSlots => {
+                let mut subs = vec![];
+                while self.potions.contains(&None) {
+                    let open = self.potions.iter().filter(|p| p.is_none()).count();
+                    subs.extend(self.procure_random_potion(false));
+                    if self.potions.iter().filter(|p| p.is_none()).count() == open {
+                        break;
+                    }
+                }
+                self.push_front_all(subs);
+            }
             Effect::ProcureRandomPotion => {
-                let subs = self.procure_random_potion();
+                let subs = self.procure_random_potion(true);
                 self.push_front_all(subs);
             }
             Effect::GainGold { amount } => {
@@ -2476,12 +2487,13 @@ impl Combat {
         self.player.hand.iter().filter(|c| uids.contains(&c.uid)).map(|c| Effect::TransformRandom { uid: c.uid }).collect()
     }
 
-    /// `PotionCmd.TryToProcure` of a random in-combat potion
+    /// `PotionCmd.TryToProcure` of a random potion
     /// (`PotionFactory.CreateRandomPotionInCombat`: a rarity roll, then a
-    /// pick among what can be made in combat). Sozu refuses it, a full belt
-    /// has no room, and Belt Buckle takes back its Dexterity once a potion
-    /// arrives.
-    fn procure_random_potion(&mut self) -> Vec<Effect> {
+    /// pick among what can be made in combat; `CreateRandomPotionOutOfCombat`
+    /// without that filter, which Entropic Brew uses even in a fight). Sozu
+    /// refuses it, a full belt has no room, and Belt Buckle takes back its
+    /// Dexterity once a potion arrives.
+    fn procure_random_potion(&mut self, in_combat: bool) -> Vec<Effect> {
         use crate::potion::{Rarity, ALL};
         let roll = self.rngs.potion_generation.next_float(1.0);
         let rarity = if roll <= 0.1 {
@@ -2491,7 +2503,8 @@ impl Combat {
         } else {
             Rarity::Common
         };
-        let options: Vec<PotionId> = ALL.iter().copied().filter(|p| p.rarity() == rarity && p.generatable_in_combat()).collect();
+        let options: Vec<PotionId> =
+            ALL.iter().copied().filter(|p| p.rarity() == rarity && (!in_combat || p.generatable_in_combat())).collect();
         let Some(&id) = self.rngs.potion_generation.pick(&options) else { return vec![] };
         if self.has_relic(crate::relic::RelicId::Sozu) {
             return vec![];
