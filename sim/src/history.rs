@@ -229,6 +229,11 @@ pub fn check(run: &Value, live: bool) -> Report {
                 }
             }
             player.follow(stats);
+            if page(stats) {
+                // The page keeps no potion offers: the potions the port kept
+                // are taken as the player's.
+                player.potions = state.held_potions().map(str::to_string).collect();
+            }
             if !live {
                 player.restore(&mut state);
                 continue;
@@ -259,6 +264,13 @@ pub fn check(run: &Value, live: bool) -> Report {
         }
     }
     report
+}
+
+/// Whether a floor comes from a run page (`scripts/tracker.py`), which
+/// keeps no potion offers, transforms, enchantments or ancient options
+/// left untaken.
+fn page(stats: &Value) -> bool {
+    stats["potions_unrecorded"] == true
 }
 
 /// The player as the record leaves them after each floor: the state the
@@ -513,6 +525,9 @@ struct Recorded {
     /// Where the port did not offer what the record shows: a choice the
     /// record made, or an ancient's options.
     missing: Vec<String>,
+    /// From a run page (`page`): its potion offers are not known, so every
+    /// potion is kept.
+    page: bool,
 }
 
 impl Recorded {
@@ -531,6 +546,7 @@ impl Recorded {
             ancient: list("ancient_choice").iter().find(|o| o["was_chosen"] == true).map(ancient_option),
             events: list("event_choices").iter().filter_map(|c| event_option(c["title"]["key"].as_str()?)).collect(),
             missing: Vec::new(),
+            page: page(stats),
         }
     }
 
@@ -570,6 +586,7 @@ impl Chooser for Recorded {
                     None => relics.len(),
                 }
             }
+            Decision::Potion(_) if self.page => 0,
             Decision::Potion(potion) => match self.potions.iter().position(|p| p == potion) {
                 Some(i) => {
                     self.potions.remove(i);
@@ -741,6 +758,7 @@ fn follow(state: &mut RunState, room: Room, rooms: &[Value], stats: &Value) -> W
             let stolen = stats["gold_stolen"].as_i64().unwrap_or(0) > 0 && stats["gold_gained"].as_i64() == Some(0);
             let proportion = if encounter == Encounter::GremlinMercNormal && stolen { 0.0 } else { 1.0 };
             state.fight_won(kind);
+            after_fight(state, stats);
             let rewards = state.combat_rewards(kind, proportion);
             gold = (!rewards.gold.is_empty()).then(|| rewards.gold.iter().sum());
             state.take_rewards(rewards, &mut chooser, &mut log);
@@ -749,10 +767,12 @@ fn follow(state: &mut RunState, room: Room, rooms: &[Value], stats: &Value) -> W
             let offer = state.ancient(name, &mut chooser, &mut log);
             let recorded: Vec<String> = stats["ancient_choice"].as_array().into_iter().flatten().map(ancient_option).collect();
             let why = format!("options {:?}, the run had {recorded:?}", offer.relics);
-            if offer.relics != recorded {
+            // A page lists the option taken alone.
+            let fits = if page(stats) { recorded.iter().all(|r| offer.relics.contains(r)) } else { offer.relics == recorded };
+            if !fits {
                 chooser.missing.push(why.clone());
             }
-            ancient = Some(if offer.relics == recorded { Ok(()) } else { Err(why) });
+            ancient = Some(if fits { Ok(()) } else { Err(why) });
         }
         Room::Event(name) => match state.event(name, &mut chooser, &mut log) {
             None => {
@@ -774,6 +794,7 @@ fn follow(state: &mut RunState, room: Room, rooms: &[Value], stats: &Value) -> W
                         if !fight.created {
                             state.enemies_created(fought(rooms) as usize);
                         }
+                        after_fight(state, stats);
                         gold = state.event_fight_won(&fight, 1.0, &mut chooser, &mut log);
                     }
                     (Some(fight), None) => chooser.missing.push(format!("the port fought {:?}, the run did not", fight.encounter)),
@@ -829,6 +850,14 @@ fn follow(state: &mut RunState, room: Room, rooms: &[Value], stats: &Value) -> W
         None => drawn_as_recorded(state, room, stats, &log, gold, rooms.len() > 1, &event_cards),
     };
     Walked { stream, unported, missing: chooser.missing, ancient }
+}
+
+/// The player's HP and max HP as a fight left them, for the rewards
+/// screen. The fight is not simulated, so this is the record's after the
+/// floor, which already holds what the rewards add (a relic's max HP).
+fn after_fight(state: &mut RunState, stats: &Value) {
+    state.max_hp = stats["max_hp"].as_i64().unwrap() as i32;
+    state.hp = (stats["current_hp"].as_i64().unwrap() as i32).min(state.max_hp);
 }
 
 /// What a floor drew against what its record offered: the cards, relics,
