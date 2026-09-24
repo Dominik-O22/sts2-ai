@@ -230,7 +230,7 @@ def cmd_train(args) -> None:
     rng = np.random.default_rng(0)
     val_pairs = set(rng.choice(pairs.unique().numpy(), size=max(1, len(pairs.unique()) // 5), replace=False).tolist())
     val = torch.tensor([p in val_pairs for p in pairs.tolist()])
-    model = DeckValue()
+    model = load(args.init, torch.device("cpu")).train() if args.init else DeckValue()
     if args.policy:
         policy = load_policy(args.policy, torch.device("cpu"))
         model.seed_cards(policy)
@@ -349,6 +349,7 @@ def main() -> None:
     tr = sub.add_parser("train", help="fit the network to labels")
     tr.add_argument("labels", type=Path)
     tr.add_argument("--policy", type=Path, help="combat checkpoint to seed the card embedding from")
+    tr.add_argument("--init", type=Path, help="a trained net to start from, for labels from a newer combat checkpoint")
     tr.add_argument("--epochs", type=int, default=200)
     tr.add_argument("--weight-decay", type=float, default=0.1)
     tr.add_argument("--out", type=Path, default=Path("deckvalue.pt"))
