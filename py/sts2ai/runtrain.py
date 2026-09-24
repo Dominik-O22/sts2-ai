@@ -7,16 +7,22 @@ sites, events, ancients, deck picks.
 
 A run pays at its end: +1 for a win, else floors cleared / 49 - 1; a run
 the sim cannot go on with (stuck) pays what the value head expected, so it
-teaches nothing. Each env's decisions form one trajectory, cut into
-batches: GAE with gamma 1 and `lam` over each env's decisions, bootstrapped
-from the value of the env's next decision, which waits for the next batch.
+teaches nothing. With `--potential` each decision also pays Phi(the next
+decision's state) - Phi(its own), Phi 0 once the run is over, Phi the
+deck-value net's view of the run (`deckvalue.RunPotential`). Each env's
+decisions form one trajectory, cut into batches: GAE with gamma 1 and
+`lam` over each env's decisions, bootstrapped from the value of the env's
+next decision, which waits for the next batch.
+
+With `--start-full` below 1 the other runs start later in a run
+(`Curriculum`); the log splits floors and wins by where runs started.
 """
 
 from __future__ import annotations
 
 import argparse
 import time
-from collections import Counter, deque
+from collections import Counter, defaultdict, deque
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -26,7 +32,9 @@ import torch
 from torch.utils.tensorboard import SummaryWriter
 
 from sts2ai import _sim
-from sts2ai.env import End, Envs, RunFight
+from sts2ai.deckvalue import RunPotential
+from sts2ai.deckvalue import load as load_deckvalue
+from sts2ai.env import START_POINTS, End, Envs, RunFight
 from sts2ai.model import Policy, load_policy, masked_logits
 from sts2ai.runmodel import RunArch, RunPolicy, load_run_policy, save_run_policy
 
@@ -124,8 +132,25 @@ class Config:
     # Paid for each relic gained, at the decision it arrived after: about a
     # floor's worth (1 / 49). A relic's worth shows many floors later, mixed
     # with everything else, and without this the policy settled on avoiding
-    # elites. 0 turns it off.
+    # elites. 0 turns it off; the potential is meant to replace it.
     relic_bonus: float = 0.0
+    # Deck-value checkpoint for the shaping potential; empty turns it off.
+    potential: str = ""
+    # Phi is this times the mean predicted fight value (about -1 to 1.5):
+    # at 0.1 a whole unit of fight value is five floors' reward.
+    phi_scale: float = 0.1
+    # Chance a run starts at floor 1; 1 turns the curriculum off.
+    start_full: float = 1.0
+    # Win rate from the frontier start point that moves the frontier
+    # earlier, or minutes there that do.
+    start_target: float = 0.25
+    start_minutes: float = 8.0
+    # Runs from the frontier that judge it.
+    start_window: int = 200
+    # Share of a start point's runs taken from the policy's own states
+    # there once its pool holds `own_ramp` of them (less before).
+    own_max: float = 0.75
+    own_ramp: int = 512
 
 
 @dataclass
@@ -166,31 +191,90 @@ def gae(traj: Trajectory, next_value: float, lam: float) -> np.ndarray:
     return adv
 
 
+def start_name(run: RunFight) -> str:
+    """Where a run started, for the log: "floor 1", "act 3 boss gen"."""
+    return "floor 1" if run.start is None else f"{START_POINTS[run.start]} {'own' if run.own else 'gen'}"
+
+
 class Stats:
-    """Rolling run outcomes for the log."""
+    """Rolling run outcomes for the log: runs from floor 1 in full, the
+    others by where they started."""
 
     def __init__(self, window: int = 2000):
-        self.runs: deque[RunFight] = deque(maxlen=window)
+        self.full: deque[tuple[RunFight, Counter[str]]] = deque(maxlen=window)
+        self.late: dict[str, deque[RunFight]] = defaultdict(lambda: deque(maxlen=window // 4))
         self.fights: deque[End] = deque(maxlen=20000)
         self.picks: Counter[str] = Counter()
 
+    def ended(self, run: RunFight, picks: Counter[str]) -> None:
+        """A run that ended, with what it picked."""
+        if run.start is None:
+            self.full.append((run, picks))
+        else:
+            self.late[start_name(run)].append(run)
+
     def summary(self) -> dict[str, float]:
-        if not self.runs:
-            return {}
-        floors = np.array([r.floor for r in self.runs])
-        out = {
-            "run/floor": float(floors.mean()),
-            "run/won": float(np.mean([r.end == "won" for r in self.runs])),
-            "run/act2": float(np.mean([r.act >= 1 for r in self.runs])),
-            "run/act3": float(np.mean([r.act >= 2 for r in self.runs])),
-            "run/deck": float(np.mean([r.deck for r in self.runs])),
-            "run/stuck": float(np.mean([r.end.startswith("stuck") for r in self.runs])),
-        }
+        out = {}
+        if self.full:
+            runs = [r for r, _ in self.full]
+            paths = sum((p for _, p in self.full), Counter())
+            out = {
+                "run/floor": float(np.mean([r.floor for r in runs])),
+                "run/won": float(np.mean([r.end == "won" for r in runs])),
+                "run/act2": float(np.mean([r.act >= 1 for r in runs])),
+                "run/act3": float(np.mean([r.act >= 2 for r in runs])),
+                "run/deck": float(np.mean([r.deck for r in runs])),
+                "run/stuck": float(np.mean([r.end.startswith("stuck") for r in runs])),
+                # Of the map steps taken, the share into an elite.
+                "run/elite_paths": paths["Path Elite"] / max(sum(v for k, v in paths.items() if k.startswith("Path")), 1),
+                "run/rest_heal": paths["RestHeal"] / max(paths["RestHeal"] + paths["RestSmith"], 1),
+            }
+        for name, runs in self.late.items():
+            out[f"start/{name}/won"] = float(np.mean([r.end == "won" for r in runs]))
+            out[f"start/{name}/floor"] = float(np.mean([r.floor for r in runs]))
         for kind in ("Elite", "Boss"):
-            won = [e.won for e in self.fights if e.kind == kind]
+            won = [e.won for e in self.fights if e.kind == kind and e.run.start is None]
             if won:
                 out[f"fight/{kind.lower()}"] = float(np.mean(won))
         return out
+
+
+class Curriculum:
+    """Where runs start (docs/training.md, The run policy): floor 1 with
+    chance `start_full`, the others at a start point no earlier than the
+    frontier. The frontier starts at the last boss door and moves one point
+    earlier once `start_window` runs from it win `start_target` of the
+    time, or after `start_minutes` there: the combat policy wins few runs
+    from the last boss door, and waiting for it would keep the run policy
+    out of the acts before. Half the late runs start at the frontier, the
+    rest spread over the points after it. A point's runs start from the
+    policy's own states there, as its pool fills, instead of generated
+    ones."""
+
+    def __init__(self, cfg: Config, frontier: int = 0):
+        self.cfg, self.frontier = cfg, frontier
+        self.results = [deque(maxlen=cfg.start_window) for _ in START_POINTS]
+        self.since = time.perf_counter()
+
+    def ended(self, run: RunFight) -> None:
+        if run.start is not None and run.end in ("won", "died"):
+            self.results[run.start].append(run.end == "won")
+
+    def update(self, envs: Envs) -> None:
+        """Moves the frontier if it is time, and tells the envs."""
+        cfg, done = self.cfg, self.results[self.frontier]
+        won = len(done) == done.maxlen and np.mean(done) >= cfg.start_target
+        if self.frontier + 1 < len(START_POINTS) and (won or time.perf_counter() - self.since > cfg.start_minutes * 60):
+            self.frontier += 1
+            self.since = time.perf_counter()
+            why = f"won {np.mean(done):.0%}" if won else f"{cfg.start_minutes:g} minutes"
+            print(f"start frontier moves to {START_POINTS[self.frontier]} ({why})", flush=True)
+        weights = [0.0] * len(START_POINTS)
+        weights[self.frontier] = 0.5 if self.frontier else 1.0
+        for j in range(self.frontier):
+            weights[j] = 0.5 / self.frontier
+        own = [cfg.own_max * min(1.0, n / cfg.own_ramp) for n in envs.start_pools()]
+        envs.set_starts(cfg.start_full, weights, own)
 
 
 def train(combat_path: Path, run_dir: Path, cfg: Config, resume: Path | None) -> None:
@@ -214,6 +298,12 @@ def train(combat_path: Path, run_dir: Path, cfg: Config, resume: Path | None) ->
     trajs = [Trajectory() for _ in range(cfg.envs)]
     # Relics each env held at its last decision, for `relic_bonus`.
     held: list[int | None] = [None] * cfg.envs
+    potential = RunPotential(load_deckvalue(Path(cfg.potential), device), envs.run_layout, cfg.phi_scale) if cfg.potential else None
+    # Phi at each env's last decision.
+    phi = np.zeros(cfg.envs, dtype=np.float32)
+    # What each env's run has picked so far.
+    run_picks = [Counter() for _ in range(cfg.envs)]
+    curriculum = Curriculum(cfg, int(ck.get("frontier", 0)) if ck else 0)
     stats = Stats()
     names = _sim.run_names()
     L = envs.run_layout
@@ -227,15 +317,16 @@ def train(combat_path: Path, run_dir: Path, cfg: Config, resume: Path | None) ->
         options = dist.sample()
         logp = dist.log_prob(options).cpu().numpy()
         options, values = options.cpu().numpy(), values.cpu().numpy()
+        now = potential(f, i).cpu().numpy() if potential else np.zeros(len(waiting), dtype=np.float32)
         rows = np.arange(len(waiting))
         kinds = ids[rows, L.i_options + options * L.option_ids]
         rooms = ids[rows, L.i_options + options * L.option_ids + 4 + L.option_cards]
         relics = (floats[:, L.f_relics : L.f_relics + L.max_relics * L.relic_floats : L.relic_floats] != 0).sum(1)
         for k, env in enumerate(waiting):
             t = trajs[env]
-            if cfg.relic_bonus and held[env] is not None and len(t) and not t.done[-1]:
-                t.reward[-1] += cfg.relic_bonus * max(int(relics[k]) - held[env], 0)
-            held[env] = int(relics[k])
+            if held[env] is not None and len(t) and not t.done[-1]:
+                t.reward[-1] += cfg.relic_bonus * max(int(relics[k]) - held[env], 0) + now[k] - phi[env]
+            held[env], phi[env] = int(relics[k]), now[k]
             t.floats.append(floats[k].astype(np.float16))
             t.ids.append(ids[k].astype(np.int16))
             t.option.append(int(options[k]))
@@ -244,22 +335,29 @@ def train(combat_path: Path, run_dir: Path, cfg: Config, resume: Path | None) ->
             t.reward.append(0.0)
             t.done.append(False)
             kind = names["option"][kinds[k]]
-            stats.picks[f"{kind} {names['room'][rooms[k]]}" if kind == "Path" else kind] += 1
+            pick = f"{kind} {names['room'][rooms[k]]}" if kind == "Path" else kind
+            stats.picks[pick] += 1
+            run_picks[env][pick] += 1
         return options
 
     def run_ended(env: int, run: RunFight) -> None:
-        stats.runs.append(run)
-        held[env] = None
+        stats.ended(run, run_picks[env])
+        curriculum.ended(run)
+        run_picks[env] = Counter()
         t = trajs[env]
         if len(t) and not t.done[-1]:
             reward = run_reward(run)
-            t.reward[-1] = t.value[-1] if reward is None else reward
+            # Phi is 0 once the run is over.
+            t.reward[-1] = t.value[-1] if reward is None else reward - phi[env]
             t.done[-1] = True
+        held[env] = None
 
     it = int(ck.get("iter", 0)) if ck else 0
     start = time.perf_counter()
     last_log = start
     while time.perf_counter() - start < cfg.minutes * 60:
+        if cfg.start_full < 1.0:
+            curriculum.update(envs)
         # Collect until the batch fills with decisions whose successor is
         # known (or whose run ended).
         while sum(max(len(t) - (0 if t.done and t.done[-1] else 1), 0) for t in trajs) < cfg.batch:
@@ -274,16 +372,24 @@ def train(combat_path: Path, run_dir: Path, cfg: Config, resume: Path | None) ->
                 writer.add_scalar(k, v, it)
             writer.add_scalar("speed/decisions_per_s", loop.decisions / secs, it)
             writer.add_scalar("speed/combat_steps_per_s", loop.combat_steps * cfg.envs / secs, it)
+            writer.add_scalar("start/frontier", curriculum.frontier, it)
             top = ", ".join(f"{k} {v / max(stats.picks.total(), 1):.0%}" for k, v in stats.picks.most_common(8))
+            late = "  ".join(
+                f"{name} {np.mean([r.end == 'won' for r in runs]):.0%} ({len(runs)})" for name, runs in sorted(stats.late.items())
+            )
             print(
                 f"it {it} {secs / 60:.1f} min  floor {summary.get('run/floor', 0):.1f}  won {summary.get('run/won', 0):.1%}  "
-                f"act2 {summary.get('run/act2', 0):.1%}  elite {summary.get('fight/elite', 0):.1%}  "
+                f"act2 {summary.get('run/act2', 0):.1%}  act3 {summary.get('run/act3', 0):.1%}  "
+                f"elite paths {summary.get('run/elite_paths', 0):.1%}  elites won {summary.get('fight/elite', 0):.1%}  "
+                f"heal {summary.get('run/rest_heal', 0):.0%}  "
                 f"{loop.decisions / secs:,.0f} dec/s  {loop.combat_steps * cfg.envs / secs:,.0f} steps/s  picks: {top}",
                 flush=True,
             )
+            if cfg.start_full < 1.0:
+                print(f"    starts: frontier {START_POINTS[curriculum.frontier]}, pools {envs.start_pools()}; won {late}", flush=True)
             stats.picks.clear()
-            save_run_policy(run_dir / "latest.pt", policy, opt, iter=it, config=asdict(cfg), combat=str(combat_path))
-    save_run_policy(run_dir / "latest.pt", policy, opt, iter=it, config=asdict(cfg), combat=str(combat_path))
+            save_run_policy(run_dir / "latest.pt", policy, opt, iter=it, config=asdict(cfg), combat=str(combat_path), frontier=curriculum.frontier)
+    save_run_policy(run_dir / "latest.pt", policy, opt, iter=it, config=asdict(cfg), combat=str(combat_path), frontier=curriculum.frontier)
 
 
 def update(policy: RunPolicy, opt: torch.optim.Optimizer, cfg: Config, trajs: list[Trajectory], device: torch.device, writer: SummaryWriter, it: int) -> None:
