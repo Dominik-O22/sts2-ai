@@ -23,7 +23,8 @@ from torch import Tensor
 from torch.utils.tensorboard import SummaryWriter
 
 from sts2ai.env import DEFAULT_RECORDINGS, End, Envs, has_recordings
-from sts2ai.evaluate import evaluate
+from sts2ai.evaluate import easy, evaluate
+from sts2ai.setups import EASY_HOLDOUT
 from sts2ai.setups import HOLDOUT as REAL_HOLDOUT
 from sts2ai.model import Arch, Policy, build_policy, checkpoint_arch, checkpoint_layout, checkpoint_vocab, load_state, masked_logits, warm_start
 from sts2ai.search import rollout, spread
@@ -552,6 +553,15 @@ def train(cfg: Config) -> Policy:
                 for k, v in by_kind.items():
                     writer.add_scalar(f"eval/real_win_{k}", v, global_step)
                 print(f"eval on played runs: {win:.1%}  " + "  ".join(f"{k} {v:.1%}" for k, v in by_kind.items()))
+            if EASY_HOLDOUT.exists():
+                cheap = easy(policy, device, cfg.eval_repeats)
+                for group, r in cheap.items():
+                    writer.add_scalar(f"eval/easy_gap_{group}", r["gap"], global_step)
+                    writer.add_scalar(f"eval/easy_win_{group}", r["win"], global_step)
+                print(
+                    f"eval on easy fights: {cheap['all']['gap']:+.1f} HP a fight against the winners, won {cheap['all']['win']:.1%}  "
+                    + "  ".join(f"{g} {r['gap']:+.1f}" for g, r in cheap.items() if g != "all")
+                )
         if out_of_time:
             print(f"stopped after {cfg.minutes:g} minutes at iteration {it}")
             break

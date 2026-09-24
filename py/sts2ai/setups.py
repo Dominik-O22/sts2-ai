@@ -2,13 +2,16 @@
 (`scripts/tracker.py` keeps each page's data), for training
 (`--real-setups`) and evaluation (`evaluate --source setups`).
 
-    uv run python -m sts2ai.setups                 # pages in the tracker dir -> setups/train.jsonl, setups/holdout.jsonl
+    uv run python -m sts2ai.setups                 # pages in the tracker dir -> setups/*.jsonl
 
-One line per elite and boss fight: the run as it stood when the fight
-began (`start`: deck, relics, potions, gold, ascension), `hp` and `max_hp`,
-the `encounter`, the `floor` in the generator's numbering (`game_floor`
-is the page's) and whether it is the last act's `second` boss. A page lists the final deck with the floor
-each card joined it, and per floor the cards gained, removed and
+One line per fight: the run as it stood when the fight began (`start`:
+deck, relics, potions, gold, ascension), `hp` and `max_hp`, the
+`encounter`, the `floor` in the generator's numbering (`game_floor` is the
+page's), whether it is the last act's `second` boss, and the HP the winner
+lost in it (`winner_hp_lost`). Elite and boss fights go to `train.jsonl`
+and `holdout.jsonl`, weak and normal ones to `easy-train.jsonl` and
+`easy-holdout.jsonl`. A page lists the final deck with the floor each card
+joined it, and per floor the cards gained, removed and
 upgraded, so the deck at a floor is the final one with the later changes
 undone. What the page leaves out stays approximate: potions are the ones
 the fight used, enchantments are the final ones, and a relic traded away
@@ -31,6 +34,10 @@ from sts2ai.env import Envs
 TRACKER = Path.home() / ".local/share/SlayTheSpire2/sts2ai/tracker"
 TRAIN = TRACKER / "setups" / "train.jsonl"
 HOLDOUT = TRACKER / "setups" / "holdout.jsonl"
+# The weak and normal fights, kept apart: they are won all but always, and
+# what tells play apart there is the HP it costs (`evaluate --source easy`).
+EASY_TRAIN = TRACKER / "setups" / "easy-train.jsonl"
+EASY_HOLDOUT = TRACKER / "setups" / "easy-holdout.jsonl"
 BUILD = "v0.107.1"
 
 
@@ -77,15 +84,16 @@ def deck_at(page: dict, floor: int) -> list[dict]:
     return [card(c, up) for c, up in zip(held, upgraded)]
 
 
-def fights(page: dict) -> list[dict]:
-    """A line per elite and boss fight of the run."""
+def fights(page: dict, kinds: tuple[str, ...]) -> list[dict]:
+    """A line per fight of the run whose encounter ends in one of `kinds`
+    (`_ELITE`, `_BOSS`, `_WEAK`, `_NORMAL`)."""
     run, timeline = page["runDetail"], page["floorTimeline"]
     player = run["players"][0]
     by_floor = {f["floor"]: f for f in timeline}
     out = []
     for f in timeline:
         model = f["modelId"] or ""
-        if not (model.startswith("ENCOUNTER.") and model.endswith(("_ELITE", "_BOSS"))) or f["floor"] - 1 not in by_floor:
+        if not (model.startswith("ENCOUNTER.") and model.endswith(kinds)) or f["floor"] - 1 not in by_floor:
             continue
         before = by_floor[f["floor"] - 1]
         relics = [strip(r["id"]) for r in player["relics"] if r["floorAdded"] < f["floor"]]
@@ -108,6 +116,9 @@ def fights(page: dict) -> list[dict]:
                 "floor": sim_floor(f["floor"], boss),
                 "second": boss and f["floor"] == 49,
                 "game_floor": f["floor"],
+                # HP in minus HP out, after Burning Blood and any healing,
+                # as `End.hp_lost` counts it for the model.
+                "winner_hp_lost": before["currentHp"] - f["currentHp"],
             }
         )
     return out
@@ -137,7 +148,9 @@ def main() -> None:
     args = ap.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
     probe = Envs(1, seed=0)
-    kept: dict[str, list[str]] = {"train": [], "holdout": []}
+    # (file prefix, encounter kinds): elites and bosses to win, the rest to win cheaply.
+    groups = [("", ("_ELITE", "_BOSS")), ("easy-", ("_WEAK", "_NORMAL"))]
+    kept: dict[str, list[str]] = {f"{prefix}{split}": [] for prefix, _ in groups for split in ("train", "holdout")}
     dropped: Counter[str] = Counter()
     runs = 0
     for path in sorted(args.pages.glob("*.json")):
@@ -145,19 +158,19 @@ def main() -> None:
         if not walkable(page["runDetail"]):
             continue
         runs += 1
-        player = path.name.rsplit("-", 1)[0]
-        split = "holdout" if holdout_player(player, args.holdout) else "train"
-        for fight in fights(page):
-            line = json.dumps({**fight, "run": path.stem})
-            try:
-                probe.sim.use_setups(line, 1)
-            except ValueError as e:
-                dropped[str(e).split(": ", 1)[-1].split(":")[0]] += 1
-                continue
-            kept[split].append(line)
-    for split, lines in kept.items():
-        (args.out / f"{split}.jsonl").write_text("\n".join(lines) + "\n")
-    print(f"{runs} runs: {len(kept['train'])} train and {len(kept['holdout'])} holdout fights in {args.out}")
+        split = "holdout" if holdout_player(path.name.rsplit("-", 1)[0], args.holdout) else "train"
+        for prefix, kinds in groups:
+            for fight in fights(page, kinds):
+                line = json.dumps({**fight, "run": path.stem})
+                try:
+                    probe.sim.use_setups(line, 1)
+                except ValueError as e:
+                    dropped[str(e).split(": ", 1)[-1].split(":")[0]] += 1
+                    continue
+                kept[f"{prefix}{split}"].append(line)
+    for name, lines in kept.items():
+        (args.out / f"{name}.jsonl").write_text("\n".join(lines) + "\n")
+    print(f"{runs} runs: " + ", ".join(f"{len(lines)} {name}" for name, lines in kept.items()) + f" fights in {args.out}")
     print(f"{sum(dropped.values())} left out: " + ", ".join(f"{k} {v}" for k, v in dropped.most_common(8)))
 
 
