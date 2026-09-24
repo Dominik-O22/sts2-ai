@@ -22,7 +22,7 @@ import torch
 from torch import Tensor
 from torch.utils.tensorboard import SummaryWriter
 
-from sts2ai.env import DEFAULT_RECORDINGS, End, Envs, has_recordings
+from sts2ai.env import ASCENSION, DEFAULT_RECORDINGS, End, Envs, has_recordings
 from sts2ai.evaluate import easy, evaluate
 from sts2ai.setups import EASY_HOLDOUT
 from sts2ai.setups import HOLDOUT as REAL_HOLDOUT
@@ -545,7 +545,7 @@ def train(cfg: Config) -> Policy:
                 writer.add_scalar(f"eval/holdout_win_{k}", v, global_step)
             print(f"eval on holdout: {win:.1%}  " + "  ".join(f"{k} {v:.1%}" for k, v in by_kind.items()))
             if has_recordings(cfg.recordings):
-                win, _, _ = evaluate(policy, device, 8, "recordings", cfg.recordings)
+                win, _, _ = evaluate(policy, device, 8, "recordings", cfg.recordings, ascension=ASCENSION)
                 writer.add_scalar("eval/recorded_win_rate", win, global_step)
             if cfg.real_holdout.exists():
                 win, _, by_kind = evaluate(policy, device, cfg.eval_repeats, "setups", setups=cfg.real_holdout)

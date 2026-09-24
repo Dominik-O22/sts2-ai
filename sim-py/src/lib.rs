@@ -142,9 +142,12 @@ impl VecEnv {
 
     /// Switch to cycling through the recordings in `dir` (the held-out
     /// set). Returns the number loaded and the files that failed to parse.
-    fn load_recordings(&mut self, dir: &str) -> PyResult<(usize, Vec<String>)> {
-        let (setups, errors) =
+    /// With `ascension`, only the fights recorded at it.
+    #[pyo3(signature = (dir, ascension=None))]
+    fn load_recordings(&mut self, dir: &str, ascension: Option<u8>) -> PyResult<(usize, Vec<String>)> {
+        let (mut setups, errors) =
             load_recordings(std::path::Path::new(dir)).map_err(pyo3::exceptions::PyIOError::new_err)?;
+        setups.retain(|s| ascension.is_none_or(|a| s.asc.0 == a));
         let n = setups.len();
         if n == 0 {
             return Err(pyo3::exceptions::PyValueError::new_err("no recordings loaded"));

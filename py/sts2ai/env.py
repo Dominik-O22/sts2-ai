@@ -12,6 +12,9 @@ import torch
 from sts2ai import _sim
 
 DEFAULT_RECORDINGS = Path.home() / ".local/share/SlayTheSpire2/sts2ai/recordings"
+# The ascension the policy trains at (`EnvConfig::default`). Played fights
+# at another one are left out of what stands for its play.
+ASCENSION = 10
 
 
 def has_recordings(directory: Path = DEFAULT_RECORDINGS) -> bool:
@@ -143,9 +146,10 @@ class Envs:
         self.sim.observe(self.floats, self.ids, self.mask)
         return n
 
-    def load_recordings(self, directory: Path = DEFAULT_RECORDINGS) -> int:
-        """Cycle through recorded fights instead of generated ones."""
-        n, errors = self.sim.load_recordings(str(directory))
+    def load_recordings(self, directory: Path = DEFAULT_RECORDINGS, ascension: int | None = None) -> int:
+        """Cycle through recorded fights instead of generated ones; with
+        `ascension`, only those played at it."""
+        n, errors = self.sim.load_recordings(str(directory), ascension)
         for e in errors:
             print(f"skipped {e}")
         self.sim.observe(self.floats, self.ids, self.mask)

@@ -48,6 +48,7 @@ def play(
     seed: int = 12345,
     acts: int = 3,
     setups: Path = HOLDOUT,
+    ascension: int | None = None,
 ) -> list[End]:
     """Plays every setup in the set `repeats` times (different shuffles),
     one env per setup so each gets exactly that many fights, greedy."""
@@ -59,7 +60,7 @@ def play(
             return envs.use_holdout(seed, HOLDOUT_PER_ENCOUNTER, acts)
         if source == "setups":
             return envs.use_setups(setups, 1, seed)
-        return envs.load_recordings(recordings)
+        return envs.load_recordings(recordings, ascension)
 
     n = load(Envs(1, seed=seed))
     envs = Envs(n, seed=seed)
@@ -100,10 +101,11 @@ def evaluate(
     seed: int = 12345,
     acts: int = 3,
     setups: Path = HOLDOUT,
+    ascension: int | None = None,
 ) -> tuple[float, dict[str, tuple[int, int]], dict[str, float]]:
     """`play`, summed up: the overall win rate, per-encounter (wins,
-    fights), and per-kind win rates."""
-    ends = play(policy, device, repeats, source, recordings, seed, acts, setups)
+    fights), and per-kind win rates. `ascension` keeps recordings played at it."""
+    ends = play(policy, device, repeats, source, recordings, seed, acts, setups, ascension)
     by_enc: dict[str, tuple[int, int]] = defaultdict(lambda: (0, 0))
     for e in ends:
         w, n = by_enc[e.encounter]
