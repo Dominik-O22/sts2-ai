@@ -218,4 +218,28 @@ if __name__ == "__main__":
             lo, vo = old(floats, ids)
             ln, vn = new(gf, ids)
         assert torch.allclose(lo, ln, atol=1e-5) and torch.allclose(vo, vn, atol=1e-5), f"remapped {arch.kind} policy differs"
-    print("remap self-check ok:", f"floats {L.n_floats} -> {GL.n_floats}")
+
+    # The run policy (`runmodel.remap_run_state`): a new sim relic moves
+    # every run relic's row up one.
+    from sts2ai.env import RunLayout
+    from sts2ai.runmodel import EMBEDDINGS, RunPolicy, remap_run_state
+
+    RL = RunLayout.load()
+    run_grown = {k: list(names) for k, names in v.items()}
+    for kind in ("card", "relic", "runrelic", "event", "option"):
+        run_grown[kind].append(f"NEW_{kind}")
+    GRL = replace(RL, **{size: 1 + sum(len(run_grown[k]) for k in kinds) for size, kinds in EMBEDDINGS.values()})
+    text = lambda vocab: "\n".join(f"{k} {n}" for k, names in vocab.items() for n in names)
+    torch.manual_seed(0)
+    old_run, new_run = RunPolicy(RL).eval(), RunPolicy(GRL).eval()
+    new_run.load_state_dict(remap_run_state(old_run.state_dict(), text(v), text(run_grown), new_run.state_dict()))
+    floats = torch.rand(4, RL.run_floats)
+    ids = torch.zeros(4, RL.run_ids, dtype=torch.long)
+    ids[:, RL.i_deck] = 5
+    ids[:, RL.i_relics] = RL.relic_vocab - 1
+    grown_ids = ids.clone()
+    grown_ids[:, RL.i_relics] = RL.relic_vocab
+    with torch.no_grad():
+        (lo, vo), (ln, vn) = old_run(floats, ids), new_run(floats, grown_ids)
+    assert torch.allclose(lo, ln, atol=1e-5) and torch.allclose(vo, vn, atol=1e-5), "remapped run policy differs"
+    print("remap self-check ok:", f"floats {L.n_floats} -> {GL.n_floats}, run relics {RL.relic_vocab} -> {GRL.relic_vocab}")

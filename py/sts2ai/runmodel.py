@@ -19,7 +19,7 @@ from torch import Tensor, nn
 
 from sts2ai.env import RunLayout
 from sts2ai.model import Policy
-from sts2ai.vocab import current_text
+from sts2ai.vocab import current_text, parse
 
 
 @dataclass(frozen=True)
@@ -155,16 +155,53 @@ def save_run_policy(path: Path, policy: RunPolicy, opt: torch.optim.Optimizer | 
     tmp.replace(path)
 
 
+# Each embedding whose rows follow a vocabulary: its size in `RunLayout`,
+# and the `vocab.txt` kinds whose names index its rows after the pad.
+EMBEDDINGS = {
+    "card": ("card_vocab", ("card",)),
+    "enchant": ("enchant_vocab", ("enchant",)),
+    "potion": ("potion_vocab", ("potion",)),
+    "relic": ("relic_vocab", ("relic", "runrelic")),
+    "decision": ("decision_vocab", ("decision",)),
+    "option": ("option_vocab", ("option",)),
+    "room": ("room_vocab", ("room",)),
+    "act": ("act_vocab", ("act",)),
+    "event": ("event_vocab", ("event",)),
+    "boss": ("boss_vocab", ("boss",)),
+}
+
+
+def remap_run_state(state: dict[str, Tensor], old_text: str, new_text: str, fresh: dict[str, Tensor]) -> dict[str, Tensor]:
+    """`state` for the vocabulary `new_text`: each embedding row moves to
+    its name's new index, and names new since keep their rows in `fresh`."""
+    old_v, new_v = parse(old_text), parse(new_text)
+    out = dict(state)
+    for table, (_, kinds) in EMBEDDINGS.items():
+        key = f"{table}.weight"
+        old_names = [n for k in kinds for n in old_v.get(k, [])]
+        index = {n: i for i, n in enumerate(n for k in kinds for n in new_v.get(k, []))}
+        rows = fresh[key].clone()
+        rows[0] = state[key][0]
+        for i, name in enumerate(old_names):
+            if name in index:
+                rows[index[name] + 1] = state[key][i + 1]
+        out[key] = rows
+    return out
+
+
 def load_run_policy(path: Path, device: torch.device) -> tuple[RunPolicy, dict]:
-    """The run policy a checkpoint holds, and the checkpoint. A layout or
-    vocabulary that moved since is refused: run checkpoints have no remap
-    yet."""
+    """The run policy a checkpoint holds, and the checkpoint. Ids the sim
+    gained since move to their new rows (`remap_run_state`); a layout that
+    moved otherwise is refused."""
     ck = torch.load(path, map_location=device, weights_only=False)
     layout = RunLayout.load()
-    if ck["layout"] != asdict(layout):
-        raise ValueError(f"{path}: the run layout changed since this checkpoint; retrain")
-    if ck["vocab"] != current_text():
-        raise ValueError(f"{path}: the vocabulary changed since this checkpoint; retrain")
+    vocab_sizes = {size for size, _ in EMBEDDINGS.values()}
+    moved = {k for k, v in asdict(layout).items() if ck["layout"].get(k) != v} - vocab_sizes
+    if moved:
+        raise ValueError(f"{path}: the run layout changed since this checkpoint ({', '.join(sorted(moved))}); retrain")
     policy = RunPolicy(layout, RunArch(**ck["arch"])).to(device)
-    policy.load_state_dict(ck["policy"])
+    state = ck["policy"]
+    if ck["vocab"] != current_text():
+        state = remap_run_state(state, ck["vocab"], current_text(), policy.state_dict())
+    policy.load_state_dict(state)
     return policy, ck
