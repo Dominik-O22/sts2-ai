@@ -192,7 +192,14 @@ def rank(
 
     verdicts = [keep]
     for change in unique:
-        v = verdict(change, fights(policy, device, change.applied(start), max_hp, encounters, repeats, seed))
+        try:
+            ends = fights(policy, device, change.applied(start), max_hp, encounters, repeats, seed)
+        except ValueError as e:
+            # A card the sim cannot play (Splash, other characters' cards)
+            # cannot be priced; the other options still can.
+            notes.append(f"{change.kind} {change.card['id']}: not priced, {e}")
+            continue
+        v = verdict(change, ends)
         if change.kind == "transform":
             v = Verdict(change, v.value + random_card_gain(change.card), v.win)
         verdicts.append(v)
