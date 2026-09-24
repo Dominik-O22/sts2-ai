@@ -66,21 +66,17 @@ maturin from `sim-py/` into the package `sts2ai._sim`.
   is a plain PPO with GAE. `evaluate.py` runs the policy greedily on the
   held-out set: ten generated fights per encounter from a fixed seed
   (`gen::holdout`), or on run recordings (Real decks, below).
-- Reward (`env.rs`): the terminal reward is a win at `1 + p * hp +
-  12p * potions_left`, a loss or a 500-step timeout at `-1 + 0.2 *
+- Reward (`env.rs`): the terminal reward is a win at `1 + w * hp_frac +
+  0.1 * potions_left`, a loss or a 500-step timeout at `-1 + 0.2 *
   enemy_hp_taken` (capped at -0.8). Under a flat -1 every line of a lost
   fight paid the same, so the policy folded once its value read a fight as
-  lost, and search tied every option there. `p` is 0.025 an HP point,
-  the same at any max HP, except after an act boss, where the next act's
-  Ancient heals 80% of the missing HP at A10 and only the other 20% counts.
-  It was 0.5 of the HP fraction (0.006 an HP at 80 max HP) until
-  2026-09-24, when the policy won its weak and normal fights but lost 5 HP
-  a fight more than the winners who played the same ones (`evaluate
-  --source easy`); a potion was 16 HP then and is 12 now. On top of it,
-  potential-based shaping: each step pays the
+  lost, and search tied every option there. `w` is 0.5,
+  except after an act boss, where the next act's Ancient heals 80% of the
+  missing HP at A10 and only the other 20% counts (0.1). A potion at 0.1 is
+  about 16 HP. On top of it, potential-based shaping: each step pays the
   change in half the enemy HP lost (a running count over the fight, as a
-  fraction of what the enemies started with) minus `p` times the player HP
-  lost, plus `12p` per potion gained (a drink counts as one lost),
+  fraction of what the enemies started with) minus `w` times the player HP
+  fraction lost, plus 0.1 per potion gained (a drink counts as one lost),
   measured from the fight's own start. Before the potion term a drink cost
   nothing until the fight ended, and the policy drank combat potions in
   weak fights it lost 5% HP in; with it, over 600 iterations from set-11,

@@ -52,17 +52,9 @@ pub struct EpisodeEnd {
     pub reward: f32,
 }
 
-/// What an HP point is worth when the run goes on: the same for every HP,
-/// whatever the max, in any fight. Against a win's 1, losing 10 HP to a weak
-/// fight costs 0.25. At 0.5 of the HP fraction (0.006 an HP at 80 max HP) the
-/// policy won its weak and normal fights but lost 5 HP a fight more than the
-/// winners who played the same ones (`evaluate --source easy`).
-const HP_PRICE: f32 = 0.025;
-
-/// What a potion kept is worth: about 12 HP to the fights ahead. At 16 HP
-/// the policy drank 0.05 potions in an easy fight against the winners' 0.25.
-/// Nothing after the run's last fight.
-const POTION_VALUE: f32 = 12.0 * HP_PRICE;
+/// What a potion kept is worth: about the 16 HP it is worth to the fights
+/// ahead, at `hp_weight`. Nothing after the run's last fight.
+const POTION_VALUE: f32 = 0.1;
 
 fn potion_value(c: &Combat) -> f32 {
     if c.after == After::End {
@@ -82,12 +74,15 @@ fn potion_value(c: &Combat) -> f32 {
 const LOSS_DAMAGE: f32 = 0.2;
 
 /// Stopgap terminal reward (DESIGN.md, Decision engine): a win is worth 1
-/// plus the HP kept at `hp_value` an HP and `POTION_VALUE` per unused
+/// plus the HP fraction kept at `hp_weight` and `POTION_VALUE` per unused
 /// potion; a loss or a timed-out fight is -1 plus `LOSS_DAMAGE` per
 /// fraction of the enemies' HP taken.
 pub fn terminal_reward(c: &Combat) -> f32 {
     match c.outcome {
-        Some(Outcome::Won) => 1.0 + hp_value(c) * c.player.creature.hp.max(0) as f32 + potion_value(c) * potions_held(c) as f32,
+        Some(Outcome::Won) => {
+            let hp = c.player.creature.hp as f32 / c.player.creature.max_hp.max(1) as f32;
+            1.0 + hp_weight(c) * hp + potion_value(c) * potions_held(c) as f32
+        }
         _ => -1.0 + LOSS_DAMAGE * enemy_hp_taken(c).min(1.0),
     }
 }
@@ -107,16 +102,16 @@ fn potions_held(c: &Combat) -> usize {
     c.potions.iter().flatten().filter(|&&p| !(free_rocks && p == PotionId::PotionShapedRock)).count()
 }
 
-/// What an HP point is worth, by what follows the fight: `HP_PRICE`.
+/// What the HP fraction is worth: half a win, by what follows the fight.
 /// After an act boss the Ancient that opens the next act heals all missing
 /// HP, or 80% of it under Weary Traveler, so only the part it leaves
 /// counts. Under Double Boss the last act's first boss is followed by the
 /// second with no rest, so its HP counts in full; after the run's last
 /// fight it counts for nothing.
-fn hp_value(c: &Combat) -> f32 {
+fn hp_weight(c: &Combat) -> f32 {
     match c.after {
-        After::Act | After::Boss => HP_PRICE,
-        After::Ancient if c.asc.has(AscensionLevel::WearyTraveler) => HP_PRICE * 0.2,
+        After::Act | After::Boss => 0.5,
+        After::Ancient if c.asc.has(AscensionLevel::WearyTraveler) => 0.5 * 0.2,
         After::Ancient | After::End => 0.0,
     }
 }
@@ -147,8 +142,8 @@ impl Baseline {
 }
 
 /// Potential for reward shaping: half the enemy HP taken since the
-/// baseline (`enemy_hp_taken`), minus the player's HP lost and plus the
-/// potions gained (a drink counts as one lost) at the prices
+/// baseline (`enemy_hp_taken`), minus the fraction of the player's HP lost
+/// and plus the potions gained (a drink counts as one lost) at the prices
 /// the terminal reward puts on them. Without the potion term a drink cost
 /// nothing until the fight ended, and the policy drank combat potions in
 /// weak fights it lost 5% HP in.
@@ -162,9 +157,9 @@ pub fn potential(c: &Combat, base: Baseline) -> f32 {
     if c.is_over() {
         return 0.0;
     }
-    let lost = (base.hp - c.player.creature.hp.max(0)) as f32;
+    let lost = (base.hp - c.player.creature.hp.max(0)) as f32 / c.player.creature.max_hp.max(1) as f32;
     let potions = potions_held(c) as f32 - base.potions as f32;
-    0.5 * (enemy_hp_taken(c) - base.taken) - hp_value(c) * lost + potion_value(c) * potions
+    0.5 * (enemy_hp_taken(c) - base.taken) - hp_weight(c) * lost + potion_value(c) * potions
 }
 
 /// The reward for a transition: the potential change, plus the terminal
@@ -1004,14 +999,11 @@ mod tests {
             c.after = after;
             terminal_reward(c)
         };
-        let hp = HP_PRICE * c.player.creature.hp as f32;
-        assert_eq!(reward(&mut c, After::Act), 1.0 + hp + POTION_VALUE);
-        assert_eq!(reward(&mut c, After::Boss), 1.0 + hp + POTION_VALUE, "the second boss follows with no rest");
-        assert_eq!(reward(&mut c, After::Ancient), 1.0 + 0.2 * hp + POTION_VALUE, "the Ancient heals 80% at A10");
+        let half = 0.5 * c.player.creature.hp as f32 / c.player.creature.max_hp as f32;
+        assert_eq!(reward(&mut c, After::Act), 1.0 + half + 0.1);
+        assert_eq!(reward(&mut c, After::Boss), 1.0 + half + 0.1, "the second boss follows with no rest");
+        assert_eq!(reward(&mut c, After::Ancient), 1.0 + 0.2 * half + 0.1, "the Ancient heals 80% at A10");
         assert_eq!(reward(&mut c, After::End), 1.0, "nothing is left to spend");
-        // An HP point is worth the same at any max HP.
-        c.player.creature.max_hp *= 2;
-        assert_eq!(reward(&mut c, After::Act), 1.0 + hp + POTION_VALUE);
     }
 
     #[test]
