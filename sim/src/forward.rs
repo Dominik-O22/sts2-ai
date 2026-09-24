@@ -23,7 +23,7 @@ use crate::pools::sim_card;
 use crate::rewards::Offer;
 use crate::rng::Rng;
 use crate::rooms::{Chooser, Decision};
-use crate::run::{Room, RoomType, RunState};
+use crate::run::{Carried, Room, RoomType, RunState};
 use crate::shop::{Item, Ware};
 use crate::types::Ascension;
 
@@ -113,6 +113,33 @@ enum Fighting {
     Event(EventFight),
 }
 
+/// Where a run can start besides floor 1 (docs/training.md, The run
+/// policy): an act's entrance, before its Ancient, or its boss door,
+/// before the rest site the boss follows. Acts are 0-based.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StartPoint {
+    Entrance(usize),
+    BossDoor(usize),
+}
+
+/// Every start point, the latest first: the order a curriculum walks back
+/// from the run's end.
+pub const START_POINTS: [StartPoint; 5] =
+    [StartPoint::BossDoor(2), StartPoint::Entrance(2), StartPoint::BossDoor(1), StartPoint::Entrance(1), StartPoint::BossDoor(0)];
+
+impl StartPoint {
+    pub fn act(self) -> usize {
+        match self {
+            StartPoint::Entrance(act) | StartPoint::BossDoor(act) => act,
+        }
+    }
+
+    /// Its place in `START_POINTS`.
+    pub fn index(self) -> usize {
+        START_POINTS.iter().position(|&p| p == self).expect("a start point")
+    }
+}
+
 /// A run in progress, stopped between rooms. `next` plays it to its next
 /// fight and hands the fight out, so whoever plays fights (`play` with a
 /// `Fights`, or a `VecEnv` slot over many steps) owns the loop.
@@ -127,19 +154,47 @@ pub struct Run {
     pub fights: usize,
     /// What the port lacks that the run met, by what, with how often.
     pub unported: BTreeMap<String, usize>,
+    /// The start points the run passed, with what the player carried
+    /// there, for a curriculum to start later runs from. The caller drains
+    /// it.
+    pub passed: Vec<(StartPoint, Carried)>,
 }
 
 impl Run {
     /// The run `seed` names at `ascension` on a fully unlocked profile, at
     /// the first act's start.
     pub fn new(seed: &str, ascension: Ascension) -> Self {
+        Self::in_act(seed, ascension, 0)
+    }
+
+    /// The run `seed` names, at the start of act `act` with nothing
+    /// played before it.
+    fn in_act(seed: &str, ascension: Ascension, act: usize) -> Self {
         let unlocks = Unlocks::default();
         let acts = select_acts(crate::game_rng::RunRngs::new(seed).seed, &unlocks);
         let mut state = RunState::new(seed, acts, ascension, &unlocks);
-        state.enter_act(0);
-        let map = ActMap::generate(state.rngs.seed, acts[0], ascension);
+        state.enter_act(act);
+        let map = ActMap::generate(state.rngs.seed, acts[act], ascension);
         let point = map.start;
-        Self { state, map, point, fighting: None, fights: 0, unported: BTreeMap::new() }
+        Self { state, map, point, fighting: None, fights: 0, unported: BTreeMap::new(), passed: Vec::new() }
+    }
+
+    /// The run `seed` names, picked up at `at` with the player `carried`:
+    /// the acts before it are skipped, their floors counted, and the run's
+    /// streams and plan are the seed's own, untouched by them. A boss door
+    /// stands before the first of the rest sites under the boss.
+    pub fn start_at(seed: &str, ascension: Ascension, at: StartPoint, carried: Carried) -> Self {
+        let mut run = Self::in_act(seed, ascension, at.act());
+        run.state.carry(carried);
+        let acts: Vec<_> = run.state.plan.acts.iter().map(|a| a.act).collect();
+        let rooms = |act: usize| crate::map::rooms(acts[act]);
+        // An act is its Ancient, its rooms and its boss.
+        run.state.floor = (0..at.act()).map(|a| rooms(a) + 2).sum();
+        if let StartPoint::BossDoor(act) = at {
+            run.state.floor += rooms(act);
+            run.point = run.map[run.map.boss].parents.iter().next().expect("a rest site under the boss");
+        }
+        run
     }
 
     /// Whether a fight has been handed out and not yet fought.
@@ -225,6 +280,7 @@ impl Run {
             self.map = ActMap::generate(self.state.rngs.seed, plan.act, self.state.ascension);
             self.state.enter_act(act);
             self.point = self.map.start;
+            self.passed.push((StartPoint::Entrance(act), self.state.carried()));
             return true;
         }
         let boots = self.state.relics.iter().any(|r| r.id == "WINGED_BOOTS" && r.counter < 3);
@@ -237,6 +293,9 @@ impl Run {
             self.state.relic_mut("WINGED_BOOTS").expect("Winged Boots").counter += 1;
         }
         self.point = next;
+        if self.map[next].children.contains(self.map.boss) {
+            self.passed.push((StartPoint::BossDoor(self.state.act), self.state.carried()));
+        }
         true
     }
 
@@ -333,5 +392,56 @@ mod tests {
         let mut a = a.state;
         assert_eq!(a.rewards().counter, b.state.clone().rewards().counter);
         assert!(a.deck.len() > 10 + 16, "took a card from every fight: {}", a.deck.len());
+    }
+
+    /// The first decision a run puts, then the first option every time.
+    struct FirstSeen(Option<&'static str>);
+
+    impl Chooser for FirstSeen {
+        fn choose(&mut self, _: &RunState, decision: Decision<'_>) -> usize {
+            self.0.get_or_insert(match decision {
+                Decision::Ancient(_) => "ancient",
+                Decision::Rest(_) => "rest",
+                _ => "other",
+            });
+            0
+        }
+    }
+
+    /// A won run passes every start point once, latest last, with the
+    /// player as they stood there. A fresh seed picked up at each of them
+    /// with that player opens on the act's Ancient or the rest site under
+    /// the boss and wins on floor 49, as the run it came from did.
+    #[test]
+    fn a_run_picked_up_at_a_start_point_plays_on_to_the_end() {
+        let mut run = Run::new("RUNSIM1", Ascension(10));
+        let mut fought = None;
+        let mut passed = vec![];
+        let end = loop {
+            match run.next(fought, &mut First) {
+                Next::Fight(setup) => fought = Some(stub_fight(&mut run.state, setup)),
+                Next::End(end) => break end,
+            }
+            passed.append(&mut run.passed);
+        };
+        assert_eq!(end, End::Won);
+        let points: Vec<StartPoint> = passed.iter().map(|(p, _)| *p).collect();
+        assert_eq!(points, START_POINTS.iter().rev().copied().collect::<Vec<_>>());
+        assert!(passed.windows(2).all(|w| w[0].1.deck.len() <= w[1].1.deck.len()), "the deck grows along the run");
+        for (at, carried) in passed {
+            let mut picked = Run::start_at("RUNSIM2", Ascension(10), at, carried.clone());
+            assert_eq!(picked.state.carried(), carried, "{at:?}");
+            let mut first = FirstSeen(None);
+            let mut fought = None;
+            let end = loop {
+                match picked.next(fought, &mut first) {
+                    Next::Fight(setup) => fought = Some(stub_fight(&mut picked.state, setup)),
+                    Next::End(end) => break end,
+                }
+            };
+            assert_eq!((end, picked.state.floor), (End::Won, 49), "{at:?}");
+            let opens = if matches!(at, StartPoint::Entrance(_)) { "ancient" } else { "rest" };
+            assert_eq!(first.0, Some(opens), "{at:?}");
+        }
     }
 }

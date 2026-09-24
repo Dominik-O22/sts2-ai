@@ -210,6 +210,85 @@ pub struct RunState {
     pub shop_removals: i32,
 }
 
+/// What the player carries from room to room, all of it on screen or
+/// countable, and none of the run's seed, streams or plan. A curriculum
+/// start (`forward::Run::start_at`) puts it into a fresh run, so a state
+/// the policy reached once is played on with rolls it has not seen.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Carried {
+    pub gold: i32,
+    pub hp: i32,
+    pub max_hp: i32,
+    pub deck: Vec<DeckCard>,
+    pub relics: Vec<RunRelic>,
+    pub potions: Vec<Option<String>>,
+    pub card_odds: CardOdds,
+    pub potion_odds: PotionOdds,
+    pub shop_removals: i32,
+    pub events_seen: Vec<&'static str>,
+}
+
+impl Carried {
+    /// A generated fight's run state (`gen::generate`) as the player's:
+    /// its deck, relics, potion slots, HP and gold, in game ids, with the
+    /// odds a fresh run has.
+    pub fn generated(setup: &FightSetup) -> Self {
+        let name = |debug: String| slug(&debug);
+        Carried {
+            gold: setup.gold,
+            hp: setup.hp,
+            max_hp: setup.max_hp,
+            deck: setup
+                .deck
+                .iter()
+                .map(|c| DeckCard {
+                    id: name(format!("{:?}", c.id)),
+                    upgraded: c.upgraded,
+                    enchantment: c.enchantment.as_ref().map(|e| Enchant { id: name(format!("{:?}", e.id)), amount: e.amount }),
+                })
+                .collect(),
+            relics: setup.relics.iter().map(|r| RunRelic { id: name(format!("{:?}", r.id)), counter: r.counter, flag: r.flag }).collect(),
+            potions: setup.potions.iter().map(|p| p.map(|id| name(format!("{id:?}")))).collect(),
+            card_odds: CardOdds::default(),
+            potion_odds: PotionOdds::default(),
+            shop_removals: 0,
+            events_seen: Vec::new(),
+        }
+    }
+}
+
+impl RunState {
+    /// What the player carries as the run stands.
+    pub fn carried(&self) -> Carried {
+        Carried {
+            gold: self.gold,
+            hp: self.hp,
+            max_hp: self.max_hp,
+            deck: self.deck.clone(),
+            relics: self.relics.clone(),
+            potions: self.potions.clone(),
+            card_odds: self.card_odds,
+            potion_odds: self.potion_odds,
+            shop_removals: self.shop_removals,
+            events_seen: self.events_seen.clone(),
+        }
+    }
+
+    /// Hands the player `carried`: the relics leave the grab bags as
+    /// `obtain_relic` takes them out, and no pickup runs again.
+    pub fn carry(&mut self, carried: Carried) {
+        for relic in &carried.relics {
+            if let Some(bag) = crate::plan::BagRelic::from_game_id(&relic.id) {
+                self.plan.player_bag.remove(bag);
+                self.plan.shared_bag.remove(bag);
+            }
+        }
+        let Carried { gold, hp, max_hp, deck, relics, potions, card_odds, potion_odds, shop_removals, events_seen } = carried;
+        (self.gold, self.hp, self.max_hp, self.deck, self.relics, self.potions) = (gold, hp, max_hp, deck, relics, potions);
+        (self.card_odds, self.potion_odds, self.shop_removals, self.events_seen) = (card_odds, potion_odds, shop_removals, events_seen);
+    }
+}
+
 impl RunState {
     /// A new run of a fully unlocked profile, before Neow.
     pub fn new(seed: &str, acts: [Act; 3], ascension: Ascension, unlocks: &Unlocks) -> Self {
