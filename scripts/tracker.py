@@ -2,7 +2,14 @@
 as far as the page keeps it, so the run layer can walk it
 (`sim/examples/runcheck.rs`).
 
-    uv run python scripts/tracker.py URL OUT.run      # e.g. https://ststracker.app/<steam id>/runs/<start time>.run
+    python3 scripts/tracker.py            # paste run URLs one at a time, Enter on an empty line to stop
+    python3 scripts/tracker.py URL...     # the same for the URLs given
+
+Run URLs look like https://ststracker.app/<steam id>/runs/<start time>.run.
+Each run is saved as `<steam id>-<start time>.run` in OUT (`--out`, default
+~/.local/share/SlayTheSpire2/sts2ai/tracker), where runcheck reads it:
+
+    cd sim && cargo run --release --example runcheck -- --effects ~/.local/share/SlayTheSpire2/sts2ai/tracker/*.run
 
 The page (SvelteKit) serves its data at `URL/__data.json`, flattened by
 devalue. It drops potion offers, the ancients' unchosen options,
@@ -14,12 +21,13 @@ as "the potions drawn were offered".
 
 from __future__ import annotations
 
+import argparse
 import json
-import sys
 import urllib.request
 from pathlib import Path
 
-HISTORY = Path.home() / ".local/share/SlayTheSpire2/steam"
+GAME_DATA = Path.home() / ".local/share/SlayTheSpire2"
+HISTORY = GAME_DATA / "steam"
 
 
 def unflatten(values: list) -> object:
@@ -166,11 +174,41 @@ def fetch(url: str) -> dict:
     return unflatten(nodes[-1]["data"])
 
 
-if __name__ == "__main__":
-    url, out = sys.argv[1:]
-    pages = event_pages(list(HISTORY.glob("**/saves/history")))
-    page = fetch(url)
-    missing = sorted({(c["eventId"], c["choiceId"]) for f in page["floorTimeline"] for c in f["eventChoices"]} - set(pages))
+def save(url: str, out: Path, pages: dict[tuple[str, str], str]) -> None:
+    """Fetches the run at `url`, writes it into `out` and says what it is."""
+    parts = url.strip().rstrip("/").split("/")
+    if len(parts) < 3 or parts[-2] != "runs" or not parts[-1].endswith(".run"):
+        raise ValueError("not a run URL (…/<steam id>/runs/<start time>.run)")
+    player_id, name = parts[-3], parts[-1]
+    page = fetch(url.strip())
+    run = page["runDetail"]
+    path = out / f"{player_id}-{name}"
+    path.write_text(json.dumps(convert(page, pages)))
+    character = run["players"][0]["characterId"].split(".")[-1].lower()
+    outcome = "won" if run["win"] else f"lost to {run['killedByEncounter'].split('.')[-1].lower()}"
+    print(f"  {path.name}: {character} A{run['ascension']} {run['buildId']}, {outcome} on floor {len(page['floorTimeline'])}, seed {run['seed']}")
+    if run["buildId"] != "v0.107.1" or character != "ironclad" or len(run["players"]) != 1:
+        print("  (runcheck skips it: only solo Ironclad runs on v0.107.1)")
+    missing = sorted({f"{c['eventId']}.{c['choiceId']}" for f in page["floorTimeline"] for c in f["eventChoices"]} - {f"{e}.{o}" for e, o in pages})
     if missing:
-        print(f"event page unknown, INITIAL assumed: {missing}")
-    Path(out).write_text(json.dumps(convert(page, pages)))
+        print(f"  event page unknown, INITIAL assumed: {', '.join(missing)}")
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description="Save ststracker.app runs as .run history files.")
+    ap.add_argument("urls", nargs="*", help="run pages; without any, read them from the prompt")
+    ap.add_argument("--out", type=Path, default=GAME_DATA / "sts2ai/tracker")
+    args = ap.parse_args()
+    args.out.mkdir(parents=True, exist_ok=True)
+    pages = event_pages(list(HISTORY.glob("**/saves/history")))
+    urls = iter(args.urls) if args.urls else iter(lambda: input("run URL (Enter to stop): "), "")
+    for url in urls:
+        try:
+            save(url, args.out, pages)
+        except Exception as e:  # a bad paste or a page that moved: say so and take the next
+            print(f"  failed: {e}")
+    print(f"{len(list(args.out.glob('*.run')))} runs in {args.out}")
+
+
+if __name__ == "__main__":
+    main()
