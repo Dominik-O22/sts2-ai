@@ -1,5 +1,6 @@
 """Turn search: play copies of a fight to the end of the turn and score
-them. Used by the advisor's plan and by `searcheval`.
+them. Used by the advisor's plan, by `searcheval`, and by `runplay`, which
+plays many fights' decisions as the pilot does (`choose`).
 
 Each copy starts with a given first action; the policy samples the rest of
 the turn. A copy's score is the shaped reward it collected plus the value
@@ -37,6 +38,10 @@ CHUNK = 16384
 # first action led to; fewer and the max over them picks luck, so those
 # copies keep the policy's play.
 SECOND_MIN = 8
+# Plan scores closer than this are value-head noise: the policy's pick
+# keeps the top line, and the search only overrules it by a clear margin.
+# The unit is half an HP fraction, so 0.02 is about three HP.
+PLAN_MARGIN = 0.02
 
 
 def forward(policy: Policy, device: torch.device, floats: torch.Tensor, ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -175,3 +180,26 @@ def openings(first: np.ndarray, score: np.ndarray, second: tuple[np.ndarray, np.
 def spread(legal: np.ndarray, n: int) -> np.ndarray:
     """First actions for `n` copies: every legal action gets an equal share."""
     return legal[np.arange(n) % len(legal)]
+
+
+@torch.no_grad()
+def choose(policy: Policy, device: torch.device, sim, roots: list[int], mask: np.ndarray, own: np.ndarray, n: int, groups: int, seed: int) -> np.ndarray:
+    """The pilot's pick (`advise.Session.plan`) at the decisions of many
+    fights at once: `n` copies of each env in `roots` of the VecEnv `sim`,
+    over `groups` draw-pile shuffles, every legal first action (`mask[r]`)
+    with its share, openings ranked by their best second action
+    (`openings`). The policy's own action `own[r]` stays unless another
+    beats it by `PLAN_MARGIN`. Returns the action per root. The copies roll
+    their own dice from `seed`, never the env's."""
+    forks = sim.fork(roots, n, groups, seed)
+    first = np.concatenate([spread(np.flatnonzero(m), n) for m in mask])
+    second = (np.full(len(first), -1), np.zeros(len(first), np.int64))
+    score = rollout(policy, device, forks, first, second=second)
+    picks = own.copy()
+    for r in range(len(roots)):
+        part = slice(r * n, (r + 1) * n)
+        value = openings(first[part], score[part], (second[0][part], second[1][part]))
+        best = max(value, key=lambda a: value[a][0])
+        if int(own[r]) not in value or value[best][0] - value[int(own[r])][0] >= PLAN_MARGIN:
+            picks[r] = best
+    return picks

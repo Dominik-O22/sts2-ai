@@ -19,11 +19,10 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from sts2ai.advise import PLAN_MARGIN
 from sts2ai.env import Envs
 from sts2ai.evaluate import HOLDOUT_PER_ENCOUNTER
 from sts2ai.model import Policy, load_policy, masked_logits
-from sts2ai.search import openings, rollout, spread
+from sts2ai.search import PLAN_MARGIN, openings, rollout, spread
 
 
 def pick(first: np.ndarray, score: np.ndarray, own: int, mean: bool, second: tuple[np.ndarray, np.ndarray] | None = None) -> int:
