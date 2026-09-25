@@ -5,7 +5,8 @@ sites, events, ancients, deck picks.
 
     uv run python -m sts2ai.runtrain runs/ab-attn/latest.pt --run-dir runs/run-1 --minutes 90
 
-A run pays at its end: +1 for a win, else floors cleared / 49 - 1; a run
+A run pays at its end: +1 for a win, else `floor_weight` * floors cleared
+/ 49 - 1; a run
 the sim cannot go on with (stuck) pays what the value head expected, so it
 teaches nothing. With `--potential` each decision also pays Phi(the next
 decision's state) - Phi(its own), Phi 0 once the run is over, Phi the
@@ -52,12 +53,13 @@ Decide = Callable[[list[int], np.ndarray, np.ndarray], np.ndarray]
 OnRunEnd = Callable[[int, RunFight], None]
 
 
-def run_reward(run: RunFight) -> float | None:
-    """+1 for a win, else floors cleared / 49 - 1; None for a stuck run."""
+def run_reward(run: RunFight, floor_weight: float = 1.0) -> float | None:
+    """+1 for a win, else `floor_weight` * floors cleared / 49 - 1; None for
+    a stuck run."""
     if run.end == "won":
         return 1.0
     if run.end == "died":
-        return max(run.floor - 1, 0) / FLOORS - 1.0
+        return floor_weight * max(run.floor - 1, 0) / FLOORS - 1.0
     return None
 
 
@@ -206,6 +208,18 @@ class Config:
     # Updates at the start that train only the value head: a cloned policy
     # comes with no critic, and a random one's advantages undo the clone.
     value_warmup: int = 0
+    # Fights of these kinds play the pilot's turn search with this many
+    # copies (RunLoop), so the run policy learns the risks the combat it
+    # will have can take: with greedy fights PPO gave up elites and
+    # upgrades, and the decks that win act 3 with them. 0: greedy.
+    search: int = 0
+    search_kinds: str = "Elite,Boss"
+    # What a floor cleared is worth in a lost run, as a share of 1 / 49. At
+    # 1 dying in act 3 instead of act 1 was worth nearly half a win, and
+    # PPO traded winners' deck building (elites, upgrades) for surviving
+    # act 1: the clone wins 2.7% with searched fights, run-7 and run-9 0.4
+    # to 1.3%. Lower puts the weight on winning.
+    floor_weight: float = 1.0
 
 
 @dataclass
@@ -361,7 +375,7 @@ def train(combat_path: Path, run_dir: Path, cfg: Config, resume: Path | None) ->
     envs = Envs(cfg.envs, seed=cfg.seed)
     envs.use_runs(cfg.seed * 1_000_000, choices="caller")
     writer = SummaryWriter(str(run_dir))
-    loop = RunLoop(combat, device, envs, cfg.drain)
+    loop = RunLoop(combat, device, envs, cfg.drain, cfg.search, frozenset(cfg.search_kinds.split(",")), seed=cfg.seed)
     trajs = [Trajectory() for _ in range(cfg.envs)]
     # Relics each env held at its last decision, for `relic_bonus`.
     held: list[int | None] = [None] * cfg.envs
@@ -413,7 +427,7 @@ def train(combat_path: Path, run_dir: Path, cfg: Config, resume: Path | None) ->
         run_picks[env] = Counter()
         t = trajs[env]
         if len(t) and not t.done[-1]:
-            reward = run_reward(run)
+            reward = run_reward(run, cfg.floor_weight)
             # Phi is 0 once the run is over.
             t.reward[-1] = t.value[-1] if reward is None else reward - phi[env]
             t.done[-1] = True
