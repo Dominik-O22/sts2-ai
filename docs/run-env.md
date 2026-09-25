@@ -587,6 +587,29 @@ the second they are worth nothing.
    run-policy forward on a small batch, and a reward screen, shop or deck
    pick chains several. Answering one round per step leaves about one env
    in twenty idle for a combat step instead, and plays the same runs.
+
+   `runplay --search N` plays the fights of `--search-kinds` (elites and
+   bosses by default) as the live pilot does (`play --search N`: the same
+   `groups`, second action and margin, `search.choose`); the rest stay
+   greedy. Every env in such a fight is a root of one batch of copies per
+   combat step, and the copies reshuffle the draw pile and roll their own
+   dice, so the search sees no more than a player would. With `--search 0`
+   the runs are the ones greedy plays, line for line. gen5 plays the
+   fights, run-7 (final) the run, 128 runs per seed set (0 and 128),
+   2026-09-25, beside a combat training on the same GPU:
+
+   | Fights | floor mean | reached act 2 / 3 | bosses beaten, act 1 / 2 / 3 | elites won | wins | wall |
+   |---|---|---|---|---|---|---|
+   | greedy | 25.2 / 28.6 | 55% / 16%, 79% / 20% | 70/20/1, 101/26/6 | 84%, 86% | 0, 2 | 30 s, 40 s |
+   | search 256, elites and bosses | 28.5 / 30.0 | 70% / 26%, 80% / 28% | 89/33/3, 102/36/12 | 86%, 88% | 0, 3 | 118 s, 159 s |
+   | search 256, every fight | 29.1 / 31.4 | 70% / 25%, 76% / 31% | 90/32/7, 97/40/6 | 85%, 88% | 1, 1 | 311 s, 231 s |
+
+   Search adds two to four floors a run, mostly as bosses: act 1's on seed
+   set 0 (61% to 75%) and act 2's on both. Wins stay at one or two in 128.
+   Wall time is set by the slowest run; per run, searching elites and
+   bosses costs about 4x greedy and searching everything about 8x
+   (29k, 6.8k and 3.7k runs/hour on 128 envs). choose calls the network
+   on 4096 rows at a time, which keeps the search near 1 GB of GPU.
 4. Shops (prices, removal), Neow and the act ancients' options: done.
    Events: done but Tinker Time, Colorful Philosophers and Crystal
    Sphere.
