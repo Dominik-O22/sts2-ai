@@ -147,13 +147,17 @@ def play(
     search: int = 0,
     search_kinds: frozenset[str] = frozenset({"Elite", "Boss"}),
     groups: int = 4,
+    late_policy: RunPolicy | None = None,
+    late_from_act: int = 2,
 ) -> tuple[list[End], list[RunFight], RunLoop, float]:
     """Plays until each env has finished `per_env` runs or `minutes` pass.
     Returns every fight that ended, every run that ended, the loop (its
     counts of combat batch steps, run decisions and searched decisions),
     and the seconds spent. With `fights_out`,
     each elite and boss fight as it starts is written there as a setup
-    (`sts2ai.setups`' format, `evaluate --source setups` plays them)."""
+    (`sts2ai.setups`' format, `evaluate --source setups` plays them).
+    With `late_policy`, that policy makes the decisions from act
+    `late_from_act` on (1-based) and `run_policy` the ones before."""
     envs.use_runs(seed, choices="caller" if run_policy else choices)
     left = set(range(seed, seed + per_env * envs.n))
     fights: list[End] = []
@@ -165,7 +169,14 @@ def play(
 
     @torch.no_grad()
     def decide(_: list[int], floats: np.ndarray, ids: np.ndarray) -> np.ndarray:
-        logits, _ = run_policy(torch.from_numpy(floats).to(device), torch.from_numpy(ids).to(device))
+        f, i = torch.from_numpy(floats).to(device), torch.from_numpy(ids).to(device)
+        logits, _ = run_policy(f, i)
+        if late_policy is not None:
+            # The global token's act id: 1 and 2 are act 1's two acts, then
+            # one per act (runobs.rs ACTS).
+            late = i[:, 2] >= late_from_act + 1
+            if late.any():
+                logits[late] = late_policy(f[late], i[late])[0]
         options = logits.argmax(1).cpu().numpy()
         if picks:
             picks.add(floats, ids, torch.softmax(logits, 1).cpu().numpy(), options)
@@ -238,6 +249,8 @@ def main() -> None:
     ap.add_argument("--no-drain", action="store_true", help="answer one round of run decisions per combat step, not all (RunLoop)")
     ap.add_argument("--search", type=int, default=0, help="turn search with this many sim copies per decision, as the pilot (0: greedy)")
     ap.add_argument("--search-kinds", default="Elite,Boss", help="fight kinds searched (Weak,Normal,Elite,Boss); the rest greedy")
+    ap.add_argument("--late-policy", type=Path, default=None, help="run policy for the decisions from --late-from-act on")
+    ap.add_argument("--late-from-act", type=int, default=2)
     ap.add_argument("--groups", type=int, default=4, help="draw-pile shuffles the search copies are split over")
     args = ap.parse_args()
     # Ids the combat checkpoint never saw get fresh rows (`vocab.remap_state`),
@@ -264,6 +277,8 @@ def main() -> None:
         args.search,
         frozenset(args.search_kinds.split(",")),
         args.groups,
+        load_run_policy(args.late_policy, device)[0].eval() if args.late_policy else None,
+        args.late_from_act,
     )
     if fights_out is not None:
         fights_out.close()
