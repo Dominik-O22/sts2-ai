@@ -3,6 +3,10 @@ transformer over a run decision's tokens (`sim::runobs`), a pointer head
 that scores each option token against the global token, and a value head
 on the global token that estimates the run's reward from here.
 
+At a map step, a map encoder reads the map ahead backwards, from the row
+below the boss to the options' row, and each path option's token gains
+its node's reading (`RunPolicy.map_ahead`).
+
 Cards, enchantments, potions and relics index as the combat model and
 `sts2ai.deckvalue` do (sim id + 1), so the card embedding can start from a
 combat checkpoint's (`seed_cards`); relics the combat sim leaves out
@@ -27,6 +31,7 @@ class RunArch:
     hidden: int = 128
     depth: int = 2
     heads: int = 4
+    map_dim: int = 64
 
 
 class RunPolicy(nn.Module):
@@ -52,6 +57,14 @@ class RunPolicy(nn.Module):
         self.relic_in = nn.Linear(32 + L.relic_floats, d)
         self.potion_in = nn.Linear(16 + L.potion_floats, d)
         self.option_in = nn.Linear(16 + L.option_cards * card_dim + 8 + 32 + 16 + 8 + 16 + L.option_floats, d)
+        m = arch.map_dim
+        self.map_row = nn.Embedding(L.map_rows, 8)
+        # A node's reading: its own room type, row and the run's state, and
+        # its children's readings, mixed.
+        self.map_here = nn.Linear(8 + 8 + d, m)
+        self.map_children = nn.Linear(2 * m, m, bias=False)
+        self.map_mix = nn.Sequential(nn.ReLU(), nn.Linear(m, m), nn.LayerNorm(m))
+        self.map_out = nn.Linear(m, d, bias=False)
         layer = nn.TransformerEncoderLayer(d, arch.heads, 4 * d, dropout=0.0, batch_first=True, norm_first=True)
         self.encoder = nn.TransformerEncoder(layer, arch.depth, norm=nn.LayerNorm(d), enable_nested_tensor=False)
         self.score_global = nn.Linear(d, d)
@@ -61,8 +74,9 @@ class RunPolicy(nn.Module):
         nn.init.zeros_(self.score_out.bias)
         self.v = nn.Sequential(nn.Linear(d, d), nn.ReLU(), nn.Linear(d, 1))
 
-    def tokens(self, floats: Tensor, ids: Tensor) -> tuple[Tensor, Tensor]:
-        """Token embeddings `[B, T, d]` and which are absent `[B, T]`."""
+    def tokens(self, floats: Tensor, ids: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+        """Token embeddings `[B, T, d]`, which are absent `[B, T]`, and
+        which token positions some row uses `[T]`, on the CPU."""
         L = self.layout
         B = floats.shape[0]
 
@@ -92,6 +106,12 @@ class RunPolicy(nn.Module):
         potions = self.potion_in(torch.cat([self.potion(p_ids[..., 0]), p_f], dim=2))
         o_ids, o_f = seg(ids, L.i_options, L.max_options, L.option_ids), seg(floats, L.f_options, L.max_options, L.option_floats)
         C = L.option_cards
+        absent = torch.cat([torch.zeros_like(g_f[:, :1], dtype=torch.bool), d_f[..., 0] == 0, r_f[..., 0] == 0, p_f[..., 0] == 0, o_f[..., 0] == 0], dim=1)
+        nodes = ids[:, L.i_map : L.i_map + L.map_rows * L.map_cols * L.map_node_ids].view(B, L.map_rows, L.map_cols, L.map_node_ids)
+        # The one wait on the GPU: which token positions and map rows the
+        # batch uses. Everything sized by them is sized on the CPU after.
+        sizes = torch.cat([~absent.all(0), (nodes[..., 0] != 0).any(2).any(0)]).cpu()
+        used, map_rows = sizes[: absent.shape[1]], sizes[absent.shape[1] :]
         options = self.option_in(
             torch.cat(
                 [
@@ -107,18 +127,67 @@ class RunPolicy(nn.Module):
                 dim=2,
             )
         )
+        if map_rows.any():
+            def mean(tokens: Tensor, f: Tensor) -> Tensor:
+                present = (f[..., :1] != 0).to(tokens.dtype)
+                return (tokens * present).sum(1) / present.sum(1).clamp(min=1)
+
+            depth = int(map_rows.nonzero().max()) + 1
+            state = glob[:, 0] + mean(deck, d_f) + mean(relics, r_f)
+            options = options + self.map_ahead(nodes[:, :depth], state, o_ids[..., 6 + C]).to(options.dtype)
         tokens = torch.cat([glob, deck, relics, potions, options], dim=1)
-        absent = torch.cat([torch.zeros_like(g_f[:, :1], dtype=torch.bool), d_f[..., 0] == 0, r_f[..., 0] == 0, p_f[..., 0] == 0, o_f[..., 0] == 0], dim=1)
-        return tokens, absent
+        return tokens, absent, used
+
+    def map_ahead(self, nodes: Tensor, state: Tensor, column: Tensor) -> Tensor:
+        """What each path option's node reads, as a token `[B, max_options,
+        d]` to add to the option's (zero for other options and other
+        decisions). `nodes` is the map segment's rows the batch uses, `state`
+        the run's (the global token plus the mean deck and relic tokens),
+        `column` each option's map column + 1.
+
+        The map ahead is a DAG laid out by row and column; a node leads to
+        at most the three nodes above it. One step per row, from the last
+        row down: a node's reading mixes its room type, its row and the
+        run's state with the max and mean of its children's readings (the
+        max is the best the player can still choose there, the mean what
+        the paths average), so a remerge is read once and an elite reads
+        differently at low HP. It runs in float32 on every row of the
+        batch, with no wait on the GPU and a few kernels per map row: this
+        loop is most of a map step's forward."""
+        B, depth, C, _ = nodes.shape
+        m = self.arch.map_dim
+        kind, links = nodes[..., 0], nodes[..., 1]
+        with torch.autocast(nodes.device.type, enabled=False):
+            here = torch.cat(
+                [self.room(kind), self.map_row.weight[:depth, None].expand(B, depth, C, 8), state.float()[:, None, None].expand(B, depth, C, state.shape[1])],
+                dim=3,
+            )
+            here = self.map_here(here)
+            # Node c's children sit at columns c - 1, c, c + 1 of the row
+            # above: link bits 0, 1, 2, and window 0, 1, 2 of `unfold`.
+            linked = (links[..., None] >> torch.arange(3, device=nodes.device) & 1).float()
+            count = linked.sum(3, keepdim=True)
+            weights = (linked / count.clamp(min=1)).unsqueeze(4)
+            unlinked = ((1 - linked) * -1e4).unsqueeze(3)
+            has_children = (count > 0).float()
+            present = (kind != 0).float().unsqueeze(3)
+            h = here.new_zeros(B, C, m)
+            for r in reversed(range(depth)):
+                children = nn.functional.pad(h, (0, 0, 1, 1)).unfold(1, 3, 1)
+                mean = (children @ weights[:, r]).squeeze(3)
+                best = (children + unlinked[:, r]).amax(3) * has_children[:, r]
+                h = self.map_mix(here[:, r] + self.map_children(torch.cat([mean, best], dim=2))) * present[:, r]
+            # Each path option names its node's column in the options' row.
+            picked = torch.gather(h, 1, (column - 1).clamp(min=0)[..., None].expand(-1, -1, m)) * (column > 0)[..., None]
+            return self.map_out(picked)
 
     def forward(self, floats: Tensor, ids: Tensor) -> tuple[Tensor, Tensor]:
         """Masked option logits `[B, max_options]` and values `[B]`."""
         L = self.layout
-        tokens, absent = self.tokens(floats, ids)
         # The slots are sized for the largest deck and option list; a batch
         # uses a few dozen of them. Only the token positions some row uses
         # go through the encoder, and option logits go back to their slots.
-        used = ~absent.all(0)
+        tokens, absent, used = self.tokens(floats, ids)
         x = self.encoder(tokens[:, used], src_key_padding_mask=absent[:, used])
         options_used = used[-L.max_options :]
         n = int(options_used.sum())
