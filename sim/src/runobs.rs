@@ -40,7 +40,7 @@ pub const EVENT_KEY_BUCKETS: usize = 1024;
 /// Ids per token of each segment, then floats. Each segment's first float
 /// is its presence flag, except the global token's, which is always there.
 pub const GLOBAL_IDS: usize = 6;
-pub const GLOBAL_FLOATS: usize = 15;
+pub const GLOBAL_FLOATS: usize = 16;
 pub const DECK_IDS: usize = 2;
 pub const DECK_FLOATS: usize = 3;
 pub const RELIC_IDS: usize = 1;
@@ -528,6 +528,9 @@ pub fn observe(run: &RunState, decision: Decision<'_>) -> RunObs {
         slots as f32 / 5.0,
         empty as f32 / 5.0,
         run.shop_removals as f32 / 5.0,
+        // HP in points as well as the fraction above: with the fraction
+        // alone a value head reads lost max HP (Paper Cuts) as HP kept.
+        run.hp.max(0) as f32 / 100.0,
     ]);
 
     for (k, card) in run.deck.iter().take(MAX_DECK).enumerate() {

@@ -310,8 +310,8 @@ fixed-width tokens with a presence flag, so a batch is one array
 (`run_layout()` in Python):
 
 - a global token: the decision, the room the player is in, the act, the
-  act's boss and second boss, the event or ancient being played; HP, max
-  HP, gold, floor, ascension, the four `UnknownOdds`, the card rarity
+  act's boss and second boss, the event or ancient being played; HP as a
+  fraction and in points, max HP, gold, floor, ascension, the four `UnknownOdds`, the card rarity
   offset, the potion drop odds, deck size, potion slots and empty ones,
   card removals bought;
 - a token per deck card (id, upgraded, enchantment and amount, 64 at
