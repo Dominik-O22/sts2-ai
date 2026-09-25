@@ -3,8 +3,10 @@
 //! act's bosses, the decision, the odds a player can count), one per deck
 //! card, relic and potion, and one per option, each option carrying what it
 //! names (a card, relic, potion, map point, event option) and, for a map
-//! step, what the paths through the point hold. Every segment has a fixed
-//! length and a presence flag per token, so a batch is one array.
+//! step, what the paths through the point hold. A map step also carries
+//! the part of the act's map still ahead, point by point with its links
+//! (`map_ahead`). Every segment has a fixed length and a presence flag per
+//! token, so a batch is one array.
 //!
 //! Only what the player sees or could count goes in (docs/run-env.md,
 //! Hidden information): nothing here reads the seed, the streams or the
@@ -47,8 +49,10 @@ pub const RELIC_IDS: usize = 1;
 pub const RELIC_FLOATS: usize = 3;
 pub const POTION_IDS: usize = 1;
 pub const POTION_FLOATS: usize = 1;
-/// kind, cards (`OPTION_CARDS`), enchantment, relic, potion, room, event key.
-pub const OPTION_IDS: usize = 5 + OPTION_CARDS + 1;
+/// kind, cards (`OPTION_CARDS`), enchantment, relic, potion, room, event
+/// key, and a map point's column + 1 (its node in the first row of
+/// `map_ahead`).
+pub const OPTION_IDS: usize = 5 + OPTION_CARDS + 2;
 /// present, upgraded per card, enchantment amount, price, the map summary.
 pub const OPTION_FLOATS: usize = 3 + OPTION_CARDS + MAP_FEATS;
 /// Per map point type a path can pass (`PATH_POINTS`), the fewest and the
@@ -65,7 +69,18 @@ pub const I_DECK: usize = GLOBAL_IDS;
 pub const I_RELICS: usize = I_DECK + MAX_DECK * DECK_IDS;
 pub const I_POTIONS: usize = I_RELICS + MAX_RELICS * RELIC_IDS;
 pub const I_OPTIONS: usize = I_POTIONS + MAX_POTIONS * POTION_IDS;
-pub const RUN_IDS: usize = I_OPTIONS + MAX_OPTIONS * OPTION_IDS;
+pub const I_MAP: usize = I_OPTIONS + MAX_OPTIONS * OPTION_IDS;
+pub const RUN_IDS: usize = I_MAP + MAP_ROWS * MAP_COLS * MAP_NODE_IDS;
+
+/// The map ahead at a map step (`map_ahead`), ids only: a grid of rows
+/// from the options' row up, the most rooms an act has (`map::rooms`), by
+/// the map's columns. Each node is its point's type (a `ROOMS` id, 0 for
+/// no point) and its links, a bit per point in the row above it leads to:
+/// bit 0 one column left, bit 1 the same column, bit 2 one right
+/// (`ActMap::generate` links no further).
+pub const MAP_ROWS: usize = 15;
+pub const MAP_COLS: usize = crate::map::COLS;
+pub const MAP_NODE_IDS: usize = 2;
 
 /// `rooms::Decision`'s kinds, as the global token names them.
 pub const DECISIONS: [&str; 10] = ["Path", "Relic", "Card", "Bundle", "Potion", "Rest", "Ancient", "Deck", "Shop", "Event"];
@@ -263,6 +278,7 @@ struct Opt {
     potion: i64,
     room: i64,
     event_key: i64,
+    column: i64,
     price: i32,
     map: [f32; MAP_FEATS],
     answer: usize,
@@ -350,6 +366,34 @@ fn summarize(map: &ActMap, point: PointId, memo: &mut [Option<Summary>]) -> Summ
     s
 }
 
+/// Writes the map a player can still walk from `points`, a map step's
+/// options, into `out` (the `I_MAP` segment): every point reachable from
+/// them short of the boss, at its row counted from the options' and its
+/// column, with its type as the map shows it (a `?` stays `Unknown`) and
+/// its links to the row above.
+fn map_ahead(map: &ActMap, points: &[PointId], out: &mut [i64]) {
+    let Some(&first) = points.first() else { return };
+    let base = map[first].row;
+    let mut stack: Vec<PointId> = points.to_vec();
+    while let Some(p) = stack.pop() {
+        let point = &map[p];
+        if point.kind == PointType::Boss {
+            continue;
+        }
+        let node = ((point.row - base) * MAP_COLS + point.col) * MAP_NODE_IDS;
+        if out[node] != 0 {
+            continue;
+        }
+        let mut links = 0;
+        for c in point.children.iter().filter(|&c| map[c].kind != PointType::Boss) {
+            links |= 1 << (map[c].col + 1 - point.col);
+            stack.push(c);
+        }
+        out[node] = point_id(point.kind);
+        out[node + 1] = links;
+    }
+}
+
 fn rest_kind(option: RestOption) -> OptionKind {
     match option {
         RestOption::Heal => OptionKind::RestHeal,
@@ -386,7 +430,12 @@ fn options(run: &RunState, decision: Decision<'_>) -> (usize, Vec<Opt>) {
             points
                 .iter()
                 .enumerate()
-                .map(|(i, &p)| Opt { room: point_id(map[p].kind), map: path_summary(map, p), ..Opt::new(K::Path, i) })
+                .map(|(i, &p)| Opt {
+                    room: point_id(map[p].kind),
+                    map: path_summary(map, p),
+                    column: if map[p].kind == PointType::Boss { 0 } else { map[p].col as i64 + 1 },
+                    ..Opt::new(K::Path, i)
+                })
                 .collect(),
         ),
         Decision::Relic(relics) => (
@@ -569,7 +618,7 @@ pub fn observe(run: &RunState, decision: Decision<'_>) -> RunObs {
         for (c, &(id, _)) in o.cards.iter().enumerate() {
             row[1 + c] = id;
         }
-        row[1 + OPTION_CARDS..].copy_from_slice(&[o.enchant.0, o.relic, o.potion, o.room, o.event_key]);
+        row[1 + OPTION_CARDS..].copy_from_slice(&[o.enchant.0, o.relic, o.potion, o.room, o.event_key, o.column]);
         let row = &mut f[x..x + OPTION_FLOATS];
         row[0] = 1.0;
         for (c, &(_, up)) in o.cards.iter().enumerate() {
@@ -578,6 +627,9 @@ pub fn observe(run: &RunState, decision: Decision<'_>) -> RunObs {
         row[1 + OPTION_CARDS] = o.enchant.1 as f32 / 10.0;
         row[2 + OPTION_CARDS] = o.price as f32 / 100.0;
         row[3 + OPTION_CARDS..].copy_from_slice(&o.map);
+    }
+    if let Decision::Path(map, points) = decision {
+        map_ahead(map, points, &mut ids[I_MAP..]);
     }
     RunObs { floats: f, ids, answers }
 }
@@ -687,6 +739,66 @@ mod tests {
             assert!(s[MAP_FEATS - 2] < 2.0, "a rest site ahead");
             assert!(s[2 * 4 + 1] > 0.0, "monsters ahead");
         }
+    }
+
+    /// The map ahead is the map: every point the options reach sits at its
+    /// row and column with its type and its links, the rest of the grid is
+    /// empty, and each option names its own node.
+    #[test]
+    fn map_ahead_holds_the_reachable_map() {
+        for act in ACTS {
+            assert!(crate::map::rooms(act) <= MAP_ROWS, "{act:?} has more rows than the map segment");
+        }
+        let run = visible("SEEDA");
+        let map = ActMap::generate(7, Act::Overgrowth, Ascension(10));
+        let from = map.grid_points().find(|&p| map[p].row > 1 && map[p].children.len() > 1).expect("a fork");
+        let points: Vec<PointId> = map[from].children.iter().collect();
+        let base = map[from].row + 1;
+        let obs = observe(&run, Decision::Path(&map, &points));
+        let mut reached = points.clone();
+        let mut k = 0;
+        while k < reached.len() {
+            for c in map[reached[k]].children.iter() {
+                if map[c].kind != PointType::Boss && !reached.contains(&c) {
+                    reached.push(c);
+                }
+            }
+            k += 1;
+        }
+        let mut nodes = 0;
+        for p in map.grid_points().filter(|&p| map[p].row >= base) {
+            let node = I_MAP + ((map[p].row - base) * MAP_COLS + map[p].col) * MAP_NODE_IDS;
+            if !reached.contains(&p) {
+                assert_eq!(obs.ids[node], 0, "an unreachable point stays out");
+                continue;
+            }
+            nodes += 1;
+            assert_eq!(obs.ids[node], point_id(map[p].kind));
+            for c in map[p].children.iter().filter(|&c| map[c].kind != PointType::Boss) {
+                assert_ne!(obs.ids[node + 1] & 1 << (map[c].col + 1 - map[p].col), 0, "a link to each child");
+            }
+            assert_eq!(obs.ids[node + 1].count_ones() as usize, map[p].children.iter().filter(|&c| map[c].kind != PointType::Boss).count());
+        }
+        assert_eq!(obs.ids[I_MAP..].chunks(MAP_NODE_IDS).filter(|n| n[0] != 0).count(), nodes, "nothing else in the grid");
+        for (k, &p) in points.iter().enumerate() {
+            assert_eq!(obs.ids[I_OPTIONS + k * OPTION_IDS + OPTION_IDS - 1], map[p].col as i64 + 1);
+        }
+    }
+
+    /// What a `?` holds is rolled as the player enters it, and the map
+    /// shows only the `?`: two runs whose rolls for the next `?` differ
+    /// encode the map step the same, with the `?` as `Unknown`.
+    #[test]
+    fn an_unknown_room_encodes_as_unknown() {
+        let map = ActMap::generate(7, Act::Overgrowth, Ascension(10));
+        let points: Vec<PointId> = map[map.start].children.iter().collect();
+        let roll = |run: &RunState| run.clone().roll_unknown(false);
+        let a = visible("SEEDA");
+        let b = (0..).map(|i| visible(&format!("SEED{i}"))).find(|b| roll(b) != roll(&a)).expect("a seed that rolls otherwise");
+        let (ea, eb) = (observe(&a, Decision::Path(&map, &points)), observe(&b, Decision::Path(&map, &points)));
+        assert_eq!(ea, eb);
+        let unknown = point_id(PointType::Unknown);
+        assert!(ea.ids[I_MAP..].chunks(MAP_NODE_IDS).any(|n| n[0] == unknown), "the map ahead shows its ? rooms");
     }
 
     #[test]

@@ -78,7 +78,9 @@ class RunLayout:
     """Offsets and sizes of the run observation (`sim::runobs`): per row,
     a global token, then deck, relic, potion and option tokens, each
     segment a fixed number of tokens of fixed width in `floats` and `ids`,
-    whose first float says the token is there."""
+    whose first float says the token is there; then, in `ids` alone, the
+    map ahead at a map step (`map_rows` by `map_cols` nodes of type and
+    links, type 0 where there is no point)."""
 
     run_floats: int
     run_ids: int
@@ -105,6 +107,10 @@ class RunLayout:
     i_relics: int
     i_potions: int
     i_options: int
+    i_map: int
+    map_rows: int
+    map_cols: int
+    map_node_ids: int
     card_vocab: int
     enchant_vocab: int
     potion_vocab: int
