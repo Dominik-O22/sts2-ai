@@ -34,6 +34,9 @@ MAX_PLAN_STEPS = 40
 # Copies per network call: a search over many fights at once is too big for
 # one batch on the GPU.
 CHUNK = 16384
+# `choose`'s, smaller: runplay shares the GPU with training, and a quarter
+# of `CHUNK` keeps its peak near a gigabyte.
+CHOOSE_CHUNK = 4096
 # Copies each second action needs before `second` tries them all for what a
 # first action led to; fewer and the max over them picks luck, so those
 # copies keep the policy's play.
@@ -44,11 +47,11 @@ SECOND_MIN = 8
 PLAN_MARGIN = 0.02
 
 
-def forward(policy: Policy, device: torch.device, floats: torch.Tensor, ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    """The policy over a batch of any size, in `CHUNK`-sized pieces."""
+def forward(policy: Policy, device: torch.device, floats: torch.Tensor, ids: torch.Tensor, chunk: int = CHUNK) -> tuple[torch.Tensor, torch.Tensor]:
+    """The policy over a batch of any size, in `chunk`-sized pieces."""
     parts = [
-        policy(floats[i : i + CHUNK].to(device, non_blocking=True), ids[i : i + CHUNK].to(device, non_blocking=True))
-        for i in range(0, len(floats), CHUNK)
+        policy(floats[i : i + chunk].to(device, non_blocking=True), ids[i : i + chunk].to(device, non_blocking=True))
+        for i in range(0, len(floats), chunk)
     ]
     return torch.cat([p[0] for p in parts]), torch.cat([p[1] for p in parts])
 
@@ -83,6 +86,7 @@ def rollout(
     on_step: Callable[[np.ndarray, np.ndarray], None] | None = None,
     depth: int = 1,
     second: tuple[np.ndarray, np.ndarray] | None = None,
+    chunk: int = CHUNK,
 ) -> np.ndarray:
     """Play every copy in `forks` (forked with this `depth`) to the end of its turn, `first[i]` as copy
     i's first action. `on_step(actions, live)` sees each step's actions and
@@ -92,7 +96,7 @@ def rollout(
     spread their second action over its legal ones when there are
     `SECOND_MIN` copies for each; `groups[i]` is copy i's observation group,
     or -1 where the policy played on or the turn was already over, and
-    `actions[i]` its second action."""
+    `actions[i]` its second action. The network sees `chunk` rows a call."""
     n = len(forks)
     floats, ids, mask = buffers(n, Layout.load())
     inverse = np.empty(n, np.int64)
@@ -110,7 +114,7 @@ def rollout(
             # The network sees each distinct observation once; every copy
             # still samples its own action.
             n_unique = forks.observe_unique(live.tolist(), floats.numpy(), ids.numpy(), mask.numpy(), inverse)
-            logits, _ = forward(policy, device, floats[:n_unique], ids[:n_unique])
+            logits, _ = forward(policy, device, floats[:n_unique], ids[:n_unique], chunk)
             masked = masked_logits(logits.float(), mask[:n_unique].to(device, non_blocking=True))
             per_copy = masked[torch.from_numpy(inverse[: len(live)]).to(device)]
             actions = np.zeros(n, np.int64)
@@ -136,7 +140,7 @@ def rollout(
     rows = np.flatnonzero(~np.array(forks.is_over()))
     if len(rows):
         n_unique = forks.observe_unique(rows.tolist(), floats.numpy(), ids.numpy(), mask.numpy(), inverse)
-        _, value = forward(policy, device, floats[:n_unique], ids[:n_unique])
+        _, value = forward(policy, device, floats[:n_unique], ids[:n_unique], chunk)
         score[rows] += value.float().cpu().numpy()[inverse[: len(rows)]]
     return score
 
@@ -194,7 +198,7 @@ def choose(policy: Policy, device: torch.device, sim, roots: list[int], mask: np
     forks = sim.fork(roots, n, groups, seed)
     first = np.concatenate([spread(np.flatnonzero(m), n) for m in mask])
     second = (np.full(len(first), -1), np.zeros(len(first), np.int64))
-    score = rollout(policy, device, forks, first, second=second)
+    score = rollout(policy, device, forks, first, second=second, chunk=CHOOSE_CHUNK)
     picks = own.copy()
     for r in range(len(roots)):
         part = slice(r * n, (r + 1) * n)
