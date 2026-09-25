@@ -128,8 +128,10 @@ pub struct Relic {
     /// skills, Joss Paper exhausts, Happy Flower / Pendulum turns, Girya lifts,
     /// Iron Club plays, Pollinous Core turns. Charged relics count what is
     /// left (Ember Tea combats, Pumpkin Candle kindling), a primed one holds
-    /// 1 (Fake Venerable Tea Set), and Fur Coat holds 1 in a marked fight.
-    /// `gen::from_start` reads the game's value from the recording.
+    /// 1 (Venerable Tea Set and its fake), a spent Lizard Tail holds 1, and
+    /// Fur Coat holds 1 in a marked fight. The observation encodes it, so
+    /// the policy sees all of these. `gen::from_start` reads the game's
+    /// value from the recording.
     pub counter: i32,
     /// Per-combat counter, reset at combat start.
     pub combat_counter: i32,
@@ -138,8 +140,6 @@ pub struct Relic {
     pub scratch: i32,
     /// Per-combat flag (Centennial Puzzle used, Permafrost used, etc.).
     pub used: bool,
-    /// Persistent flag: Lizard Tail spent, Venerable Tea Set primed.
-    pub flag: bool,
 }
 
 impl Relic {
@@ -150,7 +150,7 @@ impl Relic {
             RelicId::BoneTea | RelicId::TeaOfDiscourtesy => 1,
             _ => 0,
         };
-        Self { id, counter, combat_counter: 0, scratch: 0, used: false, flag: false }
+        Self { id, counter, combat_counter: 0, scratch: 0, used: false }
     }
 }
 
@@ -339,8 +339,8 @@ impl Combat {
         let mut out = vec![];
         for r in &mut self.relics {
             match r.id {
-                VenerableTeaSet if r.flag => {
-                    r.flag = false;
+                VenerableTeaSet if r.counter > 0 => {
+                    r.counter = 0;
                     out.push(Effect::GainEnergy { amount: 2 });
                 }
                 FakeVenerableTeaSet if r.counter > 0 => {
@@ -756,10 +756,10 @@ impl Combat {
     pub(crate) fn relic_prevent_death(&mut self) -> Option<i32> {
         let max_hp = self.player.creature.max_hp;
         let r = self.relic_mut(RelicId::LizardTail)?;
-        if r.flag {
+        if r.counter > 0 {
             return None;
         }
-        r.flag = true;
+        r.counter = 1;
         Some(((max_hp as f64 * 0.5) as i32).max(1))
     }
 
