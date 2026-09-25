@@ -218,6 +218,17 @@ impl Run {
         run
     }
 
+    /// The run `state` stands in, at the entrance of its act `state.act`
+    /// as `move_on` leaves a run there: the act's map made, before its
+    /// Ancient. The history walk hands out winners' runs this way
+    /// (`history::entrances`), which play on with their own seed, streams
+    /// and plan.
+    pub fn at_entrance(state: RunState) -> Self {
+        let map = ActMap::generate(state.rngs.seed, state.plan.acts[state.act].act, state.ascension);
+        let point = map.start;
+        Self { state, map, point, fighting: None, fights: 0, unported: BTreeMap::new(), passed: Vec::new() }
+    }
+
     /// Whether a fight has been handed out and not yet fought.
     pub fn fighting(&self) -> bool {
         self.fighting.is_some()
@@ -373,7 +384,11 @@ pub struct Played {
 /// each fight played by `fights`. The same seed, chooser and fights play
 /// the same run.
 pub fn play(seed: &str, ascension: Ascension, chooser: &mut impl Chooser, fights: &mut impl Fights) -> Played {
-    let mut run = Run::new(seed, ascension);
+    play_on(Run::new(seed, ascension), chooser, fights)
+}
+
+/// Plays `run` on from where it stands to its end, as `play` does.
+pub fn play_on(mut run: Run, chooser: &mut impl Chooser, fights: &mut impl Fights) -> Played {
     let mut fought = None;
     loop {
         match run.next(fought, chooser) {
