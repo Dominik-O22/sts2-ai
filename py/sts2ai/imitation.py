@@ -52,6 +52,11 @@ class Rows:
         """Each row's decision, a `DECISIONS` index."""
         return self.ids[:, 0].astype(np.int64)
 
+    def only(self, kinds: list[int]) -> Rows:
+        """The rows of these decision kinds."""
+        keep = np.isin(self.kind, kinds)
+        return Rows(**{f: (getattr(self, f)[keep] if f != "runs" else self.runs) for f in self.__dataclass_fields__})
+
     def save(self, path: Path) -> None:
         np.savez(path, **{f: getattr(self, f) for f in self.__dataclass_fields__})
 

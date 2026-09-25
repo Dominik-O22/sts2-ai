@@ -39,7 +39,7 @@ from sts2ai import _sim
 from sts2ai.deckvalue import RunPotential
 from sts2ai.deckvalue import load as load_deckvalue
 from sts2ai.env import START_POINTS, End, Envs, RunFight, RunLayout
-from sts2ai.imitation import Rows, pretrain
+from sts2ai.imitation import DECISIONS, Rows, batches, pretrain
 from sts2ai.model import Policy, load_policy, masked_logits
 from sts2ai.runmodel import RunArch, RunPolicy, load_run_policy, save_run_policy
 
@@ -162,6 +162,17 @@ class Config:
     imitate_epochs: int = 8
     imitate_lr: float = 1e-3
     imitate_batch: int = 256
+    # During PPO, each minibatch also takes cross-entropy on this many
+    # winners' decisions at this weight, so the policy can adapt what our
+    # combat can afford without drifting from how winners build decks.
+    imitate_coef: float = 0.0
+    # Decision kinds the anchor holds, comma separated (`sts2ai.imitation`
+    # names: Card, Shop, Deck, ...); empty holds all. Winners chose paths and
+    # rests with a combat model stronger than ours, so those are left to PPO.
+    imitate_kinds: str = ""
+    # Updates at the start that train only the value head: a cloned policy
+    # comes with no critic, and a random one's advantages undo the clone.
+    value_warmup: int = 0
 
 
 @dataclass
@@ -302,7 +313,13 @@ def train(combat_path: Path, run_dir: Path, cfg: Config, resume: Path | None) ->
     if ck and ck.get("optimizer"):
         opt.load_state_dict(ck["optimizer"])
     run_dir.mkdir(parents=True, exist_ok=True)
-    if cfg.imitate:
+    anchor = Rows.load(Path(cfg.imitate)) if cfg.imitate and cfg.imitate_coef > 0 else None
+    if anchor is not None and cfg.imitate_kinds:
+        anchor = anchor.only([DECISIONS.index(k) for k in cfg.imitate_kinds.split(",")])
+        print(f"anchoring {cfg.imitate_kinds}: {len(anchor)} winners' decisions")
+    # A resumed policy (a clone's imitated.pt among them) keeps what it has;
+    # the rows then only anchor PPO.
+    if cfg.imitate and resume is None:
         holdout = Path(cfg.imitate).with_name("holdout.npz")
         pretrain(policy, Rows.load(Path(cfg.imitate)), device, cfg.imitate_epochs, cfg.imitate_lr, cfg.imitate_batch, Rows.load(holdout) if holdout.exists() else None)
         save_run_policy(run_dir / "imitated.pt", policy, None, config=asdict(cfg), combat=str(combat_path))
@@ -380,7 +397,7 @@ def train(combat_path: Path, run_dir: Path, cfg: Config, resume: Path | None) ->
         while sum(max(len(t) - (0 if t.done and t.done[-1] else 1), 0) for t in trajs) < cfg.batch:
             stats.fights.extend(e for e in loop.step(decide, run_ended) if e.run)
         it += 1
-        update(policy, opt, cfg, trajs, device, writer, it)
+        update(policy, opt, cfg, trajs, device, writer, it, anchor, warm=it <= cfg.value_warmup)
         if time.perf_counter() - last_log > 30:
             last_log = time.perf_counter()
             secs = last_log - start
@@ -409,9 +426,21 @@ def train(combat_path: Path, run_dir: Path, cfg: Config, resume: Path | None) ->
     save_run_policy(run_dir / "latest.pt", policy, opt, iter=it, config=asdict(cfg), combat=str(combat_path), frontier=curriculum.frontier)
 
 
-def update(policy: RunPolicy, opt: torch.optim.Optimizer, cfg: Config, trajs: list[Trajectory], device: torch.device, writer: SummaryWriter, it: int) -> None:
+def update(
+    policy: RunPolicy,
+    opt: torch.optim.Optimizer,
+    cfg: Config,
+    trajs: list[Trajectory],
+    device: torch.device,
+    writer: SummaryWriter,
+    it: int,
+    anchor: Rows | None = None,
+    warm: bool = False,
+) -> None:
     """One PPO update over every env's decisions whose successor is known;
-    each env's last decision of a run still going waits for the next batch."""
+    each env's last decision of a run still going waits for the next batch.
+    `warm` trains the value head alone; `anchor` rows add the imitation
+    loss at `cfg.imitate_coef`."""
     parts, advs = [], []
     for t in trajs:
         ready = len(t) if t.done and t.done[-1] else len(t) - 1
@@ -441,7 +470,15 @@ def update(policy: RunPolicy, opt: torch.optim.Optimizer, cfg: Config, trajs: li
             pg = -torch.min(ratio * a, ratio.clamp(1 - cfg.clip, 1 + cfg.clip) * a).mean()
             vf = 0.5 * (v - ret[idx]).pow(2).mean()
             ent = dist.entropy().mean()
-            loss = pg + cfg.value_coef * vf - cfg.entropy * ent
+            loss = cfg.value_coef * vf if warm else pg + cfg.value_coef * vf - cfg.entropy * ent
+            if anchor is not None and not warm and cfg.imitate_coef > 0:
+                pick = np.random.randint(len(anchor), size=cfg.minibatch)
+                a_floats, a_ids, a_option = next(batches(anchor, device, cfg.minibatch, pick))
+                with torch.autocast(device.type, dtype=torch.bfloat16, enabled=device.type == "cuda"):
+                    a_logits, _ = policy(a_floats, a_ids)
+                imitation = torch.nn.functional.cross_entropy(a_logits.float(), a_option)
+                loss = loss + cfg.imitate_coef * imitation
+                writer.add_scalar("loss/imitation", imitation.item(), it)
             opt.zero_grad()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(policy.parameters(), cfg.max_grad_norm)
