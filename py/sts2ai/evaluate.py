@@ -117,22 +117,34 @@ def easy(policy: Policy, device: torch.device, repeats: int = 2, setups: Path = 
     """Weak and normal fights of held-out winners, by act and kind
     (`a1_weak`, ...) and over all (`all`): the win rate, the HP the policy
     lost and the winner lost (both net of healing), the mean gap, the share
-    of fights the policy lost more HP in, and potions drunk per fight."""
+    of fights the policy lost more HP in, potions drunk per fight, and the
+    max HP each lost (Scrolls of Biting's Paper Cuts; negative when Feed
+    gains it). A line without `winner_max_hp_lost` counts the winner's as 0."""
     lines = [json.loads(line) for line in setups.read_text().splitlines() if line.strip()]
     per_fight: dict[int, list[End]] = defaultdict(list)
     for e in play(policy, device, repeats, "setups", seed=seed, setups=setups):
         per_fight[e.env].append(e)
-    groups: dict[str, list[tuple[float, float, float, float]]] = defaultdict(list)
+    groups: dict[str, list[tuple[float, ...]]] = defaultdict(list)
     for i, ends in per_fight.items():
         line = lines[i]
-        lost = float(np.mean([e.hp_lost for e in ends])) * line["max_hp"]
-        row = (float(np.mean([e.won for e in ends])), lost, float(line["winner_hp_lost"]), float(np.mean([e.potions_used for e in ends])))
+        # hp_frac and hp_lost are both over the max HP the fight ended at.
+        max_end = [line["hp"] / (e.hp_frac + e.hp_lost) for e in ends]
+        lost = float(np.mean([e.hp_lost * m for e, m in zip(ends, max_end)]))
+        max_lost = line["max_hp"] - float(np.mean(max_end))
+        row = (
+            float(np.mean([e.won for e in ends])),
+            lost,
+            float(line["winner_hp_lost"]),
+            float(np.mean([e.potions_used for e in ends])),
+            max_lost,
+            float(line.get("winner_max_hp_lost", 0)),
+        )
         act = 1 if line["game_floor"] <= 17 else 2 if line["game_floor"] <= 33 else 3
         groups[f"a{act}_{ends[0].kind.lower()}"].append(row)
         groups["all"].append(row)
     out = {}
     for name, rows in sorted(groups.items()):
-        won, ours, theirs, potions = (np.array(c) for c in zip(*rows))
+        won, ours, theirs, potions, max_ours, max_theirs = (np.array(c) for c in zip(*rows))
         out[name] = {
             "fights": len(rows),
             "win": float(won.mean()),
@@ -141,6 +153,8 @@ def easy(policy: Policy, device: torch.device, repeats: int = 2, setups: Path = 
             "gap": float((ours - theirs).mean()),
             "worse": float((ours > theirs + 0.5).mean()),
             "potions": float(potions.mean()),
+            "max_hp_lost": float(max_ours.mean()),
+            "winner_max_hp_lost": float(max_theirs.mean()),
         }
     return out
 
@@ -159,11 +173,11 @@ def main() -> None:
     policy = load_policy(args.checkpoint, device, args.old_vocab)
     policy.eval()
     if args.source == "easy":
-        print(f"{'':10s} {'fights':>6s} {'won':>6s} {'HP lost':>7s} {'winner':>6s} {'gap':>5s} {'worse':>6s} {'potions':>7s}")
+        print(f"{'':10s} {'fights':>6s} {'won':>6s} {'HP lost':>7s} {'winner':>6s} {'gap':>5s} {'worse':>6s} {'potions':>7s} {'max HP lost':>11s} {'winner':>6s}")
         for name, r in easy(policy, device, args.repeats, args.setups or EASY_HOLDOUT).items():
             print(
                 f"{name:10s} {r['fights']:6.0f} {r['win']:6.1%} {r['hp_lost']:7.1f} {r['winner_hp_lost']:6.1f} "
-                f"{r['gap']:+5.1f} {r['worse']:6.0%} {r['potions']:7.2f}"
+                f"{r['gap']:+5.1f} {r['worse']:6.0%} {r['potions']:7.2f} {r['max_hp_lost']:11.1f} {r['winner_max_hp_lost']:6.1f}"
             )
         return
     win, by_enc, kinds = evaluate(policy, device, args.repeats, args.source, args.recordings, acts=args.acts, setups=args.setups or HOLDOUT)

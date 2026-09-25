@@ -7,16 +7,16 @@
 One line per fight: the run as it stood when the fight began (`start`:
 deck, relics, potions, gold, ascension), `hp` and `max_hp`, the
 `encounter`, the `floor` in the generator's numbering (`game_floor` is the
-page's), whether it is the last act's `second` boss, and the HP the winner
-lost in it (`winner_hp_lost`). Elite and boss fights go to `train.jsonl`
-and `holdout.jsonl`, weak and normal ones to `easy-train.jsonl` and
-`easy-holdout.jsonl`. A page lists the final deck with the floor each card
-joined it, and per floor the cards gained, removed and
-upgraded, so the deck at a floor is the final one with the later changes
-undone. What the page leaves out stays approximate: potions are the ones
-the fight used, enchantments are the final ones, and a relic traded away
-is missing. Setups the sim cannot build (a card it does not have) are
-left out and counted.
+page's), whether it is the last act's `second` boss, and the HP and max HP
+the winner lost in it (`winner_hp_lost`, `winner_max_hp_lost`). Elite and
+boss fights go to `train.jsonl` and `holdout.jsonl`, weak and normal ones
+to `easy-train.jsonl` and `easy-holdout.jsonl`. A page lists the final
+deck with the floor each card joined it, and per floor the cards gained,
+removed and upgraded, so the deck at a floor is the final one with the
+later changes undone. What the page leaves out stays approximate: potions
+are the ones the fight used, enchantments are the final ones, and a relic
+traded away is missing. Setups the sim cannot build (a card it does not
+have) are left out and counted.
 
 Runs are split by player, so no player's style is in both files.
 """
@@ -119,6 +119,7 @@ def fights(page: dict, kinds: tuple[str, ...]) -> list[dict]:
                 # HP in minus HP out, after Burning Blood and any healing,
                 # as `End.hp_lost` counts it for the model.
                 "winner_hp_lost": before["currentHp"] - f["currentHp"],
+                "winner_max_hp_lost": before["maxHp"] - f["maxHp"],
             }
         )
     return out

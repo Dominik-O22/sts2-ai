@@ -213,6 +213,7 @@ def fights(run: dict, kinds: tuple[str, ...]) -> list[dict]:
                 "game_floor": f["floor"],
                 # HP in minus HP out, after Burning Blood, as in `sts2ai.setups`.
                 "winner_hp_lost": before["hp"] - f["hp"],
+                "winner_max_hp_lost": before["max_hp"] - f["max_hp"],
                 "turns": f["turns"],
                 "died": f is floors[-1] and not run["win"],
                 "unexplained": unexplained,
