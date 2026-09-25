@@ -172,6 +172,16 @@ impl VecEnv {
     /// n` (`sim::env::VecEnv::set_runs`). `choices` makes the run
     /// decisions: "random", "first", or "caller" (`run_waiting`,
     /// `observe_run`, `step_run`).
+    /// Log each run elite and boss fight as it starts, as a recorder
+    /// `start` record with the run's act (`take_fights` drains them).
+    fn log_fights(&mut self, on: bool) {
+        self.inner.log_fights(on);
+    }
+
+    fn take_fights(&mut self) -> Vec<String> {
+        self.inner.take_fights()
+    }
+
     #[pyo3(signature = (seed=0, asc=10, choices="random"))]
     fn use_runs(&mut self, py: Python<'_>, seed: u64, asc: u8, choices: &str) -> PyResult<()> {
         let choices = match choices {

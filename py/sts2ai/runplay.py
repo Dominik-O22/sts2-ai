@@ -17,9 +17,11 @@ drawn at random, with the policy's odds for each option.
 from __future__ import annotations
 
 import argparse
+import json
 import time
 from collections import Counter, defaultdict
 from pathlib import Path
+from typing import TextIO
 
 import numpy as np
 import torch
@@ -29,6 +31,7 @@ from sts2ai.env import End, Envs, RunFight, RunLayout
 from sts2ai.model import Policy, load_policy
 from sts2ai.runmodel import RunPolicy, load_run_policy
 from sts2ai.runtrain import RunLoop
+from sts2ai.setups import sim_floor
 
 NAMES = _sim.run_names()
 CARDS = ["-"] + _sim.game_ids()["card"]
@@ -106,6 +109,22 @@ class Picks:
         )
 
 
+def as_setup(start: dict) -> dict:
+    """A run fight's start record (`log_fights`) as a setup line, its
+    floor in the generator's numbering and the last act's second boss
+    marked, as `sts2ai.setups` writes played runs' fights."""
+    boss = start["room"] == "Boss"
+    return {
+        "start": start,
+        "hp": start["hp"],
+        "max_hp": start["max_hp"],
+        "encounter": start["encounter"],
+        "floor": sim_floor(start["floor"], boss),
+        "second": boss and start["floor"] == 49,
+        "game_floor": start["floor"],
+    }
+
+
 def play(
     combat: Policy,
     device: torch.device,
@@ -117,10 +136,13 @@ def play(
     run_policy: RunPolicy | None,
     picks: Picks | None,
     drain: bool = True,
+    fights_out: TextIO | None = None,
 ) -> tuple[list[End], list[RunFight], int, int, float]:
     """Plays until each env has finished `per_env` runs or `minutes` pass.
     Returns every fight that ended, every run that ended, the combat batch
-    steps and run decisions taken, and the seconds spent."""
+    steps and run decisions taken, and the seconds spent. With `fights_out`,
+    each elite and boss fight as it starts is written there as a setup
+    (`sts2ai.setups`' format, `evaluate --source setups` plays them)."""
     envs.use_runs(seed, choices="caller" if run_policy else choices)
     left = set(range(seed, seed + per_env * envs.n))
     fights: list[End] = []
@@ -140,8 +162,12 @@ def play(
 
     loop = RunLoop(combat, device, envs, drain)
     start = time.perf_counter()
+    envs.sim.log_fights(fights_out is not None)
     while left and time.perf_counter() - start < minutes * 60:
         fights += loop.step(decide, ended)
+        if fights_out is not None:
+            for record in envs.sim.take_fights():
+                fights_out.write(json.dumps(as_setup(json.loads(record))) + "\n")
     return fights, runs, loop.combat_steps, loop.decisions, time.perf_counter() - start
 
 
@@ -193,6 +219,7 @@ def main() -> None:
     ap.add_argument("--choices", choices=("random", "first"), default="random", help="run decisions made in the sim, without --run-policy")
     ap.add_argument("--run-policy", type=Path, default=None, help="run policy checkpoint (sts2ai.runtrain), greedy")
     ap.add_argument("--show", type=int, default=0, help="print this many run decisions with the policy's odds")
+    ap.add_argument("--fights-out", type=Path, default=None, help="write each elite and boss fight's start here as a setup")
     ap.add_argument("--no-drain", action="store_true", help="answer one round of run decisions per combat step, not all (RunLoop)")
     args = ap.parse_args()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -200,7 +227,12 @@ def main() -> None:
     run_policy = load_run_policy(args.run_policy, device)[0].eval() if args.run_policy else None
     envs = Envs(args.envs, seed=args.seed)
     picks = Picks(RunLayout.load(), args.show) if run_policy else None
-    fights, runs, steps, decisions, seconds = play(combat, device, envs, args.seed, args.runs_per_env, args.minutes, args.choices, run_policy, picks, not args.no_drain)
+    fights_out = args.fights_out.open("w") if args.fights_out else None
+    fights, runs, steps, decisions, seconds = play(
+        combat, device, envs, args.seed, args.runs_per_env, args.minutes, args.choices, run_policy, picks, not args.no_drain, fights_out
+    )
+    if fights_out is not None:
+        fights_out.close()
     report(fights, runs, args.seed, args.seed + args.runs_per_env * args.envs, steps, decisions, args.envs, seconds)
     if picks:
         picks.report()

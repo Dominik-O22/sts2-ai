@@ -283,6 +283,9 @@ struct Slot {
     resets: usize,
     /// In run mode, the run whose fight `combat` is.
     run: Option<RunSlot>,
+    /// When on (`VecEnv::log_fights`), each run elite and boss fight as it
+    /// starts, in the recorder's `start` format with the run's act.
+    fights: Option<Vec<String>>,
 }
 
 /// Who makes a run-mode slot's run decisions.
@@ -600,6 +603,13 @@ impl Slot {
     }
 
     fn start(&mut self, setup: FightSetup) {
+        if let (Some(log), Some(run)) = (self.fights.as_mut(), self.run.as_ref()) {
+            if matches!(setup.encounter.kind(), Kind::Elite | Kind::Boss) {
+                let mut start = setup.run_json();
+                start["act"] = (run.run.state.act as u32).into();
+                log.push(start.to_string());
+            }
+        }
         self.setup = setup;
         self.resets += 1;
         self.steps = 0;
@@ -670,7 +680,7 @@ impl VecEnv {
                 let mut rng = Rng::new(seed.wrapping_mul(0x9E37_79B9).wrapping_add(i as u64));
                 let setup = generate(&mut rng, 1, cfg.asc);
                 let combat = setup.combat(0);
-                Slot { base: Baseline::of(&combat), combat, setup, steps: 0, rng, resets: 0, run: None }
+                Slot { base: Baseline::of(&combat), combat, setup, steps: 0, rng, resets: 0, run: None, fights: None }
             })
             .collect();
         for (i, s) in slots.iter_mut().enumerate() {
@@ -726,6 +736,19 @@ impl VecEnv {
     /// decisions made by `choices`, a fresh run from the next seed index
     /// after each ends (`RunSlot`). Starts every env's first run; under
     /// `RunChoices::Caller` each then waits at its first decision.
+    /// Log each run elite and boss fight as it starts (`take_fights`), or
+    /// stop and drop the log.
+    pub fn log_fights(&mut self, on: bool) {
+        for s in &mut self.slots {
+            s.fights = on.then(Vec::new);
+        }
+    }
+
+    /// The fights logged since the last call, drained.
+    pub fn take_fights(&mut self) -> Vec<String> {
+        self.slots.iter_mut().filter_map(|s| s.fights.as_mut()).flat_map(std::mem::take).collect()
+    }
+
     pub fn set_runs(&mut self, asc: Ascension, base: u64, choices: RunChoices) {
         self.fixed.clear();
         let n = self.slots.len();
