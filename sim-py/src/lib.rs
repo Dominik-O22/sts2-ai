@@ -206,11 +206,11 @@ impl VecEnv {
         Ok(())
     }
 
-    /// Start a `share` of the runs that start from now on from winners'
-    /// runs: each history file of `runs` walked to the entrances of acts 2
-    /// and 3 it reaches faithful to its record (`sim::history::entrances`).
-    /// Returns how many runs each start point holds, in `start_points()`
-    /// order.
+    /// Start a `share` of the runs that start from now on with winners'
+    /// players, each in a fresh run: the player of each history file of
+    /// `runs` at the entrances of acts 2 and 3, where its rooms so far
+    /// match the record (`sim::history::entrances`). Returns how many
+    /// players each start point holds, in `start_points()` order.
     fn use_winner_starts(&mut self, py: Python<'_>, runs: Vec<String>, share: f32) -> PyResult<Vec<usize>> {
         let runs = py.detach(|| sim::history::winner_starts(&runs)).map_err(pyo3::exceptions::PyValueError::new_err)?;
         Ok(self.inner.set_winner_starts(runs, share).to_vec())

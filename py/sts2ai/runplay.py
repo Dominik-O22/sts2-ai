@@ -6,7 +6,7 @@ by a run policy (`sts2ai.runtrain`) through `step_run` (docs/run-env.md).
     uv run python -m sts2ai.runplay runs/<run>/latest.pt --choices first
     uv run python -m sts2ai.runplay runs/<run>/latest.pt --run-policy runs/run-1/latest.pt --show 8
     uv run python -m sts2ai.runplay runs/<run>/latest.pt --run-policy runs/run-1/latest.pt --search 256
-    uv run python -m sts2ai.runplay runs/<run>/latest.pt --run-policy runs/run-1/latest.pt --win-starts 1
+    uv run python -m sts2ai.runplay runs/<run>/latest.pt --run-policy runs/run-1/latest.pt --win-starts 1 --win-holdout
 
 With `--search N` the fights of `--search-kinds` (elites and bosses by
 default) are played as the live pilot plays them (`sts2ai.play --search
@@ -21,8 +21,9 @@ toward throughput. With a run policy it also prints what the policy
 picks at each kind of decision, and `--show` prints that many decisions,
 drawn at random, with the policy's odds for each option.
 
-With `--win-starts SHARE` that share of the runs starts from a winner's
-run at the entrance of act 2 or 3 (`runtrain --win-starts`), and the
+With `--win-starts SHARE` that share of the runs starts at the entrance
+of act 2 or 3 with a winner's player there (`runtrain --win-starts`), the
+train players' or with `--win-holdout` the held-out players', and the
 report adds a line per start point.
 """
 
@@ -43,7 +44,7 @@ from sts2ai.env import START_POINTS, End, Envs, RunFight, RunLayout
 from sts2ai.model import Policy, load_policy
 from sts2ai.runmodel import RunPolicy, load_run_policy
 from sts2ai.runtrain import RunLoop
-from sts2ai.setups import TRACKER, sim_floor, train_runs
+from sts2ai.setups import TRACKER, sim_floor, split_runs
 
 NAMES = _sim.run_names()
 CARDS = ["-"] + _sim.game_ids()["card"]
@@ -154,6 +155,7 @@ def play(
     groups: int = 4,
     win_starts: float = 0.0,
     win_runs: Path = TRACKER,
+    win_holdout: bool = False,
 ) -> tuple[list[End], list[RunFight], RunLoop, float]:
     """Plays until each env has finished `per_env` runs or `minutes` pass.
     Returns every fight that ended, every run that ended, the loop (its
@@ -161,9 +163,10 @@ def play(
     and the seconds spent. With `fights_out`,
     each elite and boss fight as it starts is written there as a setup
     (`sts2ai.setups`' format, `evaluate --source setups` plays them).
-    `win_starts` of the runs start from winners' runs (`Envs.use_winner_starts`)."""
+    `win_starts` of the runs start with winners' players (`Envs.use_winner_starts`),
+    the held-out players' with `win_holdout`."""
     if win_starts > 0:
-        held = envs.use_winner_starts(train_runs(win_runs), win_starts)
+        held = envs.use_winner_starts(split_runs(win_runs, win_holdout), win_starts)
         print("winners' starts: " + ", ".join(f"{n} at {p}" for p, n in zip(START_POINTS, held) if n))
     envs.use_runs(seed, choices="caller" if run_policy else choices)
     left = set(range(seed, seed + per_env * envs.n))
@@ -257,6 +260,7 @@ def main() -> None:
     ap.add_argument("--groups", type=int, default=4, help="draw-pile shuffles the search copies are split over")
     ap.add_argument("--win-starts", type=float, default=0.0, help="share of runs started from winners' act 2 and 3 entrances")
     ap.add_argument("--win-runs", type=Path, default=TRACKER, help="winners' history files; the train players' are used")
+    ap.add_argument("--win-holdout", action="store_true", help="start with the held-out players' winners instead")
     args = ap.parse_args()
     # Ids the combat checkpoint never saw get fresh rows (`vocab.remap_state`),
     # drawn from here: unseeded, two plays of one seed differ.
@@ -284,6 +288,7 @@ def main() -> None:
         args.groups,
         args.win_starts,
         args.win_runs,
+        args.win_holdout,
     )
     if fights_out is not None:
         fights_out.close()

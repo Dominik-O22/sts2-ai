@@ -218,17 +218,6 @@ impl Run {
         run
     }
 
-    /// The run `state` stands in, at the entrance of its act `state.act`
-    /// as `move_on` leaves a run there: the act's map made, before its
-    /// Ancient. The history walk hands out winners' runs this way
-    /// (`history::entrances`), which play on with their own seed, streams
-    /// and plan.
-    pub fn at_entrance(state: RunState) -> Self {
-        let map = ActMap::generate(state.rngs.seed, state.plan.acts[state.act].act, state.ascension);
-        let point = map.start;
-        Self { state, map, point, fighting: None, fights: 0, unported: BTreeMap::new(), passed: Vec::new() }
-    }
-
     /// Whether a fight has been handed out and not yet fought.
     pub fn fighting(&self) -> bool {
         self.fighting.is_some()

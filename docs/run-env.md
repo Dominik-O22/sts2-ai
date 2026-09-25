@@ -387,8 +387,8 @@ skilled human could know.
   lookahead that clones the exact streams.
 - How a fight goes never moves the game's run streams (the Niche draws a
   fight makes depend on its encounter alone), so combat play cannot steer
-  a run's rolls. Training seeds are fresh every run, but for runs started
-  from winners' runs (Winners' starts), which replay a few hundred seeds.
+  a run's rolls. Training seeds are fresh every run, those started with a
+  winner's player (Winners' starts) among them.
 - Any search (combat's turn search, a future run-level one) resamples: the
   combat `Forks` already reshuffle the draw pile and roll their own dice.
 - The run observation has a test
@@ -399,9 +399,9 @@ skilled human could know.
   does the same for every decision two recorded runs put, of all nine
   kinds: each encodes the same from a copy of the run whose seed, streams
   and plan are another seed's (the acts' bosses kept, which the map shows).
-  `history::tests::winner_starts_hold_no_hidden_information` plays runs on
-  from winners' act entrances to their end and checks every decision on
-  the way the same way.
+  `history::tests::winner_starts_hold_no_hidden_information` plays fresh
+  runs on from winners' players at the act entrances to their end and
+  checks every decision on the way the same way.
 
 The exact streams are for checking the port against real runs.
 
@@ -476,61 +476,68 @@ offer, 252 that offer a card the sim cannot play.
 
 Runs from floor 1 rarely reach act 3, so PPO sees few act 2 and 3
 decisions whose payoff is a win. `history::entrances` walks a winner's
-run as `imitate` does and keeps the run as it stands at the entrance of
-act 2 and of act 3: the act's map made, before its Ancient, where
-`Run::move_on` leaves a run after a boss and `StartPoint::Entrance`
-stands. A run from there plays on with the winner's own seed, streams and
-plan, as if the policy had made the winner's choices so far. The
-policy then makes the Ancient's pick too.
+run as `imitate` does and keeps the player as they stand at the entrance
+of act 2 and of act 3, before the act's Ancient (`StartPoint::Entrance`).
+Run training starts a fresh run there with that player
+(`Run::start_at`, as for the env's own states): a new seed, map, plan
+and streams every time, so a state's future is never the same twice and
+cannot be learned by heart. The policy makes the Ancient's pick too.
 
-An entrance is kept only if every floor before it was faithful to the
-record, as `imitate` judges a floor (its room and every one before it
-the record's, what it drew the record's, every recorded choice on offer,
-the player left as the record has them). No floor before differed, so
-the Rewards stream matched the game's on every one of them. What the
-fights did comes from the record, as in the history check: HP, potions
-used, gold stolen. The relics' combat counters (Pen Nib, Ember Tea's
-charges) stay as the walk leaves them, and the potions held are the
-port's (a page keeps no potion offers).
+The walk need not follow the game's streams, only the player. An
+entrance is kept when every room before it was the record's (so the
+events seen and the unknown-room odds are the game's) and the combat sim
+can build a fight with the player. The walk sets the player back to the
+record after every floor it does not match, so the player kept is the
+record's: HP, max HP, gold, deck, relics and potions. The relics'
+counters, the card and potion odds and the removals bought are the
+port's, as the walk kept them; a relic the walk had to add back starts
+its counter afresh. A page keeps no potion offers, so the potions are
+those the port kept. A record does not split HP between a fight and its
+rewards, and the walk takes a fight's HP from the record.
 
-Over the train players' runs (`setups.train_runs`, 972 files,
-2026-09-25): 320 act 2 entrances and 26 act 3 entrances; holdout, 73 and
-11. Most runs stop being faithful on a deck that differs from the page's
-(a page drops transforms and enchantments), a gold count, or an ancient
-whose recorded pick the port did not offer; unported relics
-(Kaleidoscope, Black Star, Toy Box) and events end others. A looser
-rule that only asks the rooms to match, with the player set back to the
-record after each floor that differs, would keep about 880 and 820.
+Over the tracker wins (2026-09-25), 1,188 of 1,193 files walk:
 
-`VecEnv::set_winner_starts(runs, share)` starts that share of the runs
-from them (`Began::Winner`, `"win"` in Python's `RunFight.source`): an
-entrance holding any, evenly, then one of its runs. The rest start as
-`set_starts` says. `runtrain --win-starts SHARE` and `runplay
+| Players | files | act 2 entrance | act 3 entrance |
+|---|---|---|---|
+| train (`setups.split_runs`) | 972 | 832 | 630 |
+| holdout | 221 | 196 | 165 |
+
+Of the 1,188, 276 meet a room that differs from the record somewhere
+(94 of them after act 3's entrance). 211 whose rooms all match lose one
+entrance or both to a deck the sim cannot fight with: Splash (58
+entrances) and other characters' cards that Kaleidoscope, Splash's picks
+or Colorful Philosophers add.
+
+`VecEnv::set_winner_starts(players, share)` starts that share of the
+runs with them (`Began::Winner`, `"win"` in Python's `RunFight.source`):
+an entrance holding any, evenly, then one of its players. The rest start
+as `set_starts` says. `runtrain --win-starts SHARE` and `runplay
 --win-starts SHARE` load the train players' runs from `--win-runs` (the
-tracker directory); runtrain's log reports their wins apart ("act 2
-entrance win") and the start curriculum ignores them.
+tracker directory), and `runplay --win-holdout` the held-out players'.
+runtrain's log reports their wins apart ("act 2 entrance win") and the
+start curriculum ignores them.
 
-`env::tests::winner_starts_play_the_forward_run` plays runs from the
-entrances of a recorded win under random caller choices and replays each
-with `forward::play_on` from the captured state with the same answers
-and fights: the same fight setups and the same end.
-
-These seeds repeat. A policy cannot read a state's seed or plan, but it
-sees the same few hundred states many times, and each state's future
-under a choice is fixed, so it could learn those futures by heart. The
-holdout players' entrances are the check.
+`env::tests::winner_starts_play_the_forward_run` plays runs started with
+a recorded win's players under random caller choices and replays each
+with `forward::play_on` from `Run::start_at` with the same seed, player,
+answers and fights: the same fight setups and the same end.
 
 gen5 greedy playing the fights, the winners' clone (`imitate-2`)
-greedy making the run decisions, 768 runs, 2026-09-25:
+greedy making the run decisions, 768 runs per row, 2026-09-25:
 
-| Start | runs | won | reached act 3 | floor mean |
-|---|---|---|---|---|
-| act 2 entrance | 375 | 3.2% | 41.6% | 36.1 |
-| act 3 entrance | 393 | 18.8% | 100% | 48.0 |
+| Start | players | runs | won | reached act 3 | floor mean |
+|---|---|---|---|---|---|
+| act 2 entrance | train | 375 | 3.5% | 34.7% | 35.0 |
+| act 3 entrance | train | 393 | 8.1% | 100% | 46.5 |
+| act 2 entrance | holdout | 375 | 2.1% | 37.1% | 35.4 |
+| act 3 entrance | holdout | 393 | 6.1% | 100% | 45.8 |
 
-Act 3's bosses won 51% of their fights, act 2's 32%; most runs were lost
-to Test Subject (156), Aeonglass (119) and the Queen (95). 15 runs ended
-stuck on a Splash.
+Act 3's bosses won 42% of their fights with the train players and 34%
+with the holdout players; Aeonglass, Test Subject and the Queen end most
+runs. An earlier cut kept the winners' own seeds, and only entrances
+whose floors all matched the record (320 and 26 train players): 3.2%
+and 18.8%. Its 26 act 3 entrances were the few runs the port follows
+floor for floor, not a sample of the rest.
 
 ### Exactness
 

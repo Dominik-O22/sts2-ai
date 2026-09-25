@@ -17,10 +17,10 @@ next decision, which waits for the next batch.
 
 With `--start-full` below 1 the other runs start later in a run
 (`Curriculum`); the log splits floors and wins by where runs started.
-With `--win-starts SHARE` that share of the runs starts from a winner's
-run at the entrance of act 2 or 3 (evenly), walked there from the
-train players' history files in `--win-runs` and played on with its own
-seed (docs/run-env.md, Winners' starts); the rest start as before.
+With `--win-starts SHARE` that share of the runs starts at the entrance
+of act 2 or 3 (evenly) with a winner's player there, from the train
+players' history files in `--win-runs`, in a fresh run (docs/run-env.md,
+Winners' starts); the rest start as before.
 
 With `--imitate TRAIN_ROWS` the policy first clones winners' decisions
 (`sts2ai.imitation`), checked against the `holdout.npz` beside the rows,
@@ -48,7 +48,7 @@ from sts2ai.imitation import DECISIONS, Rows, batches, pretrain
 from sts2ai.model import Policy, load_policy, masked_logits
 from sts2ai.runmodel import RunArch, RunPolicy, load_run_policy, save_run_policy
 from sts2ai.search import choose
-from sts2ai.setups import TRACKER, train_runs
+from sts2ai.setups import TRACKER, split_runs
 
 FLOORS = 49
 
@@ -225,9 +225,10 @@ class Config:
     # act 1: the clone wins 2.7% with searched fights, run-7 and run-9 0.4
     # to 1.3%. Lower puts the weight on winning.
     floor_weight: float = 1.0
-    # Share of runs that start from a winner's run at the entrance of act 2
-    # or 3, from the train players' history files in `win_runs`; the
-    # others start as the curriculum says. 0 turns it off.
+    # Share of runs that start at the entrance of act 2 or 3 with a
+    # winner's player there, from the train players' history files in
+    # `win_runs`, in a fresh run; the others start as the curriculum says.
+    # 0 turns it off.
     win_starts: float = 0.0
     win_runs: str = str(TRACKER)
 
@@ -384,7 +385,7 @@ def train(combat_path: Path, run_dir: Path, cfg: Config, resume: Path | None) ->
             return
     envs = Envs(cfg.envs, seed=cfg.seed)
     if cfg.win_starts > 0:
-        winners = envs.use_winner_starts(train_runs(Path(cfg.win_runs)), cfg.win_starts)
+        winners = envs.use_winner_starts(split_runs(Path(cfg.win_runs)), cfg.win_starts)
         print("winners' starts: " + ", ".join(f"{n} at {p}" for p, n in zip(START_POINTS, winners) if n), flush=True)
     envs.use_runs(cfg.seed * 1_000_000, choices="caller")
     writer = SummaryWriter(str(run_dir))
