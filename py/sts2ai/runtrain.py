@@ -42,6 +42,7 @@ from sts2ai.env import START_POINTS, End, Envs, RunFight, RunLayout
 from sts2ai.imitation import DECISIONS, Rows, batches, pretrain
 from sts2ai.model import Policy, load_policy, masked_logits
 from sts2ai.runmodel import RunArch, RunPolicy, load_run_policy, save_run_policy
+from sts2ai.search import choose
 
 FLOORS = 49
 
@@ -66,13 +67,30 @@ class RunLoop:
     the whole batch with the combat policy, greedy. With `drain` it answers
     until no env waits (docs/run-env.md), so every combat row is live;
     without, it answers one round, and the envs still waiting sit the
-    combat step out."""
+    combat step out.
 
-    def __init__(self, combat: Policy, device: torch.device, envs: Envs, drain: bool = True):
+    With `search` copies, fights of `search_kinds` play the pilot's turn
+    search instead (`search.choose`, `groups` shuffles, the copies' dice
+    drawn from `seed` and the step), all of them in one batch; the others
+    stay greedy."""
+
+    def __init__(
+        self,
+        combat: Policy,
+        device: torch.device,
+        envs: Envs,
+        drain: bool = True,
+        search: int = 0,
+        search_kinds: frozenset[str] = frozenset({"Elite", "Boss"}),
+        groups: int = 4,
+        seed: int = 0,
+    ):
         self.combat, self.device, self.envs, self.drain = combat, device, envs, drain
+        self.search, self.search_kinds, self.groups, self.seed = search, search_kinds, groups, seed
         self.autocast = torch.autocast(device.type, dtype=torch.bfloat16, enabled=device.type == "cuda")
         self.decisions = 0
         self.combat_steps = 0
+        self.searched = 0
 
     @torch.no_grad()
     def step(self, decide: Decide, on_run_end: OnRunEnd) -> list[End]:
@@ -91,12 +109,27 @@ class RunLoop:
         with self.autocast:
             logits, _ = self.combat(floats, ids)
         actions = masked_logits(logits.float(), mask).argmax(dim=1).cpu().numpy()
+        if self.search:
+            self.overrule(actions)
         fights = envs.step(actions)
         self.combat_steps += 1
         for e in fights:
             if e.run and e.run.end:
                 on_run_end(e.env, e.run)
         return fights
+
+    def overrule(self, actions: np.ndarray) -> None:
+        """Replace the greedy `actions` by the turn search's picks in the
+        envs fighting a searched kind with more than one legal action."""
+        envs = self.envs
+        waiting = set(envs.run_waiting())
+        choice = np.flatnonzero(envs.mask.sum(axis=1) > 1)
+        roots = [int(i) for i in choice if i not in waiting and envs.sim.fight(int(i))[1] in self.search_kinds]
+        if not roots:
+            return
+        seed = self.seed << 32 | self.combat_steps
+        actions[roots] = choose(self.combat, self.device, envs.sim, roots, envs.mask[roots], actions[roots], self.search, self.groups, seed)
+        self.searched += len(roots)
 
 
 def policy_decide(policy: RunPolicy, device: torch.device, greedy: bool) -> Decide:

@@ -5,6 +5,13 @@ by a run policy (`sts2ai.runtrain`) through `step_run` (docs/run-env.md).
     uv run python -m sts2ai.runplay runs/<run>/latest.pt --envs 256 --runs-per-env 2
     uv run python -m sts2ai.runplay runs/<run>/latest.pt --choices first
     uv run python -m sts2ai.runplay runs/<run>/latest.pt --run-policy runs/run-1/latest.pt --show 8
+    uv run python -m sts2ai.runplay runs/<run>/latest.pt --run-policy runs/run-1/latest.pt --search 256
+
+With `--search N` the fights of `--search-kinds` (elites and bosses by
+default) are played as the live pilot plays them (`sts2ai.play --search
+N`): a turn search of N copies at every decision with more than one legal
+action, the searches of every env in such a fight in one batch
+(`RunLoop`). It is much slower per run.
 
 Every env plays runs back to back. The numbers cover each env's first
 `--runs-per-env` runs, so long runs count as often as short ones; the
@@ -137,10 +144,14 @@ def play(
     picks: Picks | None,
     drain: bool = True,
     fights_out: TextIO | None = None,
-) -> tuple[list[End], list[RunFight], int, int, float]:
+    search: int = 0,
+    search_kinds: frozenset[str] = frozenset({"Elite", "Boss"}),
+    groups: int = 4,
+) -> tuple[list[End], list[RunFight], RunLoop, float]:
     """Plays until each env has finished `per_env` runs or `minutes` pass.
-    Returns every fight that ended, every run that ended, the combat batch
-    steps and run decisions taken, and the seconds spent. With `fights_out`,
+    Returns every fight that ended, every run that ended, the loop (its
+    counts of combat batch steps, run decisions and searched decisions),
+    and the seconds spent. With `fights_out`,
     each elite and boss fight as it starts is written there as a setup
     (`sts2ai.setups`' format, `evaluate --source setups` plays them)."""
     envs.use_runs(seed, choices="caller" if run_policy else choices)
@@ -160,7 +171,7 @@ def play(
             picks.add(floats, ids, torch.softmax(logits, 1).cpu().numpy(), options)
         return options
 
-    loop = RunLoop(combat, device, envs, drain)
+    loop = RunLoop(combat, device, envs, drain, search, search_kinds, groups, seed)
     start = time.perf_counter()
     envs.sim.log_fights(fights_out is not None)
     while left and time.perf_counter() - start < minutes * 60:
@@ -168,10 +179,10 @@ def play(
         if fights_out is not None:
             for record in envs.sim.take_fights():
                 fights_out.write(json.dumps(as_setup(json.loads(record))) + "\n")
-    return fights, runs, loop.combat_steps, loop.decisions, time.perf_counter() - start
+    return fights, runs, loop, time.perf_counter() - start
 
 
-def report(fights: list[End], runs: list[RunFight], seed: int, last: int, steps: int, decisions: int, n: int, seconds: float) -> None:
+def report(fights: list[End], runs: list[RunFight], seed: int, last: int, loop: RunLoop, n: int, seconds: float) -> None:
     counted = [r for r in runs if r.seed < last]
     seeds = {r.seed for r in counted}
     in_counted = [e for e in fights if e.run and e.run.seed in seeds]
@@ -201,11 +212,15 @@ def report(fights: list[End], runs: list[RunFight], seed: int, last: int, steps:
     for act in sorted({a for a, _ in table}):
         cells = [(k, table[(act, k)]) for k in ("Weak", "Normal", "Elite", "Boss") if (act, k) in table]
         print(f"  act {act + 1}: " + "   ".join(f"{k.lower():6s} {np.mean(w):6.1%} {sum(w):5d}/{len(w):<5d}" for k, w in cells))
+    elites = [e.won for e in in_counted if e.kind == "Elite"]
+    bosses = " ".join(f"act {a + 1} {sum(table[(a, 'Boss')])}" for a in range(3))
+    print(f"  elites won {np.mean(elites or [0]):.1%} of {len(elites)}; bosses beaten: {bosses} (of {len(counted)} runs)")
     losses = Counter(e.encounter for e in in_counted if not e.won)
     print("  most runs lost to: " + ", ".join(f"{enc} {k}" for enc, k in losses.most_common(8)))
 
-    rate = f"{steps * n / seconds:,.0f} combat steps/s, {decisions / seconds:,.0f} run decisions/s, {len(runs) / seconds * 3600:,.0f} runs/hour"
-    print(f"throughput: {rate} ({seconds:.0f} s, {n} envs)")
+    rate = f"{loop.combat_steps * n / seconds:,.0f} combat steps/s, {loop.decisions / seconds:,.0f} run decisions/s, {len(runs) / seconds * 3600:,.0f} runs/hour"
+    searched = f", {loop.searched} decisions searched" if loop.search else ""
+    print(f"throughput: {rate} ({seconds:.0f} s, {n} envs{searched})")
 
 
 def main() -> None:
@@ -221,6 +236,9 @@ def main() -> None:
     ap.add_argument("--show", type=int, default=0, help="print this many run decisions with the policy's odds")
     ap.add_argument("--fights-out", type=Path, default=None, help="write each elite and boss fight's start here as a setup")
     ap.add_argument("--no-drain", action="store_true", help="answer one round of run decisions per combat step, not all (RunLoop)")
+    ap.add_argument("--search", type=int, default=0, help="turn search with this many sim copies per decision, as the pilot (0: greedy)")
+    ap.add_argument("--search-kinds", default="Elite,Boss", help="fight kinds searched (Weak,Normal,Elite,Boss); the rest greedy")
+    ap.add_argument("--groups", type=int, default=4, help="draw-pile shuffles the search copies are split over")
     args = ap.parse_args()
     # Ids the combat checkpoint never saw get fresh rows (`vocab.remap_state`),
     # drawn from here: unseeded, two plays of one seed differ.
@@ -231,12 +249,25 @@ def main() -> None:
     envs = Envs(args.envs, seed=args.seed)
     picks = Picks(RunLayout.load(), args.show) if run_policy else None
     fights_out = args.fights_out.open("w") if args.fights_out else None
-    fights, runs, steps, decisions, seconds = play(
-        combat, device, envs, args.seed, args.runs_per_env, args.minutes, args.choices, run_policy, picks, not args.no_drain, fights_out
+    fights, runs, loop, seconds = play(
+        combat,
+        device,
+        envs,
+        args.seed,
+        args.runs_per_env,
+        args.minutes,
+        args.choices,
+        run_policy,
+        picks,
+        not args.no_drain,
+        fights_out,
+        args.search,
+        frozenset(args.search_kinds.split(",")),
+        args.groups,
     )
     if fights_out is not None:
         fights_out.close()
-    report(fights, runs, args.seed, args.seed + args.runs_per_env * args.envs, steps, decisions, args.envs, seconds)
+    report(fights, runs, args.seed, args.seed + args.runs_per_env * args.envs, loop, args.envs, seconds)
     if picks:
         picks.report()
 
