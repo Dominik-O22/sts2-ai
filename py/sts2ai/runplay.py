@@ -222,6 +222,9 @@ def main() -> None:
     ap.add_argument("--fights-out", type=Path, default=None, help="write each elite and boss fight's start here as a setup")
     ap.add_argument("--no-drain", action="store_true", help="answer one round of run decisions per combat step, not all (RunLoop)")
     args = ap.parse_args()
+    # Ids the combat checkpoint never saw get fresh rows (`vocab.remap_state`),
+    # drawn from here: unseeded, two plays of one seed differ.
+    torch.manual_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     combat = load_policy(args.checkpoint, device, args.old_vocab).eval()
     run_policy = load_run_policy(args.run_policy, device)[0].eval() if args.run_policy else None
