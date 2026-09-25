@@ -56,7 +56,7 @@ pub const N_ACTIONS: usize = A_SKIP + 1;
 // Float feature layout.
 pub const F_GLOBAL: usize = 0;
 /// Scalars, then a one-hot of the pending choice's kind (`THEN_KINDS`).
-pub const GLOBAL_LEN: usize = 22 + THEN_KINDS;
+pub const GLOBAL_LEN: usize = 24 + THEN_KINDS;
 const THEN_KINDS: usize = 10;
 pub const F_PLAYER_POWERS: usize = F_GLOBAL + GLOBAL_LEN;
 pub const F_HAND: usize = F_PLAYER_POWERS + N_POWERS;
@@ -322,8 +322,13 @@ pub fn encode(c: &Combat, floats: &mut [f32], ids: &mut [i64], mask_out: &mut [b
     let incoming: i32 = c.living_enemies().map(|i| shown_intents(c, i).iter().map(|&(d, h)| d * h as i32).sum::<i32>()).sum();
     g[20] = incoming as f32 / 50.0;
     g[21] = (incoming - p.creature.block).max(0) as f32 / 50.0;
+    // HP and potions at the fight's start. The reward prices the HP a win
+    // ends with, so what a fight is still worth depends on what it has
+    // cost so far; without these the value head had to guess it.
+    g[22] = c.stats.player_start_hp as f32 / 100.0;
+    g[23] = c.stats.start_potions as f32 / MAX_POTIONS as f32;
     if let Some(p) = &c.pending {
-        g[22 + then_kind(p.then)] = 1.0;
+        g[24 + then_kind(p.then)] = 1.0;
     }
 
     powers_into(c, CreatureRef::Player, &mut floats[F_PLAYER_POWERS..F_HAND]);
