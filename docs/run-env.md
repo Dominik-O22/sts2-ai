@@ -320,11 +320,19 @@ fixed-width tokens with a presence flag, so a batch is one array
   its kind (`OptionKind`: take a card, skip, keep a potion, heal, smith,
   buy a relic, remove through a deck pick, leave the shop, and so on), the
   cards, enchantment, relic or potion it names, the price, and for a map
-  step the point's type, the fewest and most of each point type on paths
-  through it to the boss, and the rows to the nearest rest site and shop.
-  An event option carries its event, page and key hashed into 1024
-  buckets, which stays stable as events are ported, and the items its
-  layout drew.
+  step the point's type, its map column, the fewest and most of each
+  point type on paths through it to the boss, and the rows to the nearest
+  rest site and shop. An event option carries its event, page and key
+  hashed into 1024 buckets, which stays stable as events are ported, and
+  the items its layout drew;
+- at a map step, the map ahead (ids only, after the tokens): every point
+  the options reach short of the boss, on a grid of 15 rows from the
+  options' row by the map's 7 columns, each with the type the map shows
+  and a bit per link to the row above (a point leads only to the column
+  left of it, its own or the one right). A `?` stays `Unknown`: what it
+  holds is rolled as the player enters it, from the run's stream, and
+  never reaches the map
+  (`runobs::tests::an_unknown_room_encodes_as_unknown`).
 
 Ids index as the combat model and `sts2ai.deckvalue` do (sim id + 1), and
 the relics the combat sim leaves out come after the sim's (`RUN_RELICS`).
@@ -342,7 +350,20 @@ later; it needs the run value head to be good first.
 The run policy (`sts2ai.runmodel`) is a small transformer over the tokens
 (128 wide, 2 layers), a pointer head scoring each option token against
 the global token, and a value head on the global token. Its card
-embedding starts from the combat checkpoint's. A run checkpoint records
+embedding starts from the combat checkpoint's.
+
+At a map step a map encoder reads the map ahead backwards, one map row
+at a time from the row under the boss to the options' row. A node's
+reading mixes its room type, its row and the run's state (the global
+token plus the mean deck and relic tokens) with the max and the mean of
+its children's readings: the max stands for the best the player can
+still choose at a fork, the mean for what the paths average. Shared nodes
+are read once, so remerges cost nothing, and the order of rooms
+survives: two fights, rest, elite reads differently from two fights,
+elite, rest. Each path option's token gains its node's reading before
+the transformer. The per-row loop runs in float32 with no wait on the
+GPU, and the forward waits on the GPU once per call for the token
+positions and map rows the batch uses. A run checkpoint records
 its arch, the run layout and the vocabulary. When ids were appended since,
 each embedding's rows move to their names' new indices
 (`runmodel.remap_run_state`, checked by `python -m sts2ai.vocab`); a

@@ -25,7 +25,7 @@ use crate::game_rng::{hash, GameRng};
 use crate::types::{Ascension, AscensionLevel};
 
 /// `StandardActMap._mapWidth`.
-const COLS: usize = 7;
+pub const COLS: usize = 7;
 
 /// `Map/MapPointType.cs`, in the game's order (segment keys print the
 /// ordinal).
@@ -164,7 +164,7 @@ const SHOPS: usize = 3;
 
 /// `ActModel.GetNumberOfRooms` for one player: each act's
 /// `BaseNumberOfRooms`, the boss and the start excluded.
-pub(crate) fn rooms(act: Act) -> usize {
+pub fn rooms(act: Act) -> usize {
     match act {
         Act::Overgrowth | Act::Underdocks => 15,
         Act::Hive => 14,
