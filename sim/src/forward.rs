@@ -373,7 +373,11 @@ pub struct Played {
 /// each fight played by `fights`. The same seed, chooser and fights play
 /// the same run.
 pub fn play(seed: &str, ascension: Ascension, chooser: &mut impl Chooser, fights: &mut impl Fights) -> Played {
-    let mut run = Run::new(seed, ascension);
+    play_on(Run::new(seed, ascension), chooser, fights)
+}
+
+/// Plays `run` on from where it stands to its end, as `play` does.
+pub fn play_on(mut run: Run, chooser: &mut impl Chooser, fights: &mut impl Fights) -> Played {
     let mut fought = None;
     loop {
         match run.next(fought, chooser) {

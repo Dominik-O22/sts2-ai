@@ -82,19 +82,23 @@ pub struct RunFight {
 }
 
 /// Where a run started: floor 1, or a start point with a generated player
-/// or one the env's own runs carried there (`Starts`).
+/// or one the env's own runs carried there, or a winner's player at an
+/// act's entrance (`Starts`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Began {
     Floor1,
     Generated(StartPoint),
     Own(StartPoint),
+    Winner(StartPoint),
 }
 
 /// States kept per start point for `Starts`; past this the oldest go.
 pub const START_POOL: usize = 2048;
 
-/// Where run-mode runs start (docs/training.md, The run policy): floor 1
-/// with chance `full`, else at a start point drawn by `weights` (in
+/// Where run-mode runs start (docs/training.md, The run policy): with a
+/// winner's player at an act's entrance with chance `winner` when there are
+/// any (`winners`), else
+/// floor 1 with chance `full`, else at a start point drawn by `weights` (in
 /// `START_POINTS` order), from a state the env's runs passed there with
 /// chance `own` when the pool holds any, else from a generated one. The
 /// caller sets the chances; the runs fill the pools.
@@ -105,15 +109,44 @@ pub struct Starts {
     pool: [Vec<Carried>; START_POINTS.len()],
     /// Where each full pool's next state goes.
     next: [usize; START_POINTS.len()],
+    pub winner: f32,
+    /// Winners' players by start point, as the history walk left them at
+    /// an act's entrance (`history::entrances`).
+    winners: [Vec<Carried>; START_POINTS.len()],
 }
 
 impl Default for Starts {
     fn default() -> Self {
-        Self { full: 1.0, weights: [0.0; START_POINTS.len()], own: [0.0; START_POINTS.len()], pool: Default::default(), next: [0; START_POINTS.len()] }
+        Self {
+            full: 1.0,
+            weights: [0.0; START_POINTS.len()],
+            own: [0.0; START_POINTS.len()],
+            pool: Default::default(),
+            next: [0; START_POINTS.len()],
+            winner: 0.0,
+            winners: Default::default(),
+        }
     }
 }
 
 impl Starts {
+    /// A winner's player to start with, with chance `winner`: a start
+    /// point holding any, evenly, then one of its players. Draws nothing
+    /// while there are none or the chance is 0.
+    fn pick_winner(&self, rng: &mut Rng) -> Option<(StartPoint, Carried)> {
+        let points: Vec<usize> = (0..START_POINTS.len()).filter(|&i| !self.winners[i].is_empty()).collect();
+        if points.is_empty() || self.winner <= 0.0 || rng.next_float(1.0) >= self.winner {
+            return None;
+        }
+        let i = points[rng.next_int(points.len())];
+        Some((START_POINTS[i], self.winners[i][rng.next_int(self.winners[i].len())].clone()))
+    }
+
+    /// Winners' players held per start point.
+    pub fn winner_sizes(&self) -> [usize; START_POINTS.len()] {
+        self.winners.each_ref().map(Vec::len)
+    }
+
     /// Where the next run starts, and the state it starts with when it is
     /// the env's own. Draws nothing while every run starts at floor 1.
     fn pick(&self, rng: &mut Rng) -> (Began, Option<Carried>) {
@@ -486,9 +519,16 @@ impl RunSlot {
 
 /// Run seed index `seed`, started where `starts` picks: a generated
 /// player is rolled for the floor the start point stands at, as the
-/// generator counts floors (sixteen an act).
+/// generator counts floors (sixteen an act). A winner's player, like the
+/// env's own, goes into the fresh run `seed` names.
 fn begin(starts: &Mutex<Starts>, rng: &mut Rng, seed: u64, asc: Ascension) -> (Run, Began) {
-    let (began, own) = starts.lock().expect("start pools").pick(rng);
+    let (began, own) = {
+        let starts = starts.lock().expect("start pools");
+        if let Some((at, carried)) = starts.pick_winner(rng) {
+            return (Run::start_at(&run_seed(seed), asc, at, carried), Began::Winner(at));
+        }
+        starts.pick(rng)
+    };
     let run = match (began, own) {
         (Began::Own(at), Some(carried)) => Run::start_at(&run_seed(seed), asc, at, carried),
         (Began::Generated(at), _) => {
@@ -759,6 +799,20 @@ impl VecEnv {
     pub fn set_starts(&mut self, full: f32, weights: [f32; START_POINTS.len()], own: [f32; START_POINTS.len()]) {
         let mut starts = self.starts.lock().expect("start pools");
         (starts.full, starts.weights, starts.own) = (full, weights, own);
+    }
+
+    /// Winners' players to start a `share` of the runs with, each at the
+    /// start point it was kept at (`history::entrances`), in a fresh run;
+    /// the others start as `set_starts` says. Returns how many each start
+    /// point holds.
+    pub fn set_winner_starts(&mut self, players: Vec<(StartPoint, Carried)>, share: f32) -> [usize; START_POINTS.len()] {
+        let mut starts = self.starts.lock().expect("start pools");
+        starts.winner = share;
+        starts.winners = Default::default();
+        for (at, carried) in players {
+            starts.winners[at.index()].push(carried);
+        }
+        starts.winner_sizes()
     }
 
     /// States kept per start point, in `START_POINTS` order.
@@ -1631,24 +1685,31 @@ mod tests {
         }
     }
 
-    /// Runs under the caller's choices play as `forward::play` does with
-    /// the same choices and fights: random options answered through
-    /// `step_run` until none wait, then a combat step with the first legal
-    /// action, and each finished run played forward with its answers.
-    #[test]
-    fn caller_choices_play_the_forward_run() {
-        let n = 4;
-        let mut env = VecEnv::new(n, 5, EnvConfig::default());
-        env.set_runs(Ascension(10), 300, RunChoices::Caller);
+    /// A run played under the caller's choices: where it began, its
+    /// answers, each fight's setup and the combat it ended as, and its end.
+    struct CallerRun {
+        seed: u64,
+        began: Began,
+        answers: Vec<usize>,
+        fights: Vec<(FightSetup, Combat)>,
+        end: forward::End,
+    }
+
+    /// Plays `env` (run mode, `RunChoices::Caller`) until `runs` runs have
+    /// ended: random options answered through `step_run` until none wait,
+    /// then a combat step with the first legal action. Checks each row is
+    /// the decision its env waits at, with an option token per answer.
+    fn caller_runs(env: &mut VecEnv, runs: usize) -> Vec<CallerRun> {
+        let n = env.len();
         let (mut floats, mut ids, mut mask) = (vec![0.0; n * N_FLOATS], vec![0; n * N_IDS], vec![false; n * N_ACTIONS]);
         let (mut rewards, mut dones) = (vec![0.0; n], vec![false; n]);
         let (mut run_f, mut run_i) = (vec![0.0; n * RUN_FLOATS], vec![0; n * RUN_IDS]);
+        env.observe(&mut floats, &mut ids, &mut mask);
         let mut rng = Rng::new(3);
         let mut answers: std::collections::HashMap<u64, Vec<usize>> = Default::default();
         let mut fights: std::collections::HashMap<u64, Vec<(FightSetup, Combat)>> = Default::default();
-        let mut ended: Vec<(u64, forward::End)> = vec![];
-        let mut decisions = 0;
-        while ended.len() < 8 {
+        let mut ended: Vec<RunFight> = vec![];
+        while ended.len() < runs {
             loop {
                 let waiting = env.run_waiting();
                 if waiting.is_empty() {
@@ -1670,10 +1731,7 @@ mod tests {
                         option as i64
                     })
                     .collect();
-                decisions += waiting.len();
-                for (_, run) in env.step_run(&waiting, &options, &mut floats, &mut ids, &mut mask) {
-                    ended.push((run.seed, run.end.expect("an ended run")));
-                }
+                ended.extend(env.step_run(&waiting, &options, &mut floats, &mut ids, &mut mask).into_iter().map(|(_, run)| run));
             }
             let actions: Vec<i64> = (0..n).map(|i| mask[i * N_ACTIONS..][..N_ACTIONS].iter().position(|&m| m).unwrap() as i64).collect();
             let before: Vec<(FightSetup, Combat)> = env.slots.iter().map(|s| (s.setup.clone(), s.combat.clone())).collect();
@@ -1682,23 +1740,73 @@ mod tests {
                 combat.step(encode::decode(&combat, actions[e.env] as usize).unwrap());
                 let run = e.run.expect("a run fight");
                 fights.entry(run.seed).or_default().push((setup, combat));
-                if let Some(end) = run.end {
-                    ended.push((run.seed, end));
+                if run.end.is_some() {
+                    ended.push(run);
                 }
             }
         }
-        assert!(decisions > 50, "{decisions} decisions");
-        for (seed, end) in ended {
-            let mut recorded = fights.remove(&seed).unwrap_or_default().into_iter();
-            let mut chooser = Scripted(answers.remove(&seed).unwrap_or_default().into_iter());
-            let forward = forward::play(&run_seed(seed), Ascension(10), &mut chooser, &mut |state: &mut RunState, setup: FightSetup| {
-                let (fought, combat) = recorded.next().expect("forward played more fights");
-                assert_eq!(format!("{setup:?}"), format!("{fought:?}"), "seed {seed}: fight on floor {}", state.floor);
-                Fought { won: combat.outcome == Some(Outcome::Won), gold_proportion: state.end_fight(&setup, &combat) }
-            });
-            assert_eq!(forward.end, end, "seed {seed}");
-            assert!(chooser.0.next().is_none(), "seed {seed}: answers left over");
+        ended
+            .into_iter()
+            .map(|run| CallerRun {
+                seed: run.seed,
+                began: run.began,
+                answers: answers.remove(&run.seed).unwrap_or_default(),
+                fights: fights.remove(&run.seed).unwrap_or_default(),
+                end: run.end.expect("an ended run"),
+            })
+            .collect()
+    }
+
+    /// Plays `start` on as `forward::play_on` does with the answers and
+    /// fights `run` had in the env: the same setup at every fight, the same
+    /// end, every answer used.
+    fn replays_forward(start: Run, run: CallerRun) {
+        let seed = run.seed;
+        let mut recorded = run.fights.into_iter();
+        let mut chooser = Scripted(run.answers.into_iter());
+        let forward = forward::play_on(start, &mut chooser, &mut |state: &mut RunState, setup: FightSetup| {
+            let (fought, combat) = recorded.next().expect("forward played more fights");
+            assert_eq!(format!("{setup:?}"), format!("{fought:?}"), "seed {seed}: fight on floor {}", state.floor);
+            Fought { won: combat.outcome == Some(Outcome::Won), gold_proportion: state.end_fight(&setup, &combat) }
+        });
+        assert_eq!(forward.end, run.end, "seed {seed}");
+        assert!(recorded.next().is_none(), "seed {seed}: fights left over");
+        assert!(chooser.0.next().is_none(), "seed {seed}: answers left over");
+    }
+
+    /// Runs under the caller's choices play as `forward::play` does with
+    /// the same choices and fights.
+    #[test]
+    fn caller_choices_play_the_forward_run() {
+        let mut env = VecEnv::new(4, 5, EnvConfig::default());
+        env.set_runs(Ascension(10), 300, RunChoices::Caller);
+        let runs = caller_runs(&mut env, 8);
+        assert!(runs.iter().map(|r| r.answers.len()).sum::<usize>() > 50, "few decisions");
+        for run in runs {
+            replays_forward(Run::new(&run_seed(run.seed), Ascension(10)), run);
         }
+    }
+
+    /// Runs started with a winner's player at an act's entrance play as
+    /// a fresh run of their own seed picked up there with that player
+    /// (`Run::start_at`) does, given the same choices and fights. Every
+    /// run starts so with the share at 1, the envs' first ones among them.
+    #[test]
+    fn winner_starts_play_the_forward_run() {
+        let text = include_str!("../testdata/run-TBL5VNYN4M.run");
+        let players = crate::history::entrances(&serde_json::from_str(text).unwrap());
+        let mut env = VecEnv::new(4, 5, EnvConfig::default());
+        assert_eq!(env.set_winner_starts(players.clone(), 1.0), [0, 1, 0, 1, 0]);
+        env.set_runs(Ascension(10), 300, RunChoices::Caller);
+        let runs = caller_runs(&mut env, 12);
+        let mut began = std::collections::BTreeSet::new();
+        for run in runs {
+            let Began::Winner(at) = run.began else { panic!("seed {}: began {:?}", run.seed, run.began) };
+            began.insert(at.act());
+            let carried = players.iter().find(|(p, _)| *p == at).expect("a kept player").1.clone();
+            replays_forward(Run::start_at(&run_seed(run.seed), Ascension(10), at, carried), run);
+        }
+        assert_eq!(began, [1, 2].into(), "runs start at both entrances");
     }
 
     #[test]

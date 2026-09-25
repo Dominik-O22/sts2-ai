@@ -133,9 +133,10 @@ class RunFight(NamedTuple):
     # How the run ended with this fight: "won", "died", "stuck: <why>".
     end: str | None
     # Where the run started: its place in `START_POINTS`, None for floor 1;
-    # and whether from the envs' own state there, not a generated one.
+    # and with what player there: "gen" generated, "own" the envs' own
+    # state, "win" a winner's run (`Envs.use_winner_starts`), "" for floor 1.
     start: int | None
-    own: bool
+    source: str
 
 
 # The points a run can start at besides floor 1, the latest first.
@@ -227,6 +228,13 @@ class Envs:
         there with chance `own` when they have one; both lists in
         `START_POINTS` order."""
         self.sim.set_starts(full, weights, own)
+
+    def use_winner_starts(self, runs: list[Path], share: float) -> list[int]:
+        """Start a `share` of the runs that start from now on from the
+        winners' history files `runs`, at the entrances of acts 2 and 3
+        each reaches faithful to its record; returns how many runs each
+        start point holds, in `START_POINTS` order."""
+        return self.sim.use_winner_starts([p.read_text() for p in runs], share)
 
     def start_pools(self) -> list[int]:
         """States the runs have kept per start point."""

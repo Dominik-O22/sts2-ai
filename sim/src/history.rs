@@ -31,13 +31,17 @@
 //! `imitate` walks a run the same way and keeps the decisions the record
 //! made where the walk shows what the player saw, each encoded as the run
 //! policy would see it (`runobs::observe`), for the policy to learn from
-//! (docs/run-env.md, Winners' decisions).
+//! (docs/run-env.md, Winners' decisions). `entrances` walks it to the
+//! entrances of acts 2 and 3 and keeps the player there, for run training
+//! to start fresh runs with (docs/run-env.md, Winners' starts).
 use std::collections::BTreeMap;
+
+use rayon::prelude::*;
 
 use serde_json::Value;
 
 use crate::effects::{DeckAction, Offered, RestOption};
-use crate::forward::{path_options, shown_whole};
+use crate::forward::{path_options, shown_whole, StartPoint};
 use crate::game_rng::RunStream;
 use crate::encounter::{Act, Encounter};
 use crate::map::{ActMap, PointId, PointType};
@@ -45,7 +49,7 @@ use crate::plan::Unlocks;
 use crate::replay::slug;
 use crate::rewards::{Offer, UNPORTED_RELICS};
 use crate::rooms::{Chooser, Decision};
-use crate::run::{DeckCard, Enchant, Room, RoomType, RunRelic, RunState};
+use crate::run::{Carried, DeckCard, Enchant, Room, RoomType, RunRelic, RunState};
 use crate::runobs::{self, RunObs};
 use crate::shop::{Item, Ware};
 use crate::types::Ascension;
@@ -169,6 +173,10 @@ pub trait Witness {
     /// Whether the decisions since the last verdict were `faithful`, and
     /// whether the Rewards stream was still `streamed` into them.
     fn verdict(&mut self, faithful: bool, streamed: bool);
+    /// The run as it stands at the entrance of act 2 or 3 (`state.act`),
+    /// before the act's Ancient, and whether every room so far was the
+    /// record's.
+    fn act_entered(&mut self, _state: &RunState, _rooms_matched: bool) {}
 }
 
 /// Hears nothing: the plain check.
@@ -252,6 +260,45 @@ pub fn imitate(run: &Value) -> Imitation {
     imitation
 }
 
+/// The player at the entrances of acts 2 and 3, before their Ancients,
+/// where the walk reached them with every room so far the record's. The
+/// walk sets the player back to the record after each floor it does not
+/// match, so the player is the record's there: HP, max HP, gold, deck,
+/// relics and potions, with the relics' counters, the card and potion
+/// odds, removals bought and events seen as the port kept them. A player
+/// the combat sim cannot fight with (a card or relic it lacks) is left
+/// out.
+pub fn entrances(run: &Value) -> Vec<(StartPoint, Carried)> {
+    #[derive(Default)]
+    struct Entrances(Vec<(StartPoint, Carried)>);
+    impl Witness for Entrances {
+        fn decision(&mut self, _: &RunState, _: Decision<'_>, _: usize, _: bool) {}
+        fn verdict(&mut self, _: bool, _: bool) {}
+        fn act_entered(&mut self, state: &RunState, rooms_matched: bool) {
+            let encounter = state.plan.acts[state.act].normal[0];
+            if rooms_matched && state.fight_setup(encounter, Vec::new()).is_ok() {
+                self.0.push((StartPoint::Entrance(state.act), state.carried()));
+            }
+        }
+    }
+    let mut found = Entrances::default();
+    walk(run, true, &mut found);
+    found.0
+}
+
+/// `entrances` of every `eligible` run among the history files `texts`,
+/// walked in parallel.
+pub fn winner_starts(texts: &[String]) -> Result<Vec<(StartPoint, Carried)>, String> {
+    let runs: Vec<Vec<(StartPoint, Carried)>> = texts
+        .par_iter()
+        .map(|text| {
+            let run: Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
+            Ok(if eligible(&run) { entrances(&run) } else { Vec::new() })
+        })
+        .collect::<Result<_, String>>()?;
+    Ok(runs.into_iter().flatten().collect())
+}
+
 fn walk(run: &Value, live: bool, witness: &mut dyn Witness) -> Report {
     let seed = run["seed"].as_str().unwrap();
     let ascension = Ascension(run["ascension"].as_u64().unwrap() as u8);
@@ -276,6 +323,9 @@ fn walk(run: &Value, live: bool, witness: &mut dyn Witness) -> Report {
     let history = run["map_point_history"].as_array().unwrap();
     for (a, floors) in history.iter().enumerate() {
         state.enter_act(a);
+        if a > 0 {
+            witness.act_entered(&state, report.room_problem.is_none());
+        }
         let map = ActMap::generate(state.rngs.seed, acts[a], ascension);
         let floors = floors.as_array().unwrap();
         let kinds: Vec<PointType> = floors.iter().map(|f| point_type(f["map_point_type"].as_str().unwrap())).collect();
@@ -1236,6 +1286,20 @@ mod tests {
         assert_eq!((count(runobs::OptionKind::RestHeal), count(runobs::OptionKind::RestSmith)), (5, 4));
     }
 
+    /// A copy of `run` whose seed, streams and plan are another seed's, but
+    /// for the acts' bosses, which the map shows.
+    fn reseeded(run: &RunState) -> RunState {
+        let mut other = run.clone();
+        other.rngs = crate::game_rng::RunRngs::new("RESEEDED");
+        let acts: Vec<Act> = run.plan.acts.iter().map(|a| a.act).collect();
+        other.plan = crate::plan::RunPlan::generate(other.rngs.seed, acts.try_into().unwrap(), run.ascension, &Unlocks::default());
+        for (o, a) in other.plan.acts.iter_mut().zip(&run.plan.acts) {
+            (o.boss, o.second_boss) = (a.boss, a.second_boss);
+        }
+        assert_ne!(other.plan.acts[run.act].normal, run.plan.acts[run.act].normal);
+        other
+    }
+
     /// Hidden information (docs/run-env.md): every decision two real runs
     /// put, encoded from a copy of the run whose seed, streams and plan are
     /// another run's, but for the acts' bosses the map shows, encodes the
@@ -1246,16 +1310,8 @@ mod tests {
         struct Reseeded(std::collections::BTreeSet<i64>);
         impl Witness for Reseeded {
             fn decision(&mut self, run: &RunState, decision: Decision<'_>, _: usize, _: bool) {
-                let mut other = run.clone();
-                other.rngs = crate::game_rng::RunRngs::new("RESEEDED");
-                let acts: Vec<Act> = run.plan.acts.iter().map(|a| a.act).collect();
-                other.plan = crate::plan::RunPlan::generate(other.rngs.seed, acts.try_into().unwrap(), run.ascension, &Unlocks::default());
-                for (o, a) in other.plan.acts.iter_mut().zip(&run.plan.acts) {
-                    (o.boss, o.second_boss) = (a.boss, a.second_boss);
-                }
-                assert_ne!(other.plan.acts[run.act].normal, run.plan.acts[run.act].normal);
                 let obs = runobs::observe(run, decision);
-                assert_eq!(obs, runobs::observe(&other, decision), "{decision:?}");
+                assert_eq!(obs, runobs::observe(&reseeded(run), decision), "{decision:?}");
                 self.0.insert(obs.ids[0]);
             }
             fn verdict(&mut self, _: bool, _: bool) {}
@@ -1266,5 +1322,64 @@ mod tests {
         }
         let kinds: Vec<&str> = seen.0.iter().map(|&k| runobs::DECISIONS[k as usize - 1]).collect();
         assert_eq!(kinds, ["Path", "Relic", "Card", "Potion", "Rest", "Ancient", "Deck", "Shop", "Event"]);
+    }
+
+    /// Both real runs reach both entrances with their rooms the record's,
+    /// the same way on every walk, and the player kept there has the HP,
+    /// max HP and gold the record shows after the act's last floor. A
+    /// fresh run started there with it opens on the act's Ancient and
+    /// plays on to the last floor.
+    #[test]
+    fn entrances_of_real_runs() {
+        use crate::forward::{play_on, stub_fight, End, Run};
+        for text in [include_str!("../testdata/run-TBL5VNYN4M.run"), include_str!("../testdata/run-5J5VMZX7UB.run")] {
+            let record: Value = serde_json::from_str(text).unwrap();
+            let found = entrances(&record);
+            assert_eq!(found.iter().map(|(at, _)| *at).collect::<Vec<_>>(), [StartPoint::Entrance(1), StartPoint::Entrance(2)]);
+            assert_eq!(found, entrances(&record));
+            for (at, carried) in found {
+                let act = at.act();
+                let last = record["map_point_history"][act - 1].as_array().unwrap().last().unwrap();
+                let stats = &last["player_stats"][0];
+                let recorded = ["current_hp", "max_hp", "current_gold"].map(|k| stats[k].as_i64().unwrap() as i32);
+                assert_eq!([carried.hp, carried.max_hp, carried.gold], recorded, "act {act}");
+                let mut blind = Blind::default();
+                let played = play_on(Run::start_at("FRESH", Ascension(10), at, carried), &mut blind, &mut stub_fight);
+                assert_eq!(blind.0.first(), Some(&"Ancient"), "act {act} opens on its Ancient");
+                assert_eq!((played.end, played.state.floor), (End::Won, 49), "act {act}");
+            }
+        }
+    }
+
+    /// The first option at every decision, each encoded from the run and
+    /// from its `reseeded` copy, which must agree; the decisions' kinds in
+    /// the order put.
+    #[derive(Default)]
+    struct Blind(Vec<&'static str>);
+
+    impl Chooser for Blind {
+        fn choose(&mut self, run: &RunState, decision: Decision<'_>) -> usize {
+            let obs = runobs::observe(run, decision);
+            assert_eq!(obs, runobs::observe(&reseeded(run), decision), "{decision:?}");
+            self.0.push(runobs::DECISIONS[obs.ids[0] as usize - 1]);
+            0
+        }
+    }
+
+    /// Hidden information from a winner's start: every decision a fresh
+    /// run started with a real run's player at an entrance puts, to its
+    /// end, encodes the same from a copy with another seed's streams and
+    /// plan.
+    #[test]
+    fn winner_starts_hold_no_hidden_information() {
+        let mut blind = Blind::default();
+        for text in [include_str!("../testdata/run-TBL5VNYN4M.run"), include_str!("../testdata/run-5J5VMZX7UB.run")] {
+            for (at, carried) in entrances(&serde_json::from_str(text).unwrap()) {
+                let run = crate::forward::Run::start_at("FRESH", Ascension(10), at, carried);
+                crate::forward::play_on(run, &mut blind, &mut crate::forward::stub_fight);
+            }
+        }
+        let kinds: std::collections::BTreeSet<&str> = blind.0.into_iter().collect();
+        assert!(kinds.len() >= 6, "{kinds:?}");
     }
 }

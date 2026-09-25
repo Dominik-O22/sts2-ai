@@ -17,6 +17,10 @@ next decision, which waits for the next batch.
 
 With `--start-full` below 1 the other runs start later in a run
 (`Curriculum`); the log splits floors and wins by where runs started.
+With `--win-starts SHARE` that share of the runs starts at the entrance
+of act 2 or 3 (evenly) with a winner's player there, from the train
+players' history files in `--win-runs`, in a fresh run (docs/run-env.md,
+Winners' starts); the rest start as before.
 
 With `--imitate TRAIN_ROWS` the policy first clones winners' decisions
 (`sts2ai.imitation`), checked against the `holdout.npz` beside the rows,
@@ -44,6 +48,7 @@ from sts2ai.imitation import DECISIONS, Rows, batches, pretrain
 from sts2ai.model import Policy, load_policy, masked_logits
 from sts2ai.runmodel import RunArch, RunPolicy, load_run_policy, save_run_policy
 from sts2ai.search import choose
+from sts2ai.setups import TRACKER, split_runs
 
 FLOORS = 49
 
@@ -220,6 +225,12 @@ class Config:
     # act 1: the clone wins 2.7% with searched fights, run-7 and run-9 0.4
     # to 1.3%. Lower puts the weight on winning.
     floor_weight: float = 1.0
+    # Share of runs that start at the entrance of act 2 or 3 with a
+    # winner's player there, from the train players' history files in
+    # `win_runs`, in a fresh run; the others start as the curriculum says.
+    # 0 turns it off.
+    win_starts: float = 0.0
+    win_runs: str = str(TRACKER)
 
 
 @dataclass
@@ -262,7 +273,7 @@ def gae(traj: Trajectory, next_value: float, lam: float) -> np.ndarray:
 
 def start_name(run: RunFight) -> str:
     """Where a run started, for the log: "floor 1", "act 3 boss gen"."""
-    return "floor 1" if run.start is None else f"{START_POINTS[run.start]} {'own' if run.own else 'gen'}"
+    return "floor 1" if run.start is None else f"{START_POINTS[run.start]} {run.source}"
 
 
 class Stats:
@@ -326,7 +337,7 @@ class Curriculum:
         self.since = time.perf_counter()
 
     def ended(self, run: RunFight) -> None:
-        if run.start is not None and run.end in ("won", "died"):
+        if run.start is not None and run.source != "win" and run.end in ("won", "died"):
             self.results[run.start].append(run.end == "won")
 
     def update(self, envs: Envs) -> None:
@@ -373,6 +384,9 @@ def train(combat_path: Path, run_dir: Path, cfg: Config, resume: Path | None) ->
         if cfg.minutes <= 0:
             return
     envs = Envs(cfg.envs, seed=cfg.seed)
+    if cfg.win_starts > 0:
+        winners = envs.use_winner_starts(split_runs(Path(cfg.win_runs)), cfg.win_starts)
+        print("winners' starts: " + ", ".join(f"{n} at {p}" for p, n in zip(START_POINTS, winners) if n), flush=True)
     envs.use_runs(cfg.seed * 1_000_000, choices="caller")
     writer = SummaryWriter(str(run_dir))
     loop = RunLoop(combat, device, envs, cfg.drain, cfg.search, frozenset(cfg.search_kinds.split(",")), seed=cfg.seed)
@@ -466,7 +480,7 @@ def train(combat_path: Path, run_dir: Path, cfg: Config, resume: Path | None) ->
                 f"{loop.decisions / secs:,.0f} dec/s  {loop.combat_steps * cfg.envs / secs:,.0f} steps/s  picks: {top}",
                 flush=True,
             )
-            if cfg.start_full < 1.0:
+            if cfg.start_full < 1.0 or cfg.win_starts > 0:
                 print(f"    starts: frontier {START_POINTS[curriculum.frontier]}, pools {envs.start_pools()}; won {late}", flush=True)
             stats.picks.clear()
             save_run_policy(run_dir / "latest.pt", policy, opt, iter=it, config=asdict(cfg), combat=str(combat_path), frontier=curriculum.frontier)
