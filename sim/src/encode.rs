@@ -20,7 +20,7 @@ use crate::ids::{CardId, ALL_CARDS, ALL_MONSTERS, ALL_POWERS};
 use crate::monster::{self, Intent};
 use crate::potion;
 use crate::relic;
-use crate::types::CreatureRef;
+use crate::types::{CreatureRef, ValueProp};
 
 pub const MAX_HAND: usize = crate::combat::MAX_HAND;
 /// Phrog Parasite plus its four Wrigglers is the largest act 1 board.
@@ -56,7 +56,7 @@ pub const N_ACTIONS: usize = A_SKIP + 1;
 // Float feature layout.
 pub const F_GLOBAL: usize = 0;
 /// Scalars, then a one-hot of the pending choice's kind (`THEN_KINDS`).
-pub const GLOBAL_LEN: usize = 20 + THEN_KINDS;
+pub const GLOBAL_LEN: usize = 22 + THEN_KINDS;
 const THEN_KINDS: usize = 10;
 pub const F_PLAYER_POWERS: usize = F_GLOBAL + GLOBAL_LEN;
 pub const F_HAND: usize = F_PLAYER_POWERS + N_POWERS;
@@ -241,13 +241,34 @@ fn powers_into(c: &Combat, r: CreatureRef, out: &mut [f32]) {
     }
 }
 
-/// `out` is `N_INTENTS + INTENT_NUMS` long: the kind one-hot, then the numbers.
-fn intent_into(intents: &[Intent], out: &mut [f32]) {
+/// Enemy `i`'s attacks as (damage per hit, hits), each hit as the intent
+/// shows it: `AttackIntent.GetSingleDamage` runs the move's damage through
+/// `Hook.ModifyDamage` against the player (the enemy's Strength and Weak,
+/// the player's Vulnerable), where the move itself holds the base.
+fn shown_intents(c: &Combat, i: usize) -> Vec<(i32, u32)> {
+    let shown = |damage: i32| c.modify_damage(CreatureRef::Player, Some(CreatureRef::Enemy(i)), damage as f64, ValueProp::MOVE) as i32;
+    c.enemies[i]
+        .monster
+        .intents()
+        .iter()
+        .filter_map(|x| match *x {
+            Intent::Attack { damage, hits } => Some((shown(damage), hits)),
+            Intent::DeathBlow { damage } => Some((shown(damage), 1)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// `out` is `N_INTENTS + INTENT_NUMS` long: the kind one-hot, then the
+/// numbers, attacks as `shown_intents` gives them.
+fn intent_into(c: &Combat, enemy: usize, out: &mut [f32]) {
     let (kinds, nums) = out.split_at_mut(N_INTENTS);
-    for i in intents {
+    let mut shown = shown_intents(c, enemy).into_iter();
+    for i in c.enemies[enemy].monster.intents() {
         kinds[i.kind()] = 1.0;
         match *i {
-            Intent::Attack { damage, hits } => {
+            Intent::Attack { .. } => {
+                let (damage, hits) = shown.next().expect("an attack intent");
                 nums[0] = damage as f32 / 20.0;
                 nums[1] = hits as f32 / 3.0;
                 nums[2] = (damage * hits as i32) as f32 / 40.0;
@@ -255,7 +276,8 @@ fn intent_into(intents: &[Intent], out: &mut [f32]) {
             Intent::Debuff { strong } => nums[3] = strong as u8 as f32,
             Intent::Status { count } => nums[4] = count as f32 / 3.0,
             // A blast that also kills the attacker; damage reads like an attack.
-            Intent::DeathBlow { damage } => {
+            Intent::DeathBlow { .. } => {
+                let (damage, _) = shown.next().expect("a death blow intent");
                 nums[0] = damage as f32 / 20.0;
                 nums[1] = 1.0 / 3.0;
                 nums[2] = damage as f32 / 40.0;
@@ -295,8 +317,13 @@ pub fn encode(c: &Combat, floats: &mut [f32], ids: &mut [i64], mask_out: &mut [b
     g[17] = living as f32 / MAX_ENEMIES as f32;
     g[18] = c.potions.iter().flatten().count() as f32 / MAX_POTIONS as f32;
     g[19] = c.stats.cards_played_this_turn as f32 / 10.0;
+    // What the intents add up to this turn, as the game shows them, and
+    // how much of it the block on hand leaves through.
+    let incoming: i32 = c.living_enemies().map(|i| shown_intents(c, i).iter().map(|&(d, h)| d * h as i32).sum::<i32>()).sum();
+    g[20] = incoming as f32 / 50.0;
+    g[21] = (incoming - p.creature.block).max(0) as f32 / 50.0;
     if let Some(p) = &c.pending {
-        g[20 + then_kind(p.then)] = 1.0;
+        g[22 + then_kind(p.then)] = 1.0;
     }
 
     powers_into(c, CreatureRef::Player, &mut floats[F_PLAYER_POWERS..F_HAND]);
@@ -341,7 +368,7 @@ pub fn encode(c: &Combat, floats: &mut [f32], ids: &mut [i64], mask_out: &mut [b
         f[4] = e.creature.hp as f32 / e.creature.max_hp.max(1) as f32;
         f[5] = e.creature.block as f32 / 30.0;
         f[6] = e.reviving as u8 as f32;
-        intent_into(e.monster.intents(), &mut f[ENEMY_BASE..ENEMY_BASE + N_INTENTS + INTENT_NUMS]);
+        intent_into(c, i, &mut f[ENEMY_BASE..ENEMY_BASE + N_INTENTS + INTENT_NUMS]);
         powers_into(c, CreatureRef::Enemy(i), &mut f[ENEMY_BASE + N_INTENTS + INTENT_NUMS..]);
         ids[I_ENEMIES + slot] = e.monster.id as i64 + 1;
         ids[I_MOVES + slot] = e.monster.next_move_name().and_then(monster::move_index).map_or(0, |m| m as i64 + 1);
@@ -597,6 +624,35 @@ mod tests {
         }
         encode(&c, &mut floats, &mut ids, &mut m);
         assert_eq!(shown(&floats), 0.4);
+    }
+
+    /// An attack intent reads as the game shows it: the enemy's Strength
+    /// adds to each hit and the player's Vulnerable multiplies it, and the
+    /// global token sums what gets past the block.
+    #[test]
+    fn intents_show_the_modified_damage() {
+        use crate::ids::PowerId;
+        use crate::power::Power;
+        let mut rng = Rng::new(3);
+        let (mut floats, mut ids, mut m) = (vec![0.0; N_FLOATS], vec![0; N_IDS], vec![false; N_ACTIONS]);
+        let (mut c, i, base) = (0..50)
+            .find_map(|seed| {
+                let c = generate(&mut rng, 8 + seed % 8, Ascension(10)).combat(seed as u64);
+                let i = c.living_enemies().find(|&i| matches!(c.enemies[i].monster.intents(), [Intent::Attack { hits: 1, .. }]))?;
+                let Intent::Attack { damage, .. } = c.enemies[i].monster.intents()[0] else { unreachable!() };
+                Some((c, i, damage))
+            })
+            .expect("a single-hit attack");
+        c.player.creature.block = 0;
+        let slot = c.order.iter().position(|&e| e == i).expect("slot");
+        let hit = |floats: &[f32]| (floats[F_ENEMIES + slot * ENEMY_FEATS + ENEMY_BASE + N_INTENTS] * 20.0).round() as i32;
+        c.enemies[i].creature.powers.push(Power::new(PowerId::Strength, 3));
+        encode(&c, &mut floats, &mut ids, &mut m);
+        assert_eq!(hit(&floats), base + 3);
+        c.player.creature.powers.push(Power::new(PowerId::Vulnerable, 1));
+        encode(&c, &mut floats, &mut ids, &mut m);
+        assert_eq!(hit(&floats), ((base + 3) as f64 * 1.5) as i32);
+        assert!(floats[F_GLOBAL + 21] >= hit(&floats) as f32 / 50.0 - 1e-6, "unblocked incoming counts it");
     }
 
     #[test]

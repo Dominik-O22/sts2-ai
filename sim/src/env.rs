@@ -52,12 +52,11 @@ pub struct EpisodeEnd {
     pub reward: f32,
 }
 
-/// What a potion kept is worth: about 5 HP at `hp_weight`. The run value
-/// head of run-6 and run-7 prices a potion at 3.5 to 4 HP in acts 1 and 2
-/// (runs/scratch-keep/runvalueprobe.py); 16 HP, the old price, kept the
-/// policy from drinking where winners do. Nothing after the run's last
-/// fight.
-const POTION_VALUE: f32 = 0.03;
+/// What a potion kept is worth: about the 16 HP it is worth to the fights
+/// ahead, at `hp_weight`. Nothing after the run's last fight. The run value
+/// heads of run-6 and run-7 price it nearer 4 HP in acts 1 and 2
+/// (runs/scratch-keep/runvalueprobe.py); that is a separate experiment.
+const POTION_VALUE: f32 = 0.1;
 
 /// What max HP is worth per fraction of the fight's starting max HP: twice
 /// HP at `hp_weight`. A point of max HP is a point of HP that every heal
