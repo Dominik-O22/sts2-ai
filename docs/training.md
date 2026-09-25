@@ -208,6 +208,32 @@ through; the generator keeps the weak ones. set-14 on them, greedy: act 1
 elites 92%, bosses 69%; act 2 88%, 67%; act 3 86%, 48%, against 15% on the
 generated act 3 bosses, whose decks are far weaker than a winner's.
 
+Winners alone flatter the HP a fight costs: the runs that went badly are
+not there. sts2.fun keeps every run a player uploads, so `sts2ai.sts2fun`
+takes the players who win at least half of 15+ A10 Ironclad runs, with all
+their runs, and turns their fights into setups the same way (its own
+`setups/` directory, split by player). The pages give less than
+ststracker's: no patch, no card removals or purchases, no potion use, so
+the deck is rebuilt forward from the starter deck and reconciled with the
+final one at the first shop, fights carry no potions, and each line counts
+the changes it could not place (`unexplained`). They show the fights these
+players died in (`died`) and whether the run was won (`run_won`).
+
+```
+uv run python -m sts2ai.sts2fun crawl       # players, then their runs, 2 s between requests; resumes
+uv run python -m sts2ai.sts2fun setups      # -> ~/.local/share/SlayTheSpire2/sts2ai/sts2fun/setups/*.jsonl
+uv run python -m sts2ai.evaluate runs/<time>/latest.pt --source easy --setups <sts2fun easy file>
+```
+
+On 2026-09-25, 26 players (806 runs, 54% won; runs that meet Doormaker,
+a boss the game has since removed, are left out as another version):
+keeping only their won runs lowers their HP lost per weak or normal fight
+by 0.4 to 1.5 and per elite or boss by 1 to 3. For the 14 players at 60%+
+it is half that: the survivorship bias is small, and smaller the better
+the player. Those 14 lose less than ststracker's winners (1.7 HP per easy
+fight against 3.1), and gen5's gap to them is +6.4 HP a fight (+7.2 on
+runs since June, +3.5 on the near-exact decks, which are mostly act 1).
+
 ## Generations from scratch
 
 Once a line of fine-tunes plateaus (set-13 to set-14 at about 85.6% on

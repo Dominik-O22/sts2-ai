@@ -153,20 +153,20 @@ def main() -> None:
     ap.add_argument("--repeats", type=int, default=2, help="fights per setup")
     ap.add_argument("--recordings", type=Path, default=DEFAULT_RECORDINGS)
     ap.add_argument("--acts", type=int, default=3, help="acts the holdout covers")
-    ap.add_argument("--setups", type=Path, default=HOLDOUT, help="played runs' fights, for --source setups")
+    ap.add_argument("--setups", type=Path, default=None, help="played runs' fights, for --source setups (default the ststracker holdout) or easy (its easy holdout)")
     args = ap.parse_args()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     policy = load_policy(args.checkpoint, device, args.old_vocab)
     policy.eval()
     if args.source == "easy":
         print(f"{'':10s} {'fights':>6s} {'won':>6s} {'HP lost':>7s} {'winner':>6s} {'gap':>5s} {'worse':>6s} {'potions':>7s}")
-        for name, r in easy(policy, device, args.repeats).items():
+        for name, r in easy(policy, device, args.repeats, args.setups or EASY_HOLDOUT).items():
             print(
                 f"{name:10s} {r['fights']:6.0f} {r['win']:6.1%} {r['hp_lost']:7.1f} {r['winner_hp_lost']:6.1f} "
                 f"{r['gap']:+5.1f} {r['worse']:6.0%} {r['potions']:7.2f}"
             )
         return
-    win, by_enc, kinds = evaluate(policy, device, args.repeats, args.source, args.recordings, acts=args.acts, setups=args.setups)
+    win, by_enc, kinds = evaluate(policy, device, args.repeats, args.source, args.recordings, acts=args.acts, setups=args.setups or HOLDOUT)
     for enc, (w, n) in sorted(by_enc.items()):
         print(f"{enc:32s} {w:4d}/{n:<4d} {w / n:6.1%}")
     print("  ".join(f"{k} {v:.1%}" for k, v in kinds.items()))
