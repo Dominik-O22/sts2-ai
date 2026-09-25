@@ -140,6 +140,12 @@ def holdout_player(player: str, share: float) -> bool:
     return int(hashlib.sha256(player.encode()).hexdigest(), 16) % 1000 < share * 1000
 
 
+def train_runs(runs_dir: Path = TRACKER, share: float = 0.15) -> list[Path]:
+    """The winners' history files (`PLAYER-TIME.run`) of the players not
+    held out, split as the fights and `sts2ai.imitation` split them."""
+    return [p for p in sorted(runs_dir.glob("*.run")) if not holdout_player(p.name.rsplit("-", 1)[0], share)]
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--pages", type=Path, default=TRACKER / "pages")
