@@ -66,21 +66,17 @@ maturin from `sim-py/` into the package `sts2ai._sim`.
   is a plain PPO with GAE. `evaluate.py` runs the policy greedily on the
   held-out set: ten generated fights per encounter from a fixed seed
   (`gen::holdout`), or on run recordings (Real decks, below).
-- Reward (`env.rs`): the terminal reward is a win at `1 + p * hp +
-  12p * potions_left`, a loss or a 500-step timeout at `-1 + 0.2 *
+- Reward (`env.rs`): the terminal reward is a win at `1 + w * hp_frac +
+  0.1 * potions_left`, a loss or a 500-step timeout at `-1 + 0.2 *
   enemy_hp_taken` (capped at -0.8). Under a flat -1 every line of a lost
   fight paid the same, so the policy folded once its value read a fight as
-  lost, and search tied every option there. `p` is 0.025 an HP point,
-  the same at any max HP, except after an act boss, where the next act's
-  Ancient heals 80% of the missing HP at A10 and only the other 20% counts.
-  It was 0.5 of the HP fraction (0.006 an HP at 80 max HP) until
-  2026-09-24, when the policy won its weak and normal fights but lost 5 HP
-  a fight more than the winners who played the same ones (`evaluate
-  --source easy`); a potion was 16 HP then and is 12 now. On top of it,
-  potential-based shaping: each step pays the
+  lost, and search tied every option there. `w` is 0.5,
+  except after an act boss, where the next act's Ancient heals 80% of the
+  missing HP at A10 and only the other 20% counts (0.1). A potion at 0.1 is
+  about 16 HP. On top of it, potential-based shaping: each step pays the
   change in half the enemy HP lost (a running count over the fight, as a
-  fraction of what the enemies started with) minus `p` times the player HP
-  lost, plus `12p` per potion gained (a drink counts as one lost),
+  fraction of what the enemies started with) minus `w` times the player HP
+  fraction lost, plus 0.1 per potion gained (a drink counts as one lost),
   measured from the fight's own start. Before the potion term a drink cost
   nothing until the fight ended, and the policy drank combat potions in
   weak fights it lost 5% HP in; with it, over 600 iterations from set-11,
@@ -211,6 +207,49 @@ the generated set. They are all wins, so they only show decks that got
 through; the generator keeps the weak ones. set-14 on them, greedy: act 1
 elites 92%, bosses 69%; act 2 88%, 67%; act 3 86%, 48%, against 15% on the
 generated act 3 bosses, whose decks are far weaker than a winner's.
+
+## Generations from scratch
+
+Once a line of fine-tunes plateaus (set-13 to set-14 at about 85.6% on
+the generated set), a change to the reward, the data or the network is
+tested from scratch, not bolted onto the plateaued checkpoint: at entropy
+0.4 the old policy hardly explores what a new reward pays for. Runs are
+compared at equal training hours with `sts2ai.curves` (snapshots every
+1,000 iterations), judged on winners' elite and boss fights and on the HP
+winners' easy fights cost, not on the generated set.
+
+What the 2026-09-24/25 runs found, each from scratch with ab-attn's recipe
+(lr 3e-4, warmup 30) and 704x256 search:
+
+- gen2 (dot-product heads, pile tokens, choice attention; winners' elites
+  and bosses at 30%): +1.7 points on winners' fights over ab-attn at 2 h,
+  the rest level. Choice attention costs 19% of a training step for the
+  4.5% of states with a choice.
+- gen3 (HP priced per point at four times the old weight): fewer
+  self-damage cards but kills a turn slower, so the easy-fight HP gap did
+  not move and winners' fights fell 3 points. Reverted (#32).
+- gen4 (`--search-margin 1.0 --search-kinds Weak,Normal,Elite,Boss
+  --search-coef 1.0`, winners' fights at 55%: `train.jsonl:0.35,
+  easy-train.jsonl:0.2`): winners' fights 77.1% at 2.17 h against gen2's
+  75.1%, bosses 61.4 against 58.1, easy-fight HP beyond winners +4.9
+  against +5.6. Search overrules its confident choices as often as
+  before (19%), so the gain is the data more than absorbed search.
+- gen5 (gen4 with `--incoming`: a head on the global token learning the
+  damage the coming enemy phase deals, MSE at 0.5): at or above gen4 at
+  every snapshot; at 6,000 iterations 84.4% generated, 77.2% winners',
+  +4.7 HP, 95.0% of normals won.
+
+The easy-fight HP gap (the policy losing 13.8 HP greedy in act 2 and 3
+normals where winners lost 4.1) is play, not the measurement: rebuilt
+fights cost the same HP as the exact recorded ones (141 of Dom's fights),
+and the sim matches the pilot's real games. Search halves it; neither
+2,048 copies, a two-turn search nor full-fight rollouts do better, so the
+search is not what limits it. It is spread over encounters (the top 10 of
+55 carry 45%). The worst, four Scrolls of Biting, shows the pattern:
+winners block the opening 28 damage and clear the board in one or two
+turns (110 of 262 fights), where the policy chips at one scroll.
+Survivorship inflates the winners' side: their worst fights are in runs
+that did not win.
 
 ## Speed
 
