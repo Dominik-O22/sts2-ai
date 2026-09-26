@@ -726,14 +726,21 @@ impl TurnPlanner {
 
     /// For each of `rows` of `forks`: the search's best action (by index)
     /// in env `owners[k]`'s search, when the copy is in a state of the
-    /// searched turn the search expanded; -1 otherwise.
+    /// searched turn the search expanded; -1 for another state of the
+    /// turn, -2 once the copy is past it.
     fn tree_actions(&self, py: Python<'_>, forks: PyRef<'_, Forks>, rows: Vec<usize>, owners: Vec<usize>) -> Vec<i64> {
         use rayon::prelude::*;
         let f = &forks.inner;
         py.detach(|| {
             rows.par_iter()
                 .zip(&owners)
-                .map(|(&r, &o)| self.searches[o].as_ref().and_then(|s| s.best_action(f.combat(r))).map_or(-1, |a| a as i64))
+                .map(|(&r, &o)| {
+                    let (c, s) = (f.combat(r), self.searches[o].as_ref());
+                    match s {
+                        Some(s) if s.in_turn(c) => s.best_action(c).map_or(-1, |a| a as i64),
+                        _ => -2,
+                    }
+                })
                 .collect()
         })
     }

@@ -864,10 +864,15 @@ impl Search {
         index(c, self.action_at(c, step)?)
     }
 
+    /// Whether `c` is still in the searched turn.
+    pub fn in_turn(&self, c: &Combat) -> bool {
+        c.player.turn == self.turn && !c.is_over()
+    }
+
     /// The search's best action in `c`, by index, when `c` is a state of
     /// the searched turn it expanded.
     pub fn best_action(&self, c: &Combat) -> Option<usize> {
-        if c.player.turn != self.turn || c.is_over() || self.node_values.is_empty() {
+        if !self.in_turn(c) || self.node_values.is_empty() {
             return None;
         }
         let id = self.find(c)?;

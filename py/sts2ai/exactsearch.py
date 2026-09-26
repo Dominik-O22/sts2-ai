@@ -252,6 +252,9 @@ class Hybrid:
         sums = np.zeros(n, np.float32)
         rewards = np.zeros(n, np.float32)
         inverse = np.empty(n, np.int64)
+        # Copies that may still be in the searched turn: the search is asked
+        # about those only.
+        in_turn = np.ones(n, bool)
         for step in range(PLAYOUT_STEPS):
             live = np.array(forks.live(), np.int64)
             if len(live) == 0:
@@ -260,8 +263,12 @@ class Hybrid:
             logits, _ = search.forward(policy, device, self.floats[:u], self.ids[:u])
             greedy = masked_logits(logits.float(), self.mask[:u].to(device, non_blocking=True)).argmax(dim=1).cpu().numpy()
             acts = greedy[inverse[: len(live)]]
-            tree = np.array(self.planner.inner.tree_actions(forks, live.tolist(), owner[live].tolist()), np.int64)
-            acts = np.where(tree >= 0, tree, acts)
+            ask = live[in_turn[live]]
+            if len(ask):
+                tree = np.full(n, -1, np.int64)
+                tree[ask] = self.planner.inner.tree_actions(forks, ask.tolist(), owner[ask].tolist())
+                in_turn[ask[tree[ask] == -2]] = False
+                acts = np.where(tree[live] >= 0, tree[live], acts)
             if step == 0:
                 acts = np.where(first[live] >= 0, first[live], acts)
             full = np.zeros(n, np.int64)
