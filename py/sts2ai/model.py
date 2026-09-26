@@ -28,10 +28,12 @@ as tokens of card embeddings, choices that attend to the board.
 
 from __future__ import annotations
 
+import copy
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import torch
+import torch.nn.functional as F
 from torch import Tensor, nn
 
 from sts2ai.env import Layout
@@ -95,6 +97,97 @@ class PairHead(nn.Module):
         t = torch.cat([self.none.expand(B, 1, -1), self.target(targets)], dim=1)
         h = torch.relu(self.state(state)[:, None, None] + self.item(items)[:, :, None] + t[:, None])
         return self.out(h).squeeze(-1)
+
+
+class Attention(nn.Module):
+    """Multi-head attention with `nn.MultiheadAttention`'s parameters, names
+    and initialisation, so its checkpoints load, but batch first all the
+    way through: the projections are viewed into heads and handed to
+    `scaled_dot_product_attention`, where `nn.MultiheadAttention` transposed
+    to sequence first and back around it."""
+
+    def __init__(self, dim: int, heads: int):
+        super().__init__()
+        self.heads = heads
+        self.in_proj_weight = nn.Parameter(torch.empty(3 * dim, dim))
+        self.in_proj_bias = nn.Parameter(torch.empty(3 * dim))
+        self.out_proj = nn.Linear(dim, dim)
+        nn.init.xavier_uniform_(self.in_proj_weight)
+        nn.init.zeros_(self.in_proj_bias)
+        nn.init.zeros_(self.out_proj.bias)
+
+    def forward(self, x: Tensor, memory: Tensor, keep: Tensor) -> Tensor:
+        """`[B, T, d]` queries over the `[B, S, d]` `memory`, attending only
+        where `keep` `[B, S]` is True (the choices over the encoded tokens)."""
+        B, T, d = x.shape
+        w, b = self.in_proj_weight, self.in_proj_bias
+        q = F.linear(x, w[:d], b[:d]).view(B, T, self.heads, -1)
+        k, v = F.linear(memory, w[d:], b[d:]).view(B, memory.shape[1], 2, self.heads, -1).unbind(2)
+        return self.out_proj(attend(q, k, v, keep).reshape(B, T, d))
+
+    def packed(self, t: Tensor, used: Tensor, keep: Tensor) -> Tensor:
+        """Self-attention among the tokens of the slots `keep` `[B, S]`
+        marks, held packed: `t` `[N, d]` in the order of `used`, their
+        flat slot indices. The attention runs on the slots, the empty
+        ones zero and masked."""
+        B, S = keep.shape
+        qkv = F.linear(t, self.in_proj_weight, self.in_proj_bias)
+        q, k, v = qkv.new_zeros(B * S, qkv.shape[1]).index_copy(0, used, qkv).view(B, S, 3, self.heads, -1).unbind(2)
+        return self.out_proj(attend(q, k, v, keep).reshape(B * S, -1)[used])
+
+
+def attend(q: Tensor, k: Tensor, v: Tensor, keep: Tensor) -> Tensor:
+    """`[B, T, heads, hd]` queries over `[B, S, heads, hd]` keys and values
+    where `keep` `[B, S]` is True, to `[B, T, heads, hd]`."""
+    out = F.scaled_dot_product_attention(q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), attn_mask=keep[:, None, None])
+    return out.transpose(1, 2)
+
+
+class EncoderLayer(nn.Module):
+    """`nn.TransformerEncoderLayer` as `SlotAttention` built it (pre-norm,
+    ReLU, no dropout), with its parameter names, on packed tokens
+    (`Attention.packed`)."""
+
+    def __init__(self, dim: int, heads: int, ff: int):
+        super().__init__()
+        self.self_attn = Attention(dim, heads)
+        self.linear1 = nn.Linear(dim, ff)
+        self.linear2 = nn.Linear(ff, dim)
+        self.norm1 = nn.LayerNorm(dim)
+        self.norm2 = nn.LayerNorm(dim)
+
+    def forward(self, t: Tensor, used: Tensor, keep: Tensor) -> Tensor:
+        t = t + self.self_attn.packed(self.norm1(t), used, keep)
+        return t + self.linear2(torch.relu(self.linear1(self.norm2(t))))
+
+
+class Encoder(nn.Module):
+    """`nn.TransformerEncoder`'s stack and final norm, parameter names
+    included. Every layer starts as a copy of `layer`, as its clones did.
+
+    A row fills under half its slots, and every slot is filled in some row
+    of a batch, so the layers run on the filled slots' tokens alone,
+    packed; only the attention sees the slots. An empty slot comes out as
+    zero, where the padded encoder gave it an encoding no token attended
+    to: only the masked logits of actions on that slot read it."""
+
+    def __init__(self, layer: EncoderLayer, depth: int, dim: int):
+        super().__init__()
+        self.layers = nn.ModuleList(copy.deepcopy(layer) for _ in range(depth))
+        self.norm = nn.LayerNorm(dim)
+
+    def forward(self, x: Tensor, keep: Tensor, used: Tensor) -> Tensor:
+        """`[B, S, d]` tokens, `keep` `[B, S]` False at the empty slots,
+        `used` the filled ones' flat indices, `keep.flatten().nonzero()`.
+        How many there are depends on the data, so taking them is a graph
+        break under torch.compile (and waits on the GPU); the caller takes
+        them first thing, in its own frame, and the rest stays one graph."""
+        B, S, d = x.shape
+        t = x.flatten(0, 1)[used]
+        for layer in self.layers:
+            t = layer(t, used, keep)
+        t = self.norm(t)
+        return t.new_zeros(B * S, d).index_copy(0, used, t).view(B, S, d)
 
 
 class PointerHead(nn.Module):
@@ -304,8 +397,7 @@ class SlotAttention(Policy):
         self.enemy_in = nn.Linear(enemy_dim, d)
         self.potion_in = nn.Linear(potion_dim + 1, d)
         self.choice_in = nn.Linear(card_dim + L.choice_feats, d)
-        layer = nn.TransformerEncoderLayer(d, heads, 4 * d, dropout=0.0, batch_first=True, norm_first=True)
-        self.encoder = nn.TransformerEncoder(layer, depth, norm=nn.LayerNorm(d), enable_nested_tensor=False)
+        self.encoder = Encoder(EncoderLayer(d, heads, 4 * d), depth, d)
         if piles:
             # A pile's token: the mean embedding of its cards (an upgraded
             # copy shifted by `pile_up`) and its size, then which pile it is.
@@ -318,7 +410,7 @@ class SlotAttention(Policy):
             nn.init.zeros_(self.pile_in.bias)
         if choice_attn:
             self.choice_norm = nn.LayerNorm(d)
-            self.choice_attn = nn.MultiheadAttention(d, heads, batch_first=True)
+            self.choice_attn = Attention(d, heads)
             # A residual that starts as nothing: choices score as before
             # until it learns something.
             nn.init.zeros_(self.choice_attn.out_proj.weight)
@@ -335,17 +427,33 @@ class SlotAttention(Policy):
         nn.init.zeros_(self.v.bias)
 
     def forward(self, floats: Tensor, ids: Tensor) -> tuple[Tensor, Tensor]:
-        logits, g = self.trunk(floats, ids)
+        keep = self.filled(floats, ids)
+        logits, g = self.trunk(floats, ids, keep, keep.flatten().nonzero().squeeze(1))
         return logits, self.v(g).squeeze(-1)
 
     def forward_incoming(self, floats: Tensor, ids: Tensor) -> tuple[Tensor, Tensor, Tensor]:
         """`forward` and the damage the player is about to take this enemy
         turn (`incoming` head, a thirtieth of the HP), for its auxiliary loss."""
-        logits, g = self.trunk(floats, ids)
+        keep = self.filled(floats, ids)
+        logits, g = self.trunk(floats, ids, keep, keep.flatten().nonzero().squeeze(1))
         return logits, self.v(g).squeeze(-1), self.incoming(g).squeeze(-1)
 
-    def trunk(self, floats: Tensor, ids: Tensor) -> tuple[Tensor, Tensor]:
-        """The action logits and the encoded global token."""
+    def filled(self, floats: Tensor, ids: Tensor) -> Tensor:
+        """`[B, S]`, False where a token's slot is empty. The global token
+        never is, so every row attends to something; nor are the piles."""
+        L = self.layout
+        hand_ids = ids[:, L.i_hand : L.i_hand + L.max_hand]
+        enemy_present = floats[:, L.f_enemies : L.f_relics].view(-1, L.max_enemies, L.enemy_feats)[:, :, 0]
+        one = torch.ones_like(hand_ids[:, :1], dtype=torch.bool)
+        return torch.cat(
+            [one, hand_ids != 0, enemy_present != 0, ids[:, L.i_potions : L.i_potions + L.max_potions] != 0]
+            + ([one.expand(-1, 3)] if self.arch.piles else []),
+            dim=1,
+        )
+
+    def trunk(self, floats: Tensor, ids: Tensor, keep: Tensor, used: Tensor) -> tuple[Tensor, Tensor]:
+        """The action logits and the encoded global token, given `filled`
+        and the flat indices of its filled slots (`Encoder`)."""
         L = self.layout
         B = floats.shape[0]
         H, E, P, C = L.max_hand, L.max_enemies, L.max_potions, L.max_choices
@@ -377,14 +485,7 @@ class SlotAttention(Policy):
             + ([self.pile_tokens(floats)] if self.arch.piles else []),
             dim=1,
         )
-        # True where a slot is empty. The global token never is, so every
-        # row attends to something; nor are the piles.
-        empty = torch.cat(
-            [torch.zeros_like(hand_ids[:, :1], dtype=torch.bool), hand_ids == 0, enemy_floats[:, :, 0] == 0, potion_ids == 0]
-            + ([torch.zeros_like(hand_ids[:, :3], dtype=torch.bool)] if self.arch.piles else []),
-            dim=1,
-        )
-        x = self.encoder(tokens, src_key_padding_mask=empty)
+        x = self.encoder(tokens, keep, used)
         g, hand, enemy, potion = x[:, : 1 + H + E + P].split([1, H, E, P], dim=1)
         g = g.squeeze(1)
         if self.arch.pointer:
@@ -392,7 +493,7 @@ class SlotAttention(Policy):
         else:
             play, use = self.play(g, hand, enemy).flatten(1), self.use_potion(g, potion, enemy).flatten(1)
         if self.arch.choice_attn:
-            choices = choices + self.choice_attn(self.choice_norm(choices), x, x, key_padding_mask=empty, need_weights=False)[0]
+            choices = choices + self.choice_attn(self.choice_norm(choices), x, keep)
         choose = self.choose(g, choices).squeeze(2)
         end_skip = self.end_or_skip(g)
         logits = torch.cat([play, use, end_skip[:, :1], choose, end_skip[:, 1:]], dim=1)

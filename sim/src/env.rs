@@ -183,8 +183,27 @@ impl Starts {
 }
 
 /// What a potion kept is worth: about the 16 HP it is worth to the fights
-/// ahead, at `hp_weight`. Nothing after the run's last fight.
+/// ahead, at `hp_weight`. Nothing after the run's last fight. The run value
+/// heads of run-6 and run-7 price it nearer 4 HP in acts 1 and 2
+/// (runs/scratch-keep/runvalueprobe.py); that is a separate experiment.
 const POTION_VALUE: f32 = 0.1;
+
+/// What max HP is worth per fraction of the fight's starting max HP: twice
+/// HP at `hp_weight`. A point of max HP is a point of HP that every heal
+/// after it restores: at A10 the Ancient opening the next act heals 80% of
+/// what is missing and a rest 30% of max HP (`AncientEventModel`,
+/// `HealRestSiteOption`), so it is worth about 3.4 HP points in act 1, 2 in
+/// act 2 and 0.6 in act 3; the combat does not know its act, so this is
+/// the middle. Paper Cuts takes it, Feed gives it.
+const MAX_HP_VALUE: f32 = 1.0;
+
+fn max_hp_value(c: &Combat) -> f32 {
+    if c.after == After::End {
+        0.0
+    } else {
+        MAX_HP_VALUE
+    }
+}
 
 fn potion_value(c: &Combat) -> f32 {
     if c.after == After::End {
@@ -204,14 +223,19 @@ fn potion_value(c: &Combat) -> f32 {
 const LOSS_DAMAGE: f32 = 0.2;
 
 /// Stopgap terminal reward (DESIGN.md, Decision engine): a win is worth 1
-/// plus the HP fraction kept at `hp_weight` and `POTION_VALUE` per unused
-/// potion; a loss or a timed-out fight is -1 plus `LOSS_DAMAGE` per
-/// fraction of the enemies' HP taken.
-pub fn terminal_reward(c: &Combat) -> f32 {
+/// plus the HP fraction kept at `hp_weight`, the max HP gained or lost at
+/// `max_hp_value` and `POTION_VALUE` per unused potion; a loss or a
+/// timed-out fight is -1 plus `LOSS_DAMAGE` per fraction of the enemies'
+/// HP taken. HP is counted against the max HP the fight (or search) began
+/// with: against the current max, losing max HP raised the fraction and
+/// paid the policy for every Paper Cuts hit.
+pub fn terminal_reward(c: &Combat, base: Baseline) -> f32 {
     match c.outcome {
         Some(Outcome::Won) => {
-            let hp = c.player.creature.hp as f32 / c.player.creature.max_hp.max(1) as f32;
-            1.0 + hp_weight(c) * hp + potion_value(c) * potions_held(c) as f32
+            let start_max = base.max_hp.max(1) as f32;
+            let hp = c.player.creature.hp as f32 / start_max;
+            let max = (c.player.creature.max_hp - base.max_hp) as f32 / start_max;
+            1.0 + hp_weight(c) * hp + max_hp_value(c) * max + potion_value(c) * potions_held(c) as f32
         }
         _ => -1.0 + LOSS_DAMAGE * enemy_hp_taken(c).min(1.0),
     }
@@ -253,6 +277,7 @@ fn hp_weight(c: &Combat) -> f32 {
 pub struct Baseline {
     taken: f32,
     hp: i32,
+    max_hp: i32,
     potions: usize,
 }
 
@@ -267,13 +292,14 @@ fn enemy_hp_taken(c: &Combat) -> f32 {
 
 impl Baseline {
     pub fn of(c: &Combat) -> Self {
-        Self { taken: enemy_hp_taken(c), hp: c.player.creature.hp, potions: potions_held(c) }
+        Self { taken: enemy_hp_taken(c), hp: c.player.creature.hp, max_hp: c.player.creature.max_hp, potions: potions_held(c) }
     }
 }
 
 /// Potential for reward shaping: half the enemy HP taken since the
-/// baseline (`enemy_hp_taken`), minus the fraction of the player's HP lost
-/// and plus the potions gained (a drink counts as one lost) at the prices
+/// baseline (`enemy_hp_taken`), minus the fraction of the player's HP lost,
+/// plus the max HP gained (both against the max HP at the baseline) and
+/// plus the potions gained (a drink counts as one lost) at the prices
 /// the terminal reward puts on them. Without the potion term a drink cost
 /// nothing until the fight ended, and the policy drank combat potions in
 /// weak fights it lost 5% HP in.
@@ -287,16 +313,18 @@ pub fn potential(c: &Combat, base: Baseline) -> f32 {
     if c.is_over() {
         return 0.0;
     }
-    let lost = (base.hp - c.player.creature.hp.max(0)) as f32 / c.player.creature.max_hp.max(1) as f32;
+    let start_max = base.max_hp.max(1) as f32;
+    let lost = (base.hp - c.player.creature.hp.max(0)) as f32 / start_max;
+    let max = (c.player.creature.max_hp - base.max_hp) as f32 / start_max;
     let potions = potions_held(c) as f32 - base.potions as f32;
-    0.5 * (enemy_hp_taken(c) - base.taken) - hp_weight(c) * lost + potion_value(c) * potions
+    0.5 * (enemy_hp_taken(c) - base.taken) - hp_weight(c) * lost + max_hp_value(c) * max + potion_value(c) * potions
 }
 
 /// The reward for a transition: the potential change, plus the terminal
 /// reward when `over` (a timed-out fight is over without an outcome).
 pub fn step_reward(before: f32, c: &Combat, base: Baseline, over: bool) -> f32 {
     if over {
-        terminal_reward(c) - before
+        terminal_reward(c, base) - before
     } else {
         potential(c, base) - before
     }
@@ -679,7 +707,7 @@ impl Slot {
             floor: self.setup.floor,
             encounter: self.setup.encounter,
             kind: self.setup.encounter.kind(),
-            reward: terminal_reward(c),
+            reward: terminal_reward(c, self.base),
             run: None,
         }
     }
@@ -1521,15 +1549,34 @@ mod tests {
         c.potions = vec![Some(PotionId::FirePotion), None];
         c.player.creature.hp = c.player.creature.max_hp / 2;
         c.outcome = Some(Outcome::Won);
+        let base = Baseline::of(&c);
         let reward = |c: &mut Combat, after| {
             c.after = after;
-            terminal_reward(c)
+            terminal_reward(c, base)
         };
         let half = 0.5 * c.player.creature.hp as f32 / c.player.creature.max_hp as f32;
-        assert_eq!(reward(&mut c, After::Act), 1.0 + half + 0.1);
-        assert_eq!(reward(&mut c, After::Boss), 1.0 + half + 0.1, "the second boss follows with no rest");
-        assert_eq!(reward(&mut c, After::Ancient), 1.0 + 0.2 * half + 0.1, "the Ancient heals 80% at A10");
+        assert_eq!(reward(&mut c, After::Act), 1.0 + half + POTION_VALUE);
+        assert_eq!(reward(&mut c, After::Boss), 1.0 + half + POTION_VALUE, "the second boss follows with no rest");
+        assert_eq!(reward(&mut c, After::Ancient), 1.0 + 0.2 * half + POTION_VALUE, "the Ancient heals 80% at A10");
         assert_eq!(reward(&mut c, After::End), 1.0, "nothing is left to spend");
+    }
+
+    /// Max HP lost (Paper Cuts) costs reward; counted against the current
+    /// max, the HP fraction rose and paid for it.
+    #[test]
+    fn lost_max_hp_costs_reward() {
+        let mut c = generate(&mut Rng::new(4), 8, Ascension(10)).combat(3);
+        c.relics = vec![];
+        c.potions = vec![None, None];
+        c.player.creature.hp = c.player.creature.max_hp / 2;
+        c.after = After::Act;
+        c.outcome = Some(Outcome::Won);
+        let base = Baseline::of(&c);
+        let kept = terminal_reward(&c, base);
+        c.player.creature.max_hp -= 4;
+        assert!(terminal_reward(&c, base) < kept, "4 max HP lost with HP unchanged");
+        c.outcome = None;
+        assert!(potential(&c, base) < 0.0, "and costs it at the step it happens");
     }
 
     #[test]

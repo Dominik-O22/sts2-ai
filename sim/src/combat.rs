@@ -247,6 +247,11 @@ pub struct Stats {
     /// Giant's blast) still counts the HP it lost the first time.
     pub enemy_hp_lost: i64,
     pub enemy_start_hp: i64,
+    /// The player's HP and potions once the fight has begun, which the
+    /// training reward counts from: shown so its value head can tell what
+    /// the fight has cost so far.
+    pub player_start_hp: i32,
+    pub start_potions: u32,
     /// Cards dropped into the draw pile at a random depth (Beckon). Nothing
     /// records the depth, so the replay harness adopts it from the recording.
     pub random_draw_inserts: u32,
@@ -494,6 +499,8 @@ impl Combat {
         c.queue.extend(pre);
         c.queue.push_back(Effect::StartTurn(Side::Player));
         c.run();
+        c.stats.player_start_hp = c.player.creature.hp;
+        c.stats.start_potions = c.potions.iter().flatten().count() as u32;
         c
     }
 
