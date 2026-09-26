@@ -389,6 +389,11 @@ impl VecEnv {
         &self.slots[i].setup
     }
 
+    /// Where env `i`'s fight started: its rewards are shaped from here.
+    pub fn base(&self, i: usize) -> Baseline {
+        self.slots[i].base
+    }
+
     /// Encode every env's current state.
     pub fn observe(&self, floats: &mut [f32], ids: &mut [i64], mask: &mut [bool]) {
         self.check_buffers(floats, ids, mask);
@@ -496,6 +501,14 @@ fn row_hash(floats: &[f32], ids: &[i64], mask: &[bool]) -> u64 {
 /// the same `group` share a shuffle, so plans in a group are compared on
 /// the same hidden draws.
 ///
+/// Rewards are shaped from each root's fight baseline (`VecEnv::base`),
+/// the one the value head's targets were shaped from. From a root, a copy
+/// that ends the fight collects its terminal reward minus the root's
+/// potential, and one that goes on collects its potential gain, to which
+/// the value head adds the terminal it expects minus that potential: the
+/// same scale. Shaped from the root instead, a finished copy scored the
+/// root's potential (enemy HP taken, HP lost so far) above a going one.
+///
 /// Copies are the unit of the API, but copies whose states are equal sit
 /// on one shared node: copies of a shuffle group start on one node, and a
 /// step that rolls no dice moves every copy that took it to one new node.
@@ -515,7 +528,7 @@ pub struct Forks {
 }
 
 /// One copy of a search: the node holding its state, its own dice, the
-/// last player turn it plays and the root's baseline.
+/// last player turn it plays and the fight's baseline.
 struct Fork {
     node: usize,
     rngs: CombatRngs,
@@ -555,13 +568,15 @@ struct Moved {
 }
 
 impl Forks {
-    pub fn new(root: &Combat, n: usize, groups: usize, seed: u64) -> Self {
-        Self::of(&[root], n, groups, seed, 1)
+    pub fn new(root: &Combat, base: Baseline, n: usize, groups: usize, seed: u64) -> Self {
+        Self::of(&[root], &[base], n, groups, seed, 1)
     }
 
     /// `n` copies of each root, root after root, each played for `depth`
     /// player turns: the rest of the current one, then `depth - 1` more.
-    pub fn of(roots: &[&Combat], n: usize, groups: usize, seed: u64, depth: u32) -> Self {
+    /// `bases[r]` is where root r's fight started.
+    pub fn of(roots: &[&Combat], bases: &[Baseline], n: usize, groups: usize, seed: u64, depth: u32) -> Self {
+        assert_eq!(roots.len(), bases.len(), "one baseline per root");
         let per_group = n.div_ceil(groups.max(1)).max(1);
         let n_groups = n.div_ceil(per_group);
         let root_seed = |r: usize| seed ^ (r as u64).wrapping_mul(0xD6E8_FEB8_6659_FD93);
@@ -585,7 +600,7 @@ impl Forks {
                     node: r * n_groups + i / per_group,
                     rngs: CombatRngs::new(root_seed(r) ^ (i as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15)),
                     last_turn: roots[r].player.turn + depth.max(1) - 1,
-                    base: Baseline::of(roots[r]),
+                    base: bases[r],
                 }
             })
             .collect();
@@ -837,7 +852,7 @@ mod tests {
         let mut rng = Rng::new(4);
         let root = generate(&mut rng, 8, Ascension(10)).combat(3);
         let n = 16;
-        let forks = Forks::new(&root, n, 4, 11);
+        let forks = Forks::new(&root, Baseline::of(&root), n, 4, 11);
         let draw = |c: &Combat| c.player.draw.iter().map(|k| k.id).collect::<Vec<_>>();
         assert_eq!(draw(forks.combat(0)), draw(forks.combat(1)), "same group, same shuffle");
         assert!((0..n).any(|i| draw(forks.combat(i)) != draw(&root)), "forks reshuffle the draw pile");
@@ -873,7 +888,7 @@ mod tests {
         let mut rng = Rng::new(4);
         let root = generate(&mut rng, 8, Ascension(10)).combat(3);
         let (n, groups) = (16, 4);
-        let mut forks = Forks::new(&root, n, groups, 11);
+        let mut forks = Forks::new(&root, Baseline::of(&root), n, groups, 11);
         let mut floats = vec![0.0; n * N_FLOATS];
         let mut ids = vec![0; n * N_IDS];
         let mut mask = vec![false; n * N_ACTIONS];
@@ -902,6 +917,55 @@ mod tests {
                 .collect();
             forks.step(&actions, &mut rewards);
         }
+    }
+
+    /// A fight some turns in: the enemy at 5 HP with a Strike in hand, the
+    /// player 20 HP down behind a wall of block, and where the fight began.
+    pub(crate) fn fight_nearly_won() -> (Combat, Baseline) {
+        use crate::card::Card;
+        use crate::combat::EnemySpec;
+        use crate::ids::{CardId, MonsterId};
+        use crate::monster::Flags;
+        let enemy = EnemySpec { id: MonsterId::Nibbit, flags: Flags { is_alone: true, ..Default::default() } };
+        let start = Combat::new(&crate::ironclad_starter_deck(), 80, 80, 3, &[enemy], Ascension(10), 1);
+        let base = Baseline::of(&start);
+        let mut c = start;
+        let e = &mut c.enemies[0].creature;
+        c.stats.enemy_hp_lost += (e.hp - 5) as i64;
+        (e.hp, e.block) = (5, 0);
+        c.player.creature.hp -= 20;
+        c.player.creature.block = 999;
+        c.player.hand = vec![Card::new(900, CardId::StrikeIronclad, false)];
+        c.player.energy = 3;
+        (c, base)
+    }
+
+    /// What the value head learns a state is worth when the fight is sure
+    /// to be won at its HP: the terminal reward less the potential so far.
+    pub(crate) fn sure_win_value(c: &Combat, base: Baseline) -> f32 {
+        let mut won = c.clone();
+        won.outcome = Some(Outcome::Won);
+        terminal_reward(&won, base) - potential(c, base)
+    }
+
+    /// Winning now and ending the turn into a fight sure to be won at the
+    /// same HP score alike, the second with the value head's part added.
+    #[test]
+    fn winning_now_scores_like_a_sure_win_later() {
+        let (root, base) = fight_nearly_won();
+        assert!(potential(&root, base).abs() > 0.1, "the root must be far from the fight's start");
+        let (hand, choices) = (encode::hand_order(&root), encode::choice_order(&root));
+        let index = |a| encode::index_of(&root, &hand, &choices, a).unwrap() as i64;
+        let strike = index(crate::combat::Action::PlayCard { hand_idx: 0, target: Some(0) });
+        let end = index(crate::combat::Action::EndTurn);
+        let mut forks = Forks::new(&root, base, 2, 1, 5);
+        let mut rewards = [0.0f32; 2];
+        forks.step(&[strike, end], &mut rewards);
+        assert_eq!(forks.combat(0).outcome, Some(Outcome::Won));
+        let later = forks.combat(1);
+        assert!(!later.is_over() && later.player.creature.hp == root.player.creature.hp);
+        let going = rewards[1] + sure_win_value(later, base);
+        assert!((rewards[0] - going).abs() < 1e-5, "won now {} vs won later {going}", rewards[0]);
     }
 
     /// Independent clones stepped one by one: what shared nodes must match
@@ -972,7 +1036,8 @@ mod tests {
         for (case, (depth, seed)) in [(1, 3u64), (2, 5), (1, 8)].into_iter().enumerate() {
             let roots: Vec<Combat> = setups.iter().enumerate().map(|(k, s)| s.combat(seed + k as u64)).collect();
             let roots: Vec<&Combat> = roots.iter().collect();
-            let mut forks = Forks::of(&roots, n, groups, seed, depth);
+            let bases: Vec<Baseline> = roots.iter().map(|c| Baseline::of(c)).collect();
+            let mut forks = Forks::of(&roots, &bases, n, groups, seed, depth);
             let mut naive = Naive::of(&roots, n, groups, seed, depth);
             let total = forks.len();
             assert_eq!(total, naive.combats.len());

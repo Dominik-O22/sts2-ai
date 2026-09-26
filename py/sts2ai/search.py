@@ -4,7 +4,9 @@ them. Used by the advisor's plan and by `searcheval`.
 Each copy starts with a given first action; the policy samples the rest of
 the turn. A copy's score is the shaped reward it collected plus the value
 head where the next turn starts (a finished fight already paid its
-terminal reward).
+terminal reward). The forks shape rewards from the fight's start, as the
+value head's targets were, so a copy that won and one still going are
+scored on one scale (`sim::env::Forks`).
 
 An opening scored by the mean of its copies is scored by the policy's
 average continuation, and the player will not play that: they search

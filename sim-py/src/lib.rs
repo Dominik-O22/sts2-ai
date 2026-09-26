@@ -9,7 +9,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use serde_json::Value;
 use sim::encode::*;
-use sim::env::{EnvConfig, Forks as InnerForks, VecEnv as Inner};
+use sim::env::{Baseline, EnvConfig, Forks as InnerForks, VecEnv as Inner};
 use sim::gen::{holdout, load_recordings, ACTS, LAST_FLOOR};
 use sim::ids::{ALL_CARDS, ALL_MONSTERS};
 use sim::replay::{command, Ids, Replayer, Step};
@@ -81,7 +81,8 @@ impl VecEnv {
     #[pyo3(signature = (envs, n, groups=4, seed=0, depth=1))]
     fn fork(&self, envs: Vec<usize>, n: usize, groups: usize, seed: u64, depth: u32) -> Forks {
         let roots: Vec<_> = envs.iter().map(|&i| self.inner.combat(i)).collect();
-        Forks { inner: InnerForks::of(&roots, n, groups, seed, depth) }
+        let bases: Vec<_> = envs.iter().map(|&i| self.inner.base(i)).collect();
+        Forks { inner: InnerForks::of(&roots, &bases, n, groups, seed, depth) }
     }
 
     /// (encounter, kind) of env `i`'s current fight.
@@ -210,6 +211,8 @@ struct Advisor {
     seed: u64,
     start: Option<Value>,
     inner: Option<Replayer>,
+    /// Where the fight began, for the forks' rewards.
+    base: Option<Baseline>,
 }
 
 /// `Step` as the status string the advisor prints.
@@ -227,7 +230,7 @@ impl Advisor {
     #[new]
     #[pyo3(signature = (seed=0))]
     fn new(seed: u64) -> Self {
-        Self { ids: Ids::new(), seed, start: None, inner: None }
+        Self { ids: Ids::new(), seed, start: None, inner: None, base: None }
     }
 
     /// Feed one line of the recording. Returns "ok", "decision", "ended",
@@ -255,6 +258,7 @@ impl Advisor {
                 }
                 return Ok(match Replayer::new(&rec, None, self.ids.clone(), self.seed) {
                     Ok(r) => {
+                        self.base = Some(Baseline::of(r.combat()));
                         self.inner = Some(r);
                         "ok".into()
                     }
@@ -264,7 +268,10 @@ impl Advisor {
             "snapshot" if self.inner.is_none() => {
                 let Some(start) = self.start.clone() else { return Ok("waiting".into()) };
                 match Replayer::new(&start, Some(&rec), self.ids.clone(), self.seed) {
-                    Ok(r) => self.inner = Some(r),
+                    Ok(r) => {
+                        self.base = Some(Baseline::of(r.combat()));
+                        self.inner = Some(r);
+                    }
                     // Nothing about this fight is followable, so forget the
                     // start: later snapshots wait quietly for the next one.
                     Err(e) => {
@@ -365,7 +372,8 @@ impl Advisor {
     /// turn, in `groups` groups that each share a draw-pile shuffle.
     #[pyo3(signature = (n, groups=4, seed=0))]
     fn fork(&self, n: usize, groups: usize, seed: u64) -> PyResult<Forks> {
-        Ok(Forks { inner: InnerForks::new(self.combat()?, n, groups, seed) })
+        let base = self.base.expect("a combat has its baseline");
+        Ok(Forks { inner: InnerForks::new(self.combat()?, base, n, groups, seed) })
     }
 }
 
