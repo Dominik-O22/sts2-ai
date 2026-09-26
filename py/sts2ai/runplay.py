@@ -27,10 +27,12 @@ train players' or with `--win-holdout` the held-out players', and the
 report adds a line per start point.
 
 A run policy trained with the forecast (`sts2ai.forecast`) keeps its
-calibration, and its map steps get the forecast filled in. With
-`--forecast-log FILE` every map step into an elite writes what the
-forecast read for that elite and how the fight went, for `forecast
-calibrate`.
+calibration, and its map steps get the forecast filled in (`--forecast
+CAL` gives one to a policy without). With `--forecast-log FILE` every map
+step into an elite writes what the forecast read for that elite and how
+the fight went, for `forecast calibrate`. `--elite-gate P` passes up an
+elite at a map step whose elites' forecast win chance is under P, when
+another option is open: the forecast as a rule, whatever the policy.
 """
 
 from __future__ import annotations
@@ -167,6 +169,7 @@ def play(
     win_holdout: bool = False,
     forecast: Forecaster | None = None,
     forecast_log: TextIO | None = None,
+    elite_gate: float = 0.0,
 ) -> tuple[list[End], list[RunFight], RunLoop, float]:
     """Plays until each env has finished `per_env` runs or `minutes` pass.
     Returns every fight that ended, every run that ended, the loop (its
@@ -205,6 +208,12 @@ def play(
             late = i[:, 2] >= late_from_act + 1
             if late.any():
                 logits[late] = late_policy(f[late], i[late])[0]
+        if elite_gate > 0:
+            room = i[:, L.i_options + 4 + L.option_cards : L.i_options + L.max_options * L.option_ids : L.option_ids]
+            elite = (room == NAMES["room"].index("Elite")) & (i[:, :1] == NAMES["decision"].index("Path"))
+            unsure = f[:, L.f_forecast] < elite_gate
+            gate = elite & unsure[:, None] & (logits[:, : L.max_options] > -1e8).logical_and(~elite).any(1, keepdim=True)
+            logits = logits.masked_fill(gate, -1e9)
         options = logits.argmax(1).cpu().numpy()
         if forecast_log is not None and loop.read is not None:
             read = loop.read
@@ -312,6 +321,8 @@ def main() -> None:
     ap.add_argument("--win-runs", type=Path, default=TRACKER, help="winners' history files; the train players' are used")
     ap.add_argument("--win-holdout", action="store_true", help="start with the held-out players' winners instead")
     ap.add_argument("--forecast-log", type=Path, default=None, help="write each map step into an elite with its forecast and outcome here")
+    ap.add_argument("--forecast", type=Path, default=None, help="forecast calibration for a run policy that has none")
+    ap.add_argument("--elite-gate", type=float, default=0.0, help="pass up elites whose forecast win chance is under this")
     args = ap.parse_args()
     # Ids the combat checkpoint never saw get fresh rows (`vocab.remap_state`),
     # drawn from here: unseeded, two plays of one seed differ.
@@ -321,7 +332,9 @@ def main() -> None:
     run_policy, run_ck = load_run_policy(args.run_policy, device) if args.run_policy else (None, {})
     if run_policy is not None:
         run_policy.eval()
-    calibration = Calibration(**run_ck["forecast"]) if run_ck.get("forecast") else None
+    calibration = Calibration.load(args.forecast) if args.forecast else Calibration(**run_ck["forecast"]) if run_ck.get("forecast") else None
+    if args.elite_gate > 0 and calibration is None:
+        ap.error("--elite-gate needs the forecast: a run policy trained with it, or --forecast")
     forecast = Forecaster(combat, device, calibration) if calibration or args.forecast_log else None
     forecast_log = args.forecast_log.open("w") if args.forecast_log else None
     envs = Envs(args.envs, seed=args.seed)
@@ -349,6 +362,7 @@ def main() -> None:
         args.win_holdout,
         forecast,
         forecast_log,
+        args.elite_gate,
     )
     if fights_out is not None:
         fights_out.close()
