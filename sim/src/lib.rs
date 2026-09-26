@@ -16,6 +16,7 @@ pub mod power;
 pub mod relic;
 pub mod replay;
 pub mod rng;
+pub mod turnsearch;
 pub mod types;
 
 pub use combat::{Action, Combat, EnemySpec, Outcome, RoomKind, Setup};
