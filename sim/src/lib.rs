@@ -719,8 +719,15 @@ mod tests {
         c.player.creature.hp = 5;
         c.step(Action::EndTurn); // Butt for 13.
         assert_eq!(c.player.creature.hp, 40);
-        assert!(c.relics[0].flag);
+        assert_eq!(c.relics[0].counter, 1, "spent");
         assert!(!c.is_over());
+        // One spent in an earlier fight saves nothing.
+        let mut spent = Relic::new(RelicId::LizardTail);
+        spent.counter = 1;
+        let mut c = with_relics(&[spent], &[alone], 3);
+        c.player.creature.hp = 5;
+        c.step(Action::EndTurn);
+        assert!(c.is_over() && c.player.creature.hp <= 0);
     }
 
     /// Decimillipede: a segment killed while the others live stays in the

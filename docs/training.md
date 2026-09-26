@@ -27,7 +27,11 @@ maturin from `sim-py/` into the package `sts2ai._sim`.
   non-basic cards, removals take Strikes first, and both come faster after
   act 1, as does max HP; a relic every four floors, potions in a
   third of the slots, an Ancient relic per act after the first, HP between
-  40% and 100% (70% and up at the boss, which follows a rest site). Floors
+  40% and 100% (70% and up at the boss, which follows a rest site). A relic
+  that carries state between fights (Pen Nib's count, Girya's lifts, Ember
+  Tea's charges, a spent Lizard Tail) starts at a uniformly rolled one
+  (`roll_carried_state` has the table); a played run's fight rolls only
+  what its start does not record, and recordings keep theirs. Floors
   run 1 to 48, sixteen per act: in each act the first floors draw weak
   encounters (3 in act 1, 2 later), 5-15 add elites, the 16th is the boss. `FightSetup::from_recording`
   turns a recorder file into the same struct, which is how the recordings
