@@ -98,8 +98,11 @@ impl Powers {
     }
 
     pub fn retain_mut(&mut self, keep: impl FnMut(&mut Power) -> bool) {
+        let len = self.list.len();
         self.list.retain_mut(keep);
-        self.held = self.list.iter().fold(IdSet::EMPTY, |s, p| s.with(p.id as usize));
+        if self.list.len() != len {
+            self.held = self.list.iter().fold(IdSet::EMPTY, |s, p| s.with(p.id as usize));
+        }
     }
 
     pub fn clear(&mut self) {

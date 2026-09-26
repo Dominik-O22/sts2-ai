@@ -703,18 +703,18 @@ impl Combat {
         p.hand.iter().chain(&p.draw).chain(&p.discard).chain(&p.exhaust).chain(&p.play)
     }
 
+    /// Uids are unique across the piles, so the search order is free: the
+    /// card being played first, then the hand, where most lookups land.
     pub fn find_card(&self, uid: u32) -> Option<&Card> {
-        self.all_cards().find(|c| c.uid == uid)
+        let p = &self.player;
+        [&p.play, &p.hand, &p.discard, &p.draw, &p.exhaust].into_iter().flat_map(|pile| pile.iter()).find(|c| c.uid == uid)
     }
 
     pub(crate) fn find_card_mut(&mut self, uid: u32) -> Option<&mut Card> {
         let p = &mut self.player;
-        p.hand
-            .iter_mut()
-            .chain(&mut p.draw)
-            .chain(&mut p.discard)
-            .chain(&mut p.exhaust)
-            .chain(&mut p.play)
+        [&mut p.play, &mut p.hand, &mut p.discard, &mut p.draw, &mut p.exhaust]
+            .into_iter()
+            .flat_map(|pile| pile.iter_mut())
             .find(|c| c.uid == uid)
     }
 
@@ -3585,6 +3585,9 @@ impl Combat {
     /// already queued, and nothing between the two reads the count.
     fn tick_toric(&mut self) {
         let powers = &mut self.player.creature.powers;
+        if !powers.has(PowerId::ToricToughness) {
+            return;
+        }
         for p in powers.iter_mut().filter(|p| p.id == PowerId::ToricToughness) {
             p.amount -= 1;
         }
