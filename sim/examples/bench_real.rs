@@ -133,4 +133,27 @@ fn main() {
     });
     let node_ns = 1e9 * secs / n as f64;
     println!("clone+legal+step  : {node_ns:>9.0} ns ({:.0} nodes/s, step after clone {:.0} ns)", 1e9 / node_ns, node_ns - clone_ns);
+
+    // A turn search's inner node: a card played, not the turn ended.
+    let (n, secs) = best(|_| {
+        let mut rng = Rng::new(1);
+        let mut acts = vec![];
+        let mut n = 0;
+        let t = cpu_secs();
+        for _ in 0..reps {
+            for r in &roots {
+                let mut c = r.clone();
+                c.legal_actions_into(&mut acts);
+                acts.retain(|a| matches!(a, sim::Action::PlayCard { .. }));
+                if let Some(&a) = acts.get(rng.next_int(acts.len().max(1))) {
+                    c.step(a);
+                    n += 1;
+                }
+                black_box(&c);
+            }
+        }
+        (n, cpu_secs() - t)
+    });
+    let play_ns = 1e9 * secs / n as f64;
+    println!("clone+legal+play  : {play_ns:>9.0} ns ({:.0} nodes/s, card plays only)", 1e9 / play_ns);
 }
