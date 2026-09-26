@@ -590,13 +590,12 @@ impl Combat {
     pub(crate) fn relic_after_card_played(&mut self, card: &Card) -> Vec<Effect> {
         use RelicId::*;
         let ty = card.ty();
-        let hand_costing: Vec<u32> = self
-            .player
-            .hand
-            .iter()
-            .filter(|c| c.uid != card.uid && self.cost(c) > 0)
-            .map(|c| c.uid)
-            .collect();
+        // Mummified Hand's candidates, costed before any relic below runs.
+        let hand_costing: Vec<u32> = if ty == CardType::Power && self.has_relic(MummifiedHand) {
+            self.player.hand.iter().filter(|c| c.uid != card.uid && self.cost(c) > 0).map(|c| c.uid).collect()
+        } else {
+            vec![]
+        };
         let mut out = vec![];
         let mut mummified: Option<u32> = None;
         for r in &mut self.relics {
