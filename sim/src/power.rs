@@ -6,7 +6,7 @@
 
 use crate::effect::{Effect, Pile};
 use crate::ids::PowerId;
-use crate::types::{CardType, CreatureRef, Side, ValueProp};
+use crate::types::{CardType, CreatureRef, IdSet, Side, ValueProp};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Power {
@@ -50,6 +50,127 @@ impl Power {
             _ => self.amount,
         }
     }
+}
+
+/// A creature's powers in the order they landed, which is the order hooks
+/// see them in, with the set of ids among them kept exact so a lookup of a
+/// power the creature lacks is one bit test.
+#[derive(Clone, Default)]
+pub struct Powers {
+    list: Vec<Power>,
+    held: IdSet,
+}
+
+impl Powers {
+    #[inline]
+    pub fn push(&mut self, p: Power) {
+        self.held.insert(p.id as usize);
+        self.list.push(p);
+    }
+
+    #[inline]
+    pub fn has(&self, id: PowerId) -> bool {
+        self.held.contains(id as usize)
+    }
+
+    /// The ids held.
+    #[inline]
+    pub fn held(&self) -> IdSet {
+        self.held
+    }
+
+    /// The powers in `hook`, a hook's set, in order: the only ones the hook
+    /// can hear from.
+    #[inline]
+    pub fn of(&self, hook: IdSet) -> impl Iterator<Item = &Power> {
+        let list: &[Power] = if self.held.meets(hook) { &self.list } else { &[] };
+        list.iter().filter(move |p| hook.contains(p.id as usize))
+    }
+
+    #[inline]
+    pub fn of_mut(&mut self, hook: IdSet) -> impl Iterator<Item = &mut Power> {
+        let list: &mut [Power] = if self.held.meets(hook) { &mut self.list } else { &mut [] };
+        list.iter_mut().filter(move |p| hook.contains(p.id as usize))
+    }
+
+    pub fn retain(&mut self, mut keep: impl FnMut(&Power) -> bool) {
+        self.retain_mut(|p| keep(p));
+    }
+
+    pub fn retain_mut(&mut self, keep: impl FnMut(&mut Power) -> bool) {
+        self.list.retain_mut(keep);
+        self.held = self.list.iter().fold(IdSet::EMPTY, |s, p| s.with(p.id as usize));
+    }
+
+    pub fn clear(&mut self) {
+        self.list.clear();
+        self.held = IdSet::EMPTY;
+    }
+}
+
+impl From<Vec<Power>> for Powers {
+    fn from(list: Vec<Power>) -> Self {
+        let held = list.iter().fold(IdSet::EMPTY, |s, p| s.with(p.id as usize));
+        Self { list, held }
+    }
+}
+
+impl std::ops::Deref for Powers {
+    type Target = [Power];
+    #[inline]
+    fn deref(&self) -> &[Power] {
+        &self.list
+    }
+}
+
+/// Amounts and counters change in place; the ids never do.
+impl std::ops::DerefMut for Powers {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut [Power] {
+        &mut self.list
+    }
+}
+
+impl<'a> IntoIterator for &'a Powers {
+    type Item = &'a Power;
+    type IntoIter = std::slice::Iter<'a, Power>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.list.iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a mut Powers {
+    type Item = &'a mut Power;
+    type IntoIter = std::slice::IterMut<'a, Power>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.list.iter_mut()
+    }
+}
+
+impl PartialEq for Powers {
+    fn eq(&self, other: &Self) -> bool {
+        self.list == other.list
+    }
+}
+
+impl Eq for Powers {}
+
+impl std::fmt::Debug for Powers {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.list.fmt(f)
+    }
+}
+
+/// The ids a hook's match arms name. A creature holding none of them skips
+/// the hook; `tests::hook_sets_name_every_power_that_reacts` keeps them honest.
+const fn set(ids: &[PowerId]) -> IdSet {
+    let mut s = IdSet::EMPTY;
+    let mut i = 0;
+    while i < ids.len() {
+        s = s.with(ids[i] as usize);
+        i += 1;
+    }
+    s
 }
 
 /// `PowerModel.Type == Debuff`.
@@ -155,6 +276,11 @@ impl Power {
         }
     }
 
+    pub const DAMAGE_ADDITIVE: IdSet = {
+        use PowerId::*;
+        set(&[Tainted, Strength, Vigor])
+    };
+
     /// `ModifyDamageAdditive`. `owner` is the creature this power sits on.
     pub fn modify_damage_additive(&self, owner: CreatureRef, target: CreatureRef, dealer: Option<CreatureRef>, props: ValueProp) -> f64 {
         match self.id {
@@ -167,6 +293,11 @@ impl Power {
             _ => 0.0,
         }
     }
+
+    pub const DAMAGE_MULTIPLICATIVE: IdSet = {
+        use PowerId::*;
+        set(&[Vulnerable, Weak, Colossus, Slow, Shrink, DiamondDiadem, Flutter, Soar, Knockdown])
+    };
 
     /// `ModifyDamageMultiplicative`. `dealer_vulnerable` and `dealer_cruelty`
     /// are the dealer's power amounts, read by Colossus and Vulnerable.
@@ -206,6 +337,11 @@ impl Power {
         }
     }
 
+    pub const BLOCK_ADDITIVE: IdSet = {
+        use PowerId::*;
+        set(&[Dexterity, Fasten])
+    };
+
     /// `ModifyBlockAdditive`. `source_owner` is the owner of the card that
     /// grants the block, or the target itself for monster moves.
     /// `defend_source` is false only for block from a card without the
@@ -220,6 +356,11 @@ impl Power {
             _ => 0.0,
         }
     }
+
+    pub const BLOCK_MULTIPLICATIVE: IdSet = {
+        use PowerId::*;
+        set(&[NoBlock, Frail, Unmovable])
+    };
 
     /// `ModifyBlockMultiplicative`. `block_plays_this_turn` counts the
     /// player's card plays that already gained block this turn (Unmovable);
@@ -250,6 +391,11 @@ impl Power {
         }
     }
 
+    pub const ENERGY_GAIN: IdSet = {
+        use PowerId::*;
+        set(&[NoEnergyGain])
+    };
+
     /// `ModifyEnergyGain`.
     pub fn modify_energy_gain(&self, amount: i32) -> i32 {
         match self.id {
@@ -257,6 +403,11 @@ impl Power {
             _ => amount,
         }
     }
+
+    pub const MAX_ENERGY: IdSet = {
+        use PowerId::*;
+        set(&[Pyre, WasteAway])
+    };
 
     /// `ModifyMaxEnergy`.
     pub fn modify_max_energy(&self, amount: i32) -> i32 {
@@ -266,6 +417,11 @@ impl Power {
             _ => amount,
         }
     }
+
+    pub const HAND_DRAW: IdSet = {
+        use PowerId::*;
+        set(&[Clarity, MindRot, DrawCardsNextTurn])
+    };
 
     /// `ModifyHandDraw`: Clarity draws one more each turn, Mind Rot fewer.
     pub fn modify_hand_draw(&self, count: u32) -> u32 {
@@ -278,6 +434,11 @@ impl Power {
         }
     }
 
+    pub const AFTER_ENERGY_RESET: IdSet = {
+        use PowerId::*;
+        set(&[Radiance, EnergyNextTurn])
+    };
+
     /// `AfterEnergyReset`: Radiance grants energy, then decrements.
     pub fn after_energy_reset(&self, owner: CreatureRef) -> Vec<Effect> {
         match self.id {
@@ -287,6 +448,11 @@ impl Power {
             _ => vec![],
         }
     }
+
+    pub const AFTER_BLOCK_CLEARED: IdSet = {
+        use PowerId::*;
+        set(&[SelfFormingClay, BlockNextTurn, ToricToughness])
+    };
 
     /// `AfterBlockCleared` on the owner: Self-Forming Clay and Block Next Turn.
     pub fn after_block_cleared(&self, owner: CreatureRef) -> Vec<Effect> {
@@ -304,26 +470,51 @@ impl Power {
         }
     }
 
+    pub const SHOULD_FLUSH: IdSet = {
+        use PowerId::*;
+        set(&[RetainHand])
+    };
+
     /// `ShouldFlush`: Retain Hand keeps the hand.
     pub fn should_flush(&self) -> bool {
         self.id != PowerId::RetainHand
     }
+
+    pub const SHOULD_CLEAR_BLOCK: IdSet = {
+        use PowerId::*;
+        set(&[Barricade, Burrowed])
+    };
 
     /// `ShouldClearBlock`.
     pub fn should_clear_block(&self, owner: CreatureRef, creature: CreatureRef) -> bool {
         !(matches!(self.id, PowerId::Barricade | PowerId::Burrowed) && owner == creature)
     }
 
+    pub const SHOULD_DRAW: IdSet = {
+        use PowerId::*;
+        set(&[NoDraw])
+    };
+
     /// `ShouldDraw`: NoDraw blocks everything but the turn-start hand draw.
     pub fn should_draw(&self, from_hand_draw: bool) -> bool {
         !(self.id == PowerId::NoDraw && !from_hand_draw)
     }
+
+    pub const BLOCKS_SMOGGED: IdSet = {
+        use PowerId::*;
+        set(&[Smoggy])
+    };
 
     /// `SmoggyPower.ShouldPlay`: a smogged card cannot be played. The rest of
     /// the hook lives in `Combat::hook_allows_play`.
     pub fn blocks_smogged(&self) -> bool {
         self.id == PowerId::Smoggy
     }
+
+    pub const FREE_CARD: IdSet = {
+        use PowerId::*;
+        set(&[Corruption, FreeAttack])
+    };
 
     /// `TryModifyEnergyCostInCombatLate`: Corruption makes skills free, Free
     /// Attack makes attacks in hand free.
@@ -334,6 +525,11 @@ impl Power {
             _ => false,
         }
     }
+
+    pub const EXTRA_PLAYS: IdSet = {
+        use PowerId::*;
+        set(&[OneTwoPunch, Duplication])
+    };
 
     /// `ModifyCardPlayCount`. Powers that add plays are decremented once
     /// per modified play (`AfterModifyingCardPlayCount`).
@@ -353,6 +549,11 @@ impl Power {
         }
     }
 
+    pub const BEFORE_HAND_DRAW: IdSet = {
+        use PowerId::*;
+        set(&[HelloWorld])
+    };
+
     /// `BeforeHandDraw`, player powers.
     pub fn before_hand_draw(&self) -> Vec<Effect> {
         match self.id {
@@ -369,6 +570,11 @@ impl Power {
         }
     }
 
+    pub const BEFORE_SIDE_TURN_START: IdSet = {
+        use PowerId::*;
+        set(&[Aggression, Plating])
+    };
+
     /// `BeforeSideTurnStart`.
     pub fn before_side_turn_start(&self, owner: CreatureRef, side: Side, round: u32) -> Vec<Effect> {
         match self.id {
@@ -381,6 +587,11 @@ impl Power {
             _ => vec![],
         }
     }
+
+    pub const AFTER_SIDE_TURN_START: IdSet = {
+        use PowerId::*;
+        set(&[Rampart, DemonForm, Clarity, DrawCardsNextTurn, PrepTime, Sandpit, Plating])
+    };
 
     /// `AfterSideTurnStart`. `turn` is the player's turn number.
     pub fn after_side_turn_start(&self, owner: CreatureRef, side: Side, turn: u32, round: u32) -> Vec<Effect> {
@@ -436,6 +647,11 @@ impl Power {
         }
     }
 
+    pub const RESET_AT_SIDE_TURN_START: IdSet = {
+        use PowerId::*;
+        set(&[Slow, HardenedShell, Sloth])
+    };
+
     /// `AfterSideTurnStart` for powers that reset counters (Slow), plus
     /// `HardenedShellPower.BeforeSideTurnStart`, which clears its damage
     /// tally whichever side is starting.
@@ -451,6 +667,11 @@ impl Power {
             self.data = 0;
         }
     }
+
+    pub const AFTER_PLAYER_TURN_START: IdSet = {
+        use PowerId::*;
+        set(&[CrimsonMantle, Inferno, RollingBoulder, Entropy])
+    };
 
     /// `AfterPlayerTurnStart`, player-side powers only.
     pub fn after_player_turn_start(&self, owner: CreatureRef) -> Vec<Effect> {
@@ -479,6 +700,11 @@ impl Power {
         }
     }
 
+    pub const AFTER_AUTO_PRE_PLAY: IdSet = {
+        use PowerId::*;
+        set(&[Mayhem])
+    };
+
     /// `AfterAutoPrePlayPhaseEntered`, player powers: the turn is set up and
     /// the player has not acted yet.
     pub fn after_auto_pre_play(&self) -> Vec<Effect> {
@@ -488,6 +714,11 @@ impl Power {
             _ => vec![],
         }
     }
+
+    pub const AFTER_CARD_DRAWN: IdSet = {
+        use PowerId::*;
+        set(&[Automation])
+    };
 
     /// `AfterCardDrawn` for the player's draws. `data` counts the draws.
     pub fn after_card_drawn(&mut self) -> Vec<Effect> {
@@ -507,6 +738,11 @@ impl Power {
         }
     }
 
+    pub const AFTER_AUTO_POST_PLAY: IdSet = {
+        use PowerId::*;
+        set(&[Stampede])
+    };
+
     /// `AfterAutoPostPlayPhaseEntered`: end of the player's turn, before the
     /// hand is discarded.
     pub fn after_auto_post_play(&self) -> Vec<Effect> {
@@ -516,6 +752,11 @@ impl Power {
             _ => vec![],
         }
     }
+
+    pub const BEFORE_SIDE_TURN_END_VERY_EARLY: IdSet = {
+        use PowerId::*;
+        set(&[Asleep])
+    };
 
     /// `BeforeSideTurnEndVeryEarly`, which runs before the `Early` pass so
     /// Lagavulin's shell is gone before Plating can top it back up.
@@ -529,6 +770,11 @@ impl Power {
         }
     }
 
+    pub const BEFORE_SIDE_TURN_END_EARLY: IdSet = {
+        use PowerId::*;
+        set(&[Plating])
+    };
+
     /// `BeforeSideTurnEndEarly`.
     pub fn before_side_turn_end_early(&self, owner: CreatureRef, side: Side) -> Vec<Effect> {
         match self.id {
@@ -539,6 +785,11 @@ impl Power {
             _ => vec![],
         }
     }
+
+    pub const AFTER_SIDE_TURN_END: IdSet = {
+        use PowerId::*;
+        set(&[Vulnerable, Weak, Frail, NoBlock, Panache, Colossus, Intangible, Asleep, Skittish, Territorial, NoDraw, NoEnergyGain, OneTwoPunch, Rage, Tangled, Ringing, Rebound, Strangle, Tender, Hatch, EscapeArtist, BattlewornDummyTimeLimit, Tainted, Slumber, Disintegration, Shrink, Constrict, FlameBarrier, DiamondDiadem, SetupStrike, Mangle, FlexPotion, ShacklingPotion, SpeedPotion, FeedingFrenzy, DarkShackles, ReptileTrinket, Regen, Demise, Ritual, RetainHand, Duplication, Knockdown, DarkEmbrace, Juggling, HighVoltage, Nemesis])
+    };
 
     /// `AfterSideTurnEnd`. Returns the effects the power queues. May reset
     /// per-turn counters.
@@ -738,6 +989,11 @@ impl Power {
         }
     }
 
+    pub const AFTER_CARD_EXHAUSTED: IdSet = {
+        use PowerId::*;
+        set(&[FeelNoPain, DarkEmbrace])
+    };
+
     /// `AfterCardExhausted`.
     pub fn after_card_exhausted(&mut self, owner: CreatureRef, ethereal: bool) -> Vec<Effect> {
         if owner != CreatureRef::Player {
@@ -760,6 +1016,11 @@ impl Power {
             _ => vec![],
         }
     }
+
+    pub const AFTER_CARD_PLAYED: IdSet = {
+        use PowerId::*;
+        set(&[Slow, Enrage, WitheringPresence, Panache, Rage, Tender, Calamity, Juggling])
+    };
 
     /// `AfterCardPlayed`. `ty` is the played card's type, `id` its id.
     pub fn after_card_played(&mut self, owner: CreatureRef, ty: CardType, card_id: crate::ids::CardId, upgraded: bool) -> Vec<Effect> {
@@ -841,6 +1102,11 @@ impl Power {
         }
     }
 
+    pub const BEFORE_DAMAGE_RECEIVED: IdSet = {
+        use PowerId::*;
+        set(&[Thorns])
+    };
+
     /// `BeforeDamageReceived` on the owner: ThornsPower hits the attacker
     /// back, killing blow or not.
     pub fn before_damage_received(&self, owner: CreatureRef, props: ValueProp, dealer: Option<CreatureRef>) -> Vec<Effect> {
@@ -855,6 +1121,11 @@ impl Power {
             _ => vec![],
         }
     }
+
+    pub const AFTER_DAMAGE_RECEIVED: IdSet = {
+        use PowerId::*;
+        set(&[FlameBarrier, Inferno, TheGambit, Slippery, Shriek, Asleep, Slumber, Flutter, PersonalHive, Plow])
+    };
 
     /// `AfterDamageReceived` on the owner. `own_turn` is whether the owner's
     /// side is acting.
@@ -934,6 +1205,11 @@ impl Power {
         }
     }
 
+    pub const AFTER_BLOCK_GAINED: IdSet = {
+        use PowerId::*;
+        set(&[Juggernaut])
+    };
+
     /// `AfterBlockGained`.
     pub fn after_block_gained(&self, owner: CreatureRef, amount: f64) -> Vec<Effect> {
         match self.id {
@@ -950,6 +1226,11 @@ impl Power {
         }
     }
 
+    pub const AFTER_POWER_APPLIED_BY_OWNER: IdSet = {
+        use PowerId::*;
+        set(&[Vicious])
+    };
+
     /// `AfterPowerAmountChanged` for powers the owner applied.
     pub fn after_power_applied_by_owner(&self, applied: PowerId, amount: i32) -> Vec<Effect> {
         match self.id {
@@ -958,6 +1239,154 @@ impl Power {
                 vec![Effect::Draw { count: self.amount as u32, from_hand_draw: false }]
             }
             _ => vec![],
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ids::{CardId, ALL_POWERS};
+    use crate::types::CreatureRef::{Enemy, Player};
+
+    const OWNERS: [CreatureRef; 3] = [Player, Enemy(0), Enemy(1)];
+    const DEALERS: [Option<CreatureRef>; 4] = [None, Some(Player), Some(Enemy(0)), Some(Enemy(1))];
+    const SIDES: [Side; 2] = [Side::Player, Side::Enemy];
+    const TYPES: [CardType; 5] = [CardType::Attack, CardType::Skill, CardType::Power, CardType::Status, CardType::Curse];
+    fn props() -> [ValueProp; 5] {
+        let v = ValueProp::MOVE;
+        [v, ValueProp::UNPOWERED, ValueProp::NONE, v.or(ValueProp::UNBLOCKABLE), ValueProp::UNBLOCKABLE.or(ValueProp::UNPOWERED)]
+    }
+
+    /// Whether a hook reacts to `p` anywhere on a grid of arguments: returns
+    /// something other than what no power would, or changes the power.
+    type Reacts = fn(&mut Power) -> bool;
+
+    fn hooks() -> Vec<(&'static str, IdSet, Reacts)> {
+        vec![
+            ("modify_damage_additive", Power::DAMAGE_ADDITIVE, |p| {
+                OWNERS.iter().any(|&o| {
+                    OWNERS.iter().any(|&t| DEALERS.iter().any(|&d| props().iter().any(|&v| p.modify_damage_additive(o, t, d, v) != 0.0)))
+                })
+            }),
+            ("modify_damage_multiplicative", Power::DAMAGE_MULTIPLICATIVE, |p| {
+                OWNERS.iter().any(|&o| {
+                    OWNERS.iter().any(|&t| {
+                        DEALERS.iter().any(|&d| {
+                            props().iter().any(|&v| [(0, 0), (2, 0), (0, 50)].iter().any(|&(dv, dc)| p.modify_damage_multiplicative(o, t, d, v, dv, dc) != 1.0))
+                        })
+                    })
+                })
+            }),
+            ("modify_block_additive", Power::BLOCK_ADDITIVE, |p| {
+                OWNERS.iter().any(|&o| {
+                    OWNERS.iter().any(|&s| props().iter().any(|&v| [false, true].iter().any(|&d| p.modify_block_additive(o, s, v, d) != 0.0)))
+                })
+            }),
+            ("modify_block_multiplicative", Power::BLOCK_MULTIPLICATIVE, |p| {
+                OWNERS.iter().any(|&o| {
+                    OWNERS.iter().any(|&t| {
+                        props().iter().any(|&v| (0..3).any(|n| [false, true].iter().any(|&c| p.modify_block_multiplicative(o, t, v, n, c) != 1.0)))
+                    })
+                })
+            }),
+            ("modify_energy_gain", Power::ENERGY_GAIN, |p| [0, 1, 3].iter().any(|&a| p.modify_energy_gain(a) != a)),
+            ("modify_max_energy", Power::MAX_ENERGY, |p| [0, 3].iter().any(|&a| p.modify_max_energy(a) != a)),
+            ("modify_hand_draw", Power::HAND_DRAW, |p| [0, 5].iter().any(|&n| p.modify_hand_draw(n) != n)),
+            ("after_energy_reset", Power::AFTER_ENERGY_RESET, |p| OWNERS.iter().any(|&o| !p.after_energy_reset(o).is_empty())),
+            ("after_block_cleared", Power::AFTER_BLOCK_CLEARED, |p| OWNERS.iter().any(|&o| !p.after_block_cleared(o).is_empty())),
+            ("should_flush", Power::SHOULD_FLUSH, |p| !p.should_flush()),
+            ("should_clear_block", Power::SHOULD_CLEAR_BLOCK, |p| {
+                OWNERS.iter().any(|&o| OWNERS.iter().any(|&c| !p.should_clear_block(o, c)))
+            }),
+            ("should_draw", Power::SHOULD_DRAW, |p| [false, true].iter().any(|&h| !p.should_draw(h))),
+            ("blocks_smogged", Power::BLOCKS_SMOGGED, |p| p.blocks_smogged()),
+            ("free_card", Power::FREE_CARD, |p| TYPES.iter().any(|&t| p.free_card(t))),
+            ("extra_plays", Power::EXTRA_PLAYS, |p| TYPES.iter().any(|&t| p.extra_plays(t) != 0)),
+            ("before_hand_draw", Power::BEFORE_HAND_DRAW, |p| !p.before_hand_draw().is_empty()),
+            ("before_side_turn_start", Power::BEFORE_SIDE_TURN_START, |p| {
+                OWNERS.iter().any(|&o| SIDES.iter().any(|&s| (1..4).any(|r| !p.before_side_turn_start(o, s, r).is_empty())))
+            }),
+            ("after_side_turn_start", Power::AFTER_SIDE_TURN_START, |p| {
+                OWNERS.iter().any(|&o| SIDES.iter().any(|&s| (1..4).any(|t| (1..4).any(|r| !p.after_side_turn_start(o, s, t, r).is_empty()))))
+            }),
+            ("reset_at_side_turn_start", Power::RESET_AT_SIDE_TURN_START, |p| {
+                let before = p.clone();
+                OWNERS.iter().for_each(|&o| SIDES.iter().for_each(|&s| p.reset_at_side_turn_start(o, s)));
+                *p != before
+            }),
+            ("after_player_turn_start", Power::AFTER_PLAYER_TURN_START, |p| OWNERS.iter().any(|&o| !p.after_player_turn_start(o).is_empty())),
+            ("after_auto_pre_play", Power::AFTER_AUTO_PRE_PLAY, |p| !p.after_auto_pre_play().is_empty()),
+            ("after_card_drawn", Power::AFTER_CARD_DRAWN, |p| {
+                let before = p.clone();
+                !p.after_card_drawn().is_empty() || *p != before
+            }),
+            ("after_auto_post_play", Power::AFTER_AUTO_POST_PLAY, |p| !p.after_auto_post_play().is_empty()),
+            ("before_side_turn_end_very_early", Power::BEFORE_SIDE_TURN_END_VERY_EARLY, |p| {
+                OWNERS.iter().any(|&o| SIDES.iter().any(|&s| !p.before_side_turn_end_very_early(o, s).is_empty()))
+            }),
+            ("before_side_turn_end_early", Power::BEFORE_SIDE_TURN_END_EARLY, |p| {
+                OWNERS.iter().any(|&o| SIDES.iter().any(|&s| !p.before_side_turn_end_early(o, s).is_empty()))
+            }),
+            ("after_side_turn_end", Power::AFTER_SIDE_TURN_END, |p| {
+                let before = p.clone();
+                OWNERS.iter().any(|&o| SIDES.iter().any(|&s| !p.after_side_turn_end(o, s).is_empty())) || *p != before
+            }),
+            ("after_card_exhausted", Power::AFTER_CARD_EXHAUSTED, |p| {
+                let before = p.clone();
+                OWNERS.iter().any(|&o| [false, true].iter().any(|&e| !p.after_card_exhausted(o, e).is_empty())) || *p != before
+            }),
+            ("after_card_played", Power::AFTER_CARD_PLAYED, |p| {
+                let before = p.clone();
+                let cards = [CardId::Bash, CardId::DefendIronclad, CardId::Inflame, CardId::Wound, CardId::Regret];
+                OWNERS.iter().any(|&o| {
+                    TYPES.iter().any(|&t| cards.iter().any(|&c| [false, true].iter().any(|&u| !p.after_card_played(o, t, c, u).is_empty())))
+                }) || *p != before
+            }),
+            ("before_damage_received", Power::BEFORE_DAMAGE_RECEIVED, |p| {
+                OWNERS.iter().any(|&o| props().iter().any(|&v| DEALERS.iter().any(|&d| !p.before_damage_received(o, v, d).is_empty())))
+            }),
+            ("after_damage_received", Power::AFTER_DAMAGE_RECEIVED, |p| {
+                OWNERS.iter().any(|&o| {
+                    [0, 1, 7].iter().any(|&lost| {
+                        props().iter().any(|&v| {
+                            DEALERS.iter().any(|&d| {
+                                [false, true].iter().any(|&own| [0, 1, 5, 50].iter().any(|&hp| !p.after_damage_received(o, lost, v, d, own, hp).is_empty()))
+                            })
+                        })
+                    })
+                })
+            }),
+            ("after_block_gained", Power::AFTER_BLOCK_GAINED, |p| {
+                OWNERS.iter().any(|&o| [0.0, 5.0].iter().any(|&a| !p.after_block_gained(o, a).is_empty()))
+            }),
+            ("after_power_applied_by_owner", Power::AFTER_POWER_APPLIED_BY_OWNER, |p| {
+                ALL_POWERS.iter().any(|&id| [-1, 2].iter().any(|&a| !p.after_power_applied_by_owner(id, a).is_empty()))
+            }),
+        ]
+    }
+
+    /// A power a hook's set leaves out must do nothing in that hook, over a
+    /// spread of amounts, counters and appliers, which is what makes asking
+    /// only the powers in the set the same as asking all of them.
+    #[test]
+    fn hook_sets_name_every_power_that_reacts() {
+        for (name, hook_set, reacts) in hooks() {
+            for &id in ALL_POWERS {
+                if hook_set.contains(id as usize) {
+                    continue;
+                }
+                for amount in [-2, 1, 4] {
+                    for data in [0, 1, 3, 10] {
+                        for applier in [None, Some(Player), Some(Enemy(0))] {
+                            for skip_next_tick in [false, true] {
+                                let mut p = Power { id, amount, skip_next_tick, data, applier };
+                                assert!(!reacts(&mut p), "{id:?} reacts in {name} but is not in its set");
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }
