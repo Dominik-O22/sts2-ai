@@ -12,7 +12,9 @@ With `--search N` the fights of `--search-kinds` (elites and bosses by
 default) are played as the live pilot plays them (`sts2ai.play --search
 N`): a turn search of N copies at every decision with more than one legal
 action, the searches of every env in such a fight in one batch
-(`RunLoop`). It is much slower per run.
+(`RunLoop`). It is much slower per run. `--search-mode hybrid` (or
+`race`) plays those fights with the exact search's best `--top` lines
+picked by `--playouts` playouts each instead (`exactsearch.Hybrid`).
 
 Every env plays runs back to back. The numbers cover each env's first
 `--runs-per-env` runs, so long runs count as often as short ones; the
@@ -158,6 +160,7 @@ def play(
     win_starts: float = 0.0,
     win_runs: Path = TRACKER,
     win_holdout: bool = False,
+    hybrid: tuple[int, int, int] | None = None,
 ) -> tuple[list[End], list[RunFight], RunLoop, float]:
     """Plays until each env has finished `per_env` runs or `minutes` pass.
     Returns every fight that ended, every run that ended, the loop (its
@@ -168,7 +171,8 @@ def play(
     With `late_policy`, that policy makes the decisions from act
     `late_from_act` on (1-based) and `run_policy` the ones before.
     `win_starts` of the runs start with winners' players (`Envs.use_winner_starts`),
-    the held-out players' with `win_holdout`."""
+    the held-out players' with `win_holdout`. `hybrid` (top lines,
+    playouts, race size or 0) searches with `exactsearch.Hybrid`."""
     if win_starts > 0:
         held = envs.use_winner_starts(split_runs(win_runs, win_holdout), win_starts)
         print("winners' starts: " + ", ".join(f"{n} at {p}" for p, n in zip(START_POINTS, held) if n))
@@ -196,7 +200,7 @@ def play(
             picks.add(floats, ids, torch.softmax(logits, 1).cpu().numpy(), options)
         return options
 
-    loop = RunLoop(combat, device, envs, drain, search, search_kinds, groups, seed)
+    loop = RunLoop(combat, device, envs, drain, search, search_kinds, groups, seed, hybrid)
     start = time.perf_counter()
     envs.sim.log_fights(fights_out is not None)
     while left and time.perf_counter() - start < minutes * 60:
@@ -245,11 +249,18 @@ def report(fights: list[End], runs: list[RunFight], seed: int, last: int, loop: 
     elites = [e.won for e in in_counted if e.kind == "Elite"]
     bosses = " ".join(f"act {a + 1} {sum(table[(a, 'Boss')])}" for a in range(3))
     print(f"  elites won {np.mean(elites or [0]):.1%} of {len(elites)}; bosses beaten: {bosses} (of {len(counted)} runs)")
+    for kind in ("Elite", "Boss"):
+        act1 = [e for e in in_counted if e.run.act == 0 and e.kind == kind and e.won]
+        if act1:
+            print(
+                f"  act 1 {kind.lower()}s won: HP lost {np.mean([e.hp_lost for e in act1]):.1%} of max,"
+                f" left {np.mean([e.hp_frac for e in act1]):.1%} (mean of {len(act1)})"
+            )
     losses = Counter(e.encounter for e in in_counted if not e.won)
     print("  most runs lost to: " + ", ".join(f"{enc} {k}" for enc, k in losses.most_common(8)))
 
     rate = f"{loop.combat_steps * n / seconds:,.0f} combat steps/s, {loop.decisions / seconds:,.0f} run decisions/s, {len(runs) / seconds * 3600:,.0f} runs/hour"
-    searched = f", {loop.searched} decisions searched" if loop.search else ""
+    searched = f", {loop.searched} decisions searched" if loop.searching else ""
     print(f"throughput: {rate} ({seconds:.0f} s, {n} envs{searched})")
 
 
@@ -268,6 +279,10 @@ def main() -> None:
     ap.add_argument("--no-drain", action="store_true", help="answer one round of run decisions per combat step, not all (RunLoop)")
     ap.add_argument("--search", type=int, default=0, help="turn search with this many sim copies per decision, as the pilot (0: greedy)")
     ap.add_argument("--search-kinds", default="Elite,Boss", help="fight kinds searched (Weak,Normal,Elite,Boss); the rest greedy")
+    ap.add_argument("--search-mode", choices=("copies", "hybrid", "race"), default="copies", help="copies: --search N copies; hybrid, race: exactsearch.Hybrid")
+    ap.add_argument("--top", type=int, default=10, help="lines the hybrid plays out")
+    ap.add_argument("--playouts", type=int, default=32, help="playouts per line in the hybrid")
+    ap.add_argument("--race", type=int, default=8, help="playouts per round with --search-mode race")
     ap.add_argument("--late-policy", type=Path, default=None, help="run policy for the decisions from --late-from-act on")
     ap.add_argument("--late-from-act", type=int, default=2)
     ap.add_argument("--groups", type=int, default=4, help="draw-pile shuffles the search copies are split over")
@@ -304,6 +319,7 @@ def main() -> None:
         args.win_starts,
         args.win_runs,
         args.win_holdout,
+        None if args.search_mode == "copies" else (args.top, args.playouts, args.race if args.search_mode == "race" else 0),
     )
     if fights_out is not None:
         fights_out.close()

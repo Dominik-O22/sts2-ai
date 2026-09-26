@@ -260,7 +260,7 @@ class Hybrid:
             if len(live) == 0:
                 break
             u = forks.observe_unique(live.tolist(), self.floats.numpy(), self.ids.numpy(), self.mask.numpy(), inverse)
-            logits, _ = search.forward(policy, device, self.floats[:u], self.ids[:u])
+            logits, _ = search.forward(policy, device, self.floats[:u], self.ids[:u], chunk=search.CHOOSE_CHUNK)
             greedy = masked_logits(logits.float(), self.mask[:u].to(device, non_blocking=True)).argmax(dim=1).cpu().numpy()
             acts = greedy[inverse[: len(live)]]
             ask = live[in_turn[live]]
