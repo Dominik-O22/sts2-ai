@@ -386,7 +386,9 @@ pub struct Combat {
     /// Every shuffle result this combat, top first (the recorder's view).
     /// Only the replay reads it, so clones share it until the next shuffle.
     pub shuffle_log: Arc<Vec<Vec<(CardId, bool)>>>,
-    queue: VecDeque<Effect>,
+    /// Effects waiting to resolve, the next one last: `push_front` is a
+    /// push and taking the next is a pop.
+    queue: Vec<Effect>,
     next_uid: u32,
     /// False during setup, before the first turn starts.
     started: bool,
@@ -474,7 +476,7 @@ impl Combat {
             potions: setup.potions.to_vec(),
             script,
             shuffle_log,
-            queue: VecDeque::new(),
+            queue: Vec::new(),
             next_uid,
             started: false,
         };
@@ -504,8 +506,8 @@ impl Combat {
         c.started = true;
         c.galvanize_deck();
         let pre = c.relic_before_combat_start();
-        c.queue.extend(pre);
-        c.queue.push_back(Effect::StartTurn(Side::Player));
+        c.queue.push(Effect::StartTurn(Side::Player));
+        c.queue.extend(pre.into_iter().rev());
         c.run();
         c.stats.player_start_hp = c.player.creature.hp;
         c.stats.start_potions = c.potions.iter().flatten().count() as u32;
@@ -853,7 +855,7 @@ impl Combat {
                 assert!(p.can_skip, "choice cannot be skipped");
                 match p.then {
                     Then::DiscardThenDraw { picked } if picked > 0 => {
-                        self.queue.push_front(Effect::Draw { count: picked, from_hand_draw: false });
+                        self.queue.push(Effect::Draw { count: picked, from_hand_draw: false });
                     }
                     Then::TakeOffer => self.player.offer.clear(),
                     Then::Select { done, .. } => {
@@ -894,11 +896,11 @@ impl Combat {
                 let card = self.player.hand.remove(hand_idx);
                 let uid = card.uid;
                 self.player.play.push(card);
-                self.queue.push_back(Effect::PlayCard { uid, target, paid });
+                self.queue.insert(0, Effect::PlayCard { uid, target, paid });
             }
             Action::EndTurn => {
                 assert!(self.pending.is_none() && self.side == Side::Player, "not accepting end turn");
-                self.queue.push_back(Effect::EndPlayerTurn);
+                self.queue.insert(0, Effect::EndPlayerTurn);
             }
         }
         self.run();
@@ -935,7 +937,7 @@ impl Combat {
     fn run(&mut self) {
         let mut resolved = 0u32;
         while self.pending.is_none() {
-            let Some(e) = self.queue.pop_front() else { break };
+            let Some(e) = self.queue.pop() else { break };
             if self.is_over() {
                 self.queue.clear();
                 break;
@@ -956,9 +958,7 @@ impl Combat {
 
     /// Push sub-effects to the front, preserving their order.
     fn push_front_all(&mut self, effects: Vec<Effect>) {
-        for e in effects.into_iter().rev() {
-            self.queue.push_front(e);
-        }
+        self.queue.extend(effects.into_iter().rev());
     }
 
     fn resolve(&mut self, e: Effect) {
@@ -1125,7 +1125,7 @@ impl Combat {
                             t.extra_damage += dmg;
                         }
                     }
-                    self.queue.push_front(Effect::Exhaust { uid, ethereal: false });
+                    self.queue.push(Effect::Exhaust { uid, ethereal: false });
                 }
             }
             Effect::MoveCard { uid, to } => {
@@ -1261,7 +1261,7 @@ impl Combat {
                 } else if let Then::DiscardThenDraw { picked } = then {
                     // Gambler's Brew with the hand emptied: draw what was discarded.
                     if picked > 0 {
-                        self.queue.push_front(Effect::Draw { count: picked, from_hand_draw: false });
+                        self.queue.push(Effect::Draw { count: picked, from_hand_draw: false });
                     }
                 } else if let Then::Select { done, .. } = then {
                     let subs = self.finish_select(done);
@@ -1313,7 +1313,7 @@ impl Combat {
                     if let Some((id, amount)) = curse {
                         self.player.offer.clear();
                         let me = CreatureRef::Player;
-                        self.queue.push_front(Effect::ApplyPower { target: me, id, amount, applier: Some(me) });
+                        self.queue.push(Effect::ApplyPower { target: me, id, amount, applier: Some(me) });
                         return;
                     }
                     if self.stats.offer_free {
@@ -1391,7 +1391,7 @@ impl Combat {
                 // number moves on, the round does not.
                 self.begin_player_turn();
                 self.stats.extra_turn = true;
-                self.queue.push_front(Effect::StartTurn(Side::Player));
+                self.queue.push(Effect::StartTurn(Side::Player));
             }
             Effect::Shuffle => {
                 // CardPileCmd.Shuffle: discard then draw, shuffled together.
@@ -1508,7 +1508,7 @@ impl Combat {
                 // Rupture's deferred Strength.
                 let owed = std::mem::take(&mut self.stats.rupture_pending);
                 if owed > 0 {
-                    self.queue.push_front(Effect::ApplyPower {
+                    self.queue.push(Effect::ApplyPower {
                         target: CreatureRef::Player,
                         id: PowerId::Strength,
                         amount: owed,
@@ -1558,7 +1558,7 @@ impl Combat {
                 self.push_front_all(subs);
             }
             Effect::AutoPlayFromDrawTop { count, force_exhaust } => {
-                self.queue.push_front(Effect::AutoPlayTake { left: count, force_exhaust, taken: vec![] });
+                self.queue.push(Effect::AutoPlayTake { left: count, force_exhaust, taken: vec![] });
             }
             Effect::AutoPlayTake { left, force_exhaust, mut taken } => {
                 // All cards leave the draw pile before any is played, so a
@@ -1602,11 +1602,11 @@ impl Combat {
                 if target == CreatureRef::Player && self.player.creature.alive() {
                     self.player.creature.hp = 0;
                     if self.save_player() == Some(true) {
-                        self.queue.push_front(Effect::AfterPotionUsed);
+                        self.queue.push(Effect::AfterPotionUsed);
                     }
                     self.check_win();
                 } else {
-                    self.queue.push_front(Effect::Kill { target });
+                    self.queue.push(Effect::Kill { target });
                 }
             }
             Effect::AutoPlayRandomAttack => {
@@ -1625,7 +1625,7 @@ impl Combat {
                     None => rolled,
                 };
                 if let Some(uid) = pick {
-                    self.queue.push_front(Effect::AutoPlay { uid, force_exhaust: false });
+                    self.queue.push(Effect::AutoPlay { uid, force_exhaust: false });
                 }
             }
             Effect::AggressionPull { count } => {
@@ -2923,7 +2923,7 @@ impl Combat {
         if lost > 0 && props.is_powered() {
             if let Some(d) = dealer.filter(|&d| d != target) {
                 if let Some(amount) = self.creature(d).power(PowerId::Suck).map(|p| p.amount) {
-                    self.queue.push_front(Effect::ApplyPower {
+                    self.queue.push(Effect::ApplyPower {
                         target: d,
                         id: PowerId::Strength,
                         amount,
