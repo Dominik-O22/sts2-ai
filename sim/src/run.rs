@@ -171,6 +171,19 @@ impl RunRelic {
         let counter = crate::pools::sim_relic(id).map_or(0, |r| crate::relic::Relic::new(r).counter);
         RunRelic { id: id.to_string(), counter, flag: false }
     }
+
+    /// The run's copy of the sim's relic `r`, named `id`.
+    fn of_sim(id: String, r: &Relic) -> Self {
+        let (counter, flag) = if flag_in_counter(r.id) { (0, r.counter > 0) } else { (r.counter, false) };
+        RunRelic { id, counter, flag }
+    }
+}
+
+/// Relics whose carried bool (Lizard Tail spent, a Venerable Tea Set
+/// primed) the sim keeps in `counter` and the run in `flag`, which the run
+/// observation and `Run::used_up` read.
+fn flag_in_counter(id: crate::relic::RelicId) -> bool {
+    matches!(id, crate::relic::RelicId::LizardTail | crate::relic::RelicId::VenerableTeaSet)
 }
 
 /// A singleplayer Ironclad run as the run layer sees it.
@@ -247,7 +260,7 @@ impl Carried {
                     enchantment: c.enchantment.as_ref().map(|e| Enchant { id: name(format!("{:?}", e.id)), amount: e.amount }),
                 })
                 .collect(),
-            relics: setup.relics.iter().map(|r| RunRelic { id: name(format!("{:?}", r.id)), counter: r.counter, flag: r.flag }).collect(),
+            relics: setup.relics.iter().map(|r| RunRelic::of_sim(name(format!("{:?}", r.id)), r)).collect(),
             potions: setup.potions.iter().map(|p| p.map(|id| name(format!("{id:?}")))).collect(),
             card_odds: CardOdds::default(),
             potion_odds: PotionOdds::default(),
@@ -547,7 +560,8 @@ impl RunState {
             .filter(|r| !INERT_RELICS.contains(&r.id.as_str()))
             .map(|r| {
                 let id = sim_relic(&r.id).ok_or_else(|| format!("unknown relic {}", r.id))?;
-                Ok(Relic { counter: r.counter, flag: r.flag, ..Relic::new(id) })
+                let counter = if flag_in_counter(id) { r.flag as i32 } else { r.counter };
+                Ok(Relic { counter, ..Relic::new(id) })
             })
             .collect::<Result<Vec<Relic>, String>>()?;
         let potions = self
@@ -592,8 +606,7 @@ impl RunState {
         self.potions = combat.potions.iter().map(|p| p.map(|id| slug(&format!("{id:?}")))).collect();
         for relic in &combat.relics {
             if let Some(held) = self.relic_mut(&slug(&format!("{:?}", relic.id))) {
-                held.counter = relic.counter;
-                held.flag = relic.flag;
+                *held = RunRelic::of_sim(std::mem::take(&mut held.id), relic);
             }
         }
         let escaped: Vec<MonsterId> = combat.enemies.iter().filter(|e| e.escaped).map(|e| e.monster.id).collect();
@@ -640,7 +653,7 @@ mod tests {
             .map(|r| {
                 let mut relic = RunRelic::new(r.as_str().unwrap());
                 if let (Some(n), Some(id)) = (start["relic_state"][&relic.id].as_i64(), sim_relic(&relic.id)) {
-                    relic.counter = crate::gen::relic_counter(id, n as i32);
+                    relic = RunRelic::of_sim(relic.id, &Relic { counter: crate::gen::relic_counter(id, n as i32), ..Relic::new(id) });
                 }
                 relic
             })
