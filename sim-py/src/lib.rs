@@ -4,7 +4,7 @@
 //! are numpy arrays the caller allocates once; `observe` and `step` fill
 //! them in place with the GIL released.
 
-use numpy::{PyReadonlyArray1, PyReadwriteArray1, PyReadwriteArray2};
+use numpy::{PyReadonlyArray1, PyReadonlyArray2, PyReadwriteArray1, PyReadwriteArray2};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use serde_json::Value;
@@ -429,6 +429,138 @@ impl Forks {
     }
 }
 
+/// The exact turn search (`sim::turnsearch`) for the fights of a `VecEnv`,
+/// one search per env kept between decisions: a later decision of the
+/// same turn that the search already expanded reuses it, unless the state
+/// cap cut it short.
+///
+/// Per decision: `prepare` searches where needed, `encode_leaves` and
+/// `set_values` put the value head on the new searches' leaves, and
+/// `action_values` reads each env's action values.
+#[pyclass]
+struct TurnPlanner {
+    cfg: sim::turnsearch::Config,
+    searches: Vec<Option<sim::turnsearch::Search>>,
+    /// Envs searched afresh by the last `prepare`, awaiting values.
+    fresh: Vec<usize>,
+}
+
+impl TurnPlanner {
+    fn fresh_leaves(&self) -> Vec<&sim::combat::Combat> {
+        self.fresh.iter().flat_map(|&i| self.searches[i].as_ref().unwrap().leaves().iter().map(|l| &*l.combat)).collect()
+    }
+}
+
+#[pymethods]
+impl TurnPlanner {
+    #[new]
+    #[pyo3(signature = (n, max_states=500, quiesce_states=1000, draw_cap=32, samples=4, end_samples=8, max_micros=0, seed=0))]
+    #[allow(clippy::too_many_arguments)]
+    fn new(n: usize, max_states: usize, quiesce_states: usize, draw_cap: usize, samples: usize, end_samples: usize, max_micros: u64, seed: u64) -> Self {
+        let cfg = sim::turnsearch::Config { max_states, quiesce_states, draw_cap, samples, end_samples, max_micros, seed };
+        Self { cfg, searches: (0..n).map(|_| None).collect(), fresh: vec![] }
+    }
+
+    /// Get each of `envs` a search holding its current state: the one it
+    /// has, when that expanded the state and was not cut short, or a new
+    /// one ordered by `priors [len(envs), N_ACTIONS]` (the policy's
+    /// probabilities). Returns the envs searched afresh.
+    fn prepare(&mut self, py: Python<'_>, env: PyRef<'_, VecEnv>, envs: Vec<usize>, priors: PyReadonlyArray2<f32>) -> PyResult<Vec<usize>> {
+        let priors = priors.as_slice()?;
+        let inner = &env.inner;
+        let (fresh, rows): (Vec<usize>, Vec<usize>) = envs
+            .iter()
+            .enumerate()
+            .filter(|&(_, &i)| !self.searches[i].as_ref().is_some_and(|s| !s.stats.capped && s.find(inner.combat(i)).is_some()))
+            .map(|(row, &i)| (i, row))
+            .unzip();
+        let roots: Vec<&sim::combat::Combat> = fresh.iter().map(|&i| inner.combat(i)).collect();
+        let p: Vec<Option<&[f32]>> = rows.iter().map(|&r| Some(&priors[r * N_ACTIONS..][..N_ACTIONS])).collect();
+        let cfg = self.cfg;
+        let done = py.detach(|| sim::turnsearch::Search::run_all(&roots, &p, &cfg));
+        for (&i, s) in fresh.iter().zip(done) {
+            self.searches[i] = Some(s);
+        }
+        self.fresh = fresh.clone();
+        Ok(fresh)
+    }
+
+    /// Leaves of the searches the last `prepare` made, all together.
+    fn n_leaves(&self) -> usize {
+        self.fresh.iter().map(|&i| self.searches[i].as_ref().unwrap().leaves().len()).sum()
+    }
+
+    /// Encode leaves `start..` into the buffers, as many as they hold.
+    /// Returns how many were written.
+    fn encode_leaves(
+        &self,
+        py: Python<'_>,
+        start: usize,
+        mut floats: PyReadwriteArray2<f32>,
+        mut ids: PyReadwriteArray2<i64>,
+        mut mask: PyReadwriteArray2<bool>,
+    ) -> PyResult<usize> {
+        let (f, i, m) = (floats.as_slice_mut()?, ids.as_slice_mut()?, mask.as_slice_mut()?);
+        let leaves = self.fresh_leaves();
+        let n = (f.len() / N_FLOATS).min(leaves.len().saturating_sub(start));
+        py.detach(|| sim::turnsearch::encode_all(&leaves[start..start + n], f, i, m));
+        Ok(n)
+    }
+
+    /// The value head's value of every leaf `encode_leaves` wrote, in order.
+    fn set_values(&mut self, values: PyReadonlyArray1<f32>) -> PyResult<()> {
+        let mut v = values.as_slice()?;
+        for &i in &self.fresh {
+            let s = self.searches[i].as_mut().unwrap();
+            let n = s.leaves().len();
+            s.set_values(&v[..n]);
+            v = &v[n..];
+        }
+        if !v.is_empty() {
+            return Err(pyo3::exceptions::PyValueError::new_err("more values than leaves"));
+        }
+        Ok(())
+    }
+
+    /// (action index, value) for env `i`'s legal actions, or None when its
+    /// search does not hold its state.
+    fn action_values(&self, env: PyRef<'_, VecEnv>, i: usize) -> Option<Vec<(usize, f32)>> {
+        self.searches[i].as_ref()?.action_values(env.inner.combat(i))
+    }
+
+    /// Env `i`'s search as numbers: states found and expanded, leaves,
+    /// steps by rule, whether the cap bit, time, and the best line's
+    /// rank and cut (`Search::best_line`).
+    fn stats<'py>(&self, py: Python<'py>, i: usize) -> PyResult<Option<Bound<'py, PyDict>>> {
+        let Some(s) = self.searches[i].as_ref() else { return Ok(None) };
+        let d = PyDict::new(py);
+        let t = &s.stats;
+        for (k, v) in [
+            ("nodes", t.nodes),
+            ("expanded", t.expanded),
+            ("end_leaves", t.end_leaves),
+            ("cut_leaves", t.cut_leaves),
+            ("arrivals", t.arrivals),
+            ("det", t.det),
+            ("drawn", t.drawn),
+            ("sampled", t.sampled),
+            ("end_turn", t.end_turn),
+            ("quiesced", t.quiesced),
+        ] {
+            d.set_item(k, v)?;
+        }
+        d.set_item("lines", t.lines)?;
+        d.set_item("capped", t.capped)?;
+        d.set_item("micros", t.micros)?;
+        if !s.leaves().is_empty() {
+            let (rank, cut) = s.best_line();
+            d.set_item("pv_rank", rank)?;
+            d.set_item("pv_cut", cut)?;
+        }
+        Ok(Some(d))
+    }
+}
+
 impl Advisor {
     fn combat(&self) -> PyResult<&sim::combat::Combat> {
         self.inner.as_ref().map(Replayer::combat).ok_or_else(|| pyo3::exceptions::PyValueError::new_err("no combat yet"))
@@ -591,6 +723,7 @@ fn _sim(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<VecEnv>()?;
     m.add_class::<Advisor>()?;
     m.add_class::<Forks>()?;
+    m.add_class::<TurnPlanner>()?;
     m.add_function(wrap_pyfunction!(layout, m)?)?;
     m.add_function(wrap_pyfunction!(card_names, m)?)?;
     m.add_function(wrap_pyfunction!(card_ids, m)?)?;
