@@ -6,7 +6,8 @@
 //! Reports three numbers: steps per second over whole playouts (the setup's
 //! `Combat` built outside the clock), what cloning a mid-fight state costs,
 //! and what one action costs on a fresh clone (clone, legal actions, step),
-//! the unit a tree search pays per node.
+//! the unit a tree search pays per node. Each is the best of five rounds,
+//! which keeps a busy machine's preemptions out of the number.
 use std::hint::black_box;
 use std::time::Instant;
 
@@ -15,10 +16,17 @@ use sim::replay::Ids;
 use sim::rng::Rng;
 use sim::Combat;
 
-fn playouts(setups: &[&FightSetup], passes: u64) -> (u64, f64) {
+const ROUNDS: usize = 5;
+
+/// The round with the best rate: units done over seconds taken.
+fn best(mut round: impl FnMut(usize) -> (u64, f64)) -> (u64, f64) {
+    (0..ROUNDS).map(&mut round).max_by(|a, b| (a.0 as f64 / a.1).total_cmp(&(b.0 as f64 / b.1))).unwrap()
+}
+
+fn playouts(setups: &[&FightSetup], passes: std::ops::Range<u64>) -> (u64, f64) {
     let mut steps = 0u64;
     let mut secs = 0.0;
-    for pass in 0..passes {
+    for pass in passes {
         for (i, s) in setups.iter().enumerate() {
             let seed = pass * 100_003 + i as u64;
             let mut c = s.combat(seed);
@@ -68,8 +76,8 @@ fn main() {
     let relics = all.iter().map(|s| s.relics.len()).sum::<usize>() as f64 / all.len() as f64;
     println!("{} fights ({} act 3 or boss), {deck:.1} cards and {relics:.1} relics on average", all.len(), heavy.len());
 
-    for (name, set, passes) in [("all", &all, 12), ("act3+boss", &heavy, 12)] {
-        let (steps, secs) = playouts(set, passes);
+    for (name, set) in [("all", &all), ("act3+boss", &heavy)] {
+        let (steps, secs) = best(|r| playouts(set, 3 * r as u64..3 * r as u64 + 3));
         println!("playouts {name:>9}: {:>9.0} steps/s ({:.0} ns/step, {steps} steps)", steps as f64 / secs, 1e9 * secs / steps as f64);
     }
 
@@ -81,26 +89,32 @@ fn main() {
     println!("Combat::new       : {:>9.0} ns", 1e9 * t.elapsed().as_secs_f64() / n_new as f64);
 
     let roots: Vec<Combat> = all.iter().step_by(4).enumerate().filter_map(|(i, s)| mid_fight(s, i as u64, 12)).collect();
-    let reps = 3000;
-    let t = Instant::now();
-    for _ in 0..reps {
-        for r in &roots {
-            black_box(r.clone());
+    let reps = 600;
+    let (n, secs) = best(|_| {
+        let t = Instant::now();
+        for _ in 0..reps {
+            for r in &roots {
+                black_box(r.clone());
+            }
         }
-    }
-    let clone_ns = 1e9 * t.elapsed().as_secs_f64() / (reps * roots.len()) as f64;
+        ((reps * roots.len()) as u64, t.elapsed().as_secs_f64())
+    });
+    let clone_ns = 1e9 * secs / n as f64;
     println!("clone             : {clone_ns:>9.0} ns ({} mid-fight states, {:.0} clones/s)", roots.len(), 1e9 / clone_ns);
 
-    let mut rng = Rng::new(1);
-    let t = Instant::now();
-    for _ in 0..reps {
-        for r in &roots {
-            let mut c = r.clone();
-            let acts = c.legal_actions();
-            c.step(acts[rng.next_int(acts.len())]);
-            black_box(&c);
+    let (n, secs) = best(|_| {
+        let mut rng = Rng::new(1);
+        let t = Instant::now();
+        for _ in 0..reps {
+            for r in &roots {
+                let mut c = r.clone();
+                let acts = c.legal_actions();
+                c.step(acts[rng.next_int(acts.len())]);
+                black_box(&c);
+            }
         }
-    }
-    let node_ns = 1e9 * t.elapsed().as_secs_f64() / (reps * roots.len()) as f64;
+        ((reps * roots.len()) as u64, t.elapsed().as_secs_f64())
+    });
+    let node_ns = 1e9 * secs / n as f64;
     println!("clone+legal+step  : {node_ns:>9.0} ns ({:.0} nodes/s, step after clone {:.0} ns)", 1e9 / node_ns, node_ns - clone_ns);
 }
