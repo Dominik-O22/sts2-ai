@@ -313,7 +313,7 @@ fixed-width tokens with a presence flag, so a batch is one array
   act's boss and second boss, the event or ancient being played; HP as a
   fraction and in points, max HP, gold, floor, ascension, the four `UnknownOdds`, the card rarity
   offset, the potion drop odds, deck size, potion slots and empty ones,
-  card removals bought;
+  card removals bought; at a map step, the forecast (below);
 - a token per deck card (id, upgraded, enchantment and amount, 64 at
   most), relic (id, counter, flag, 40 at most) and potion held;
 - a token per option (72 at most: a deck pick lists the deck, and a skip):
@@ -321,8 +321,9 @@ fixed-width tokens with a presence flag, so a batch is one array
   buy a relic, remove through a deck pick, leave the shop, and so on), the
   cards, enchantment, relic or potion it names, the price, and for a map
   step the point's type, its map column, the fewest and most of each
-  point type on paths through it to the boss, and the rows to the nearest
-  rest site and shop. An event option carries its event, page and key
+  point type on paths through it to the boss, the rows to the nearest
+  rest site and shop, and the fewest and most elites on its paths before
+  the next rest site. An event option carries its event, page and key
   hashed into 1024 buckets, which stays stable as events are ported, and
   the items its layout drew;
 - at a map step, the map ahead (ids only, after the tokens): every point
@@ -559,6 +560,106 @@ runs. An earlier cut kept the winners' own seeds, and only entrances
 whose floors all matched the record (320 and 26 train players): 3.2%
 and 18.8%. Its 26 act 3 entrances were the few runs the port follows
 floor for floor, not a sample of the rest.
+
+### The forecast
+
+The winners' clone routes like a winner whatever its HP, and a winner's
+combat wins the elites it walks into; ours does not, and 62% of the
+clone's runs die in act 1, mostly to its elites. PPO run policies learned
+the other extreme, no elites at all, which starves the deck. What the
+policy lacked is what the combat it has would make of an elite now.
+
+At a map step `runobs::forecast_fights` hands out the fights to ask about:
+every elite the act can hold, as a pool, and the boss or bosses the map
+shows, each against the player as they stand (deck, relics, potions, HP,
+max HP), four rolled openings each. Which elite a map point will hold is
+the plan's and stays out, and the enemies and each opening's combat seed
+come from the roll's index alone, so the fights are a function of what
+the player sees (`runobs::tests::the_forecast_reads_no_hidden_information`,
+and the imitation and winner-start tests, which compare whole observations,
+forecast fights included, across reseeded runs). Cards, relics and
+potions the combat sim lacks (other characters' cards) are left out of
+them.
+
+`sts2ai.forecast` reads their openings with the combat policy's value
+head in one batch and averages the openings per encounter. The value is
+the fight's expected reward (a win about 1 + half the HP fraction kept,
+a loss about -1), so a calibration fitted on played fights turns it and
+the HP fraction now into a win chance, sigmoid(a V + b hp + c), and the
+HP fraction kept after a win, linear in the same. The act's elites' mean
+of both and the boss's fill four float slots at the end of the global
+token (0 at other decisions). With the elites-before-rest counts on each
+path option, the policy can set "this branch commits me to an elite
+before I can rest" against "I would win it X% of the time at this HP";
+the map encoder reads the forecast too, as part of the run state it
+mixes into every node, elites deeper in the map among them.
+
+One code path fills it: `Forecaster.fill`, which RunLoop calls before
+every decision round (runtrain, runplay) and `imitation build --combat
+--forecast` calls on the winners' rows (their states, our combat's
+forecast). A run checkpoint keeps the calibration it was trained with,
+and runplay takes it from there. Run checkpoints from before the forecast
+load with its columns at zero weight and play as they did.
+
+Cost per map step: 16 openings (three elites and a boss, four each),
+0.09 ms of CPU to build and encode them, and one value-head forward per
+decision round that has map steps in it, a few ms on a GPU shared with a
+training run, about as much as the run policy's own forward.
+
+`runplay --forecast-log FILE` writes each map step into an elite with
+the value that elite read and how the fight went, and `python -m
+sts2ai.forecast calibrate FILE --out CAL.json` fits the calibration and
+prints the table by forecast bucket.
+
+The value head reads these fights well. gen7's calibration was fitted on
+2,048 elite fights from the clone's runs (gen7 with turn search in every
+fight, `imitate-paths` routing; win = sigmoid(3.10 V - 0.18 hp + 0.06)).
+On act 1's elites, the forecast of the elite the step led to against how
+the fight went, held-out fights (the rest of that log and the forecast
+clone's runs, 2026-09-26):
+
+| Forecast win | fights | forecast mean | won | HP kept after a win, forecast / seen |
+|---|---|---|---|---|
+| under 30% | 166 | 15% | 16% | 0.06 / 0.18 |
+| 30-50% | 107 | 41% | 50% | 0.14 / 0.21 |
+| 50-60% | 58 | 55% | 53% | 0.16 / 0.20 |
+| 60-70% | 52 | 66% | 58% | 0.21 / 0.20 |
+| 70-80% | 97 | 75% | 74% | 0.24 / 0.23 |
+| 80-90% | 195 | 86% | 84% | 0.30 / 0.24 |
+| 90-95% | 284 | 93% | 92% | 0.36 / 0.30 |
+| 95% and up | 1,414 | 97% | 99% | 0.47 / 0.47 |
+| all | 2,373 | 85% | 86% | |
+
+Over the 3,615 held-out elite fights of all acts the forecast separates
+wins from losses with an AUC of 0.92, where the HP fraction alone gives
+0.74 (log loss 0.22 against 0.33, HP fitted on the same fights). Simulating the fights instead was not
+needed. The fights logged are the map steps with a choice; a step with
+one option is not asked (`env::Replay`), so about half of the act's elite
+fights are not in the table. The HP kept is linear in the value and
+reads low for the fights the model gives up on.
+
+The winners, read by our combat, step into an elite on 77% of act 1 map
+steps offering one when the forecast is 95% or more and on 31% when it
+is under 50% (the train rows).
+
+Cloning the winners with it teaches little. gen7 plays every fight with
+turn search 256, 256 envs, each env's first 8 runs (2048), 2026-09-26:
+
+| Run policy | won | ended in act 1 | reached act 3 | map steps into an elite | act 1 elites won |
+|---|---|---|---|---|---|
+| `imitate-paths` (gen5 cards, before the forecast) | 54 (2.6%) | 63% | 16.6% | 15.5% | 82.4% |
+| `imitate-forecast` (gen7, forecast rows) | 70 (3.4%) | 60% | 20.3% | 16.4% | 84.8% |
+| `imitate-noforecast` (the same rows, forecast zeroed) | 84 (4.1%) | 62% | 19.0% | 16.8% | 83.3% |
+
+The two new clones differ by less than the noise (a count of 70 has a
+standard error near 8), and the one without the forecast won more. The
+forecast clone's pick moves little with the forecast: on the holdout's
+map steps offering an elite, setting the elites' forecast to 20% instead
+of 97% takes its chance of the elite from 58% to 53%. The winners' low
+forecasts come with low HP, which the clone reads already. What the
+forecast does find is where the clone loses: of its act 1 elite fights
+logged, 13% are entered at a forecast under 50%, and those give 60% of
+the losses (184 of 308). Learning to pass those up is PPO's to do.
 
 ### Exactness
 
