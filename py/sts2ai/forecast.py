@@ -190,13 +190,13 @@ def main() -> None:
     c.add_argument("--out", type=Path, default=None, help="write the calibration here")
     c.add_argument("--check", type=Path, default=None, help="print the table of an existing calibration instead of fitting")
     c.add_argument("--acts", default="0", help="acts (0-based, comma separated) to fit on")
+    c.add_argument("--combat", default="", help="the combat checkpoint the log's runs played with, to record")
     args = ap.parse_args()
     logs = [load_log(p) for p in args.logs]
     log = {k: np.concatenate([g[k] for g in logs]) for k in logs[0]}
     keep = np.isin(log["act"], [int(a) for a in args.acts.split(",")])
     log = {k: v[keep] for k, v in log.items()}
-    combat = str(log["combat"][0]) if "combat" in log else ""
-    cal = Calibration.load(args.check) if args.check else fit(log["value"], log["hp"], log["won"], log["kept"], combat)
+    cal = Calibration.load(args.check) if args.check else fit(log["value"], log["hp"], log["won"], log["kept"], args.combat)
     win, kept = cal.apply(log["value"], log["hp"])
     print(f"calibration: win {np.round(cal.win, 3).tolist()}, kept {np.round(cal.kept, 3).tolist()}")
     print(f"{len(win)} elite fights, value to win: by forecast bucket")
