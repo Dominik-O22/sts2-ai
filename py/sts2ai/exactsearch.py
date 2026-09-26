@@ -9,11 +9,17 @@ plus the value head where the next turn starts, the best action at each
 state, the expectation over draws and dice. The policy's own action stays
 unless another beats it by `PLAN_MARGIN`, as the advisor does.
 
-`main` plays the same fights three ways, greedy, with the current search
-(`searcheval`'s advise-style ranking over `--copies`) and with this one:
-the weak and normal fights of held-out winners scored by HP lost against
-what the winner lost (`evaluate --source easy`), and their elite and boss
-fights by wins.
+The hybrid (`Hybrid`) takes this search's best `--top` lines and plays
+each out to the fight's end, greedy, `P` times on dice every line of the
+fight shares, and picks by those: the value head's error between lines is
+larger than the gaps between them (runs/scratch-keep/value_noise.py).
+
+`main` plays the same fights several ways (`--modes`): greedy, with the
+current search (`searcheval`'s advise-style ranking over `--copies`),
+with this one (`exact`), and with the hybrid at P playouts (`hybridP`, or
+`raceP` stopping lines early): the weak and normal fights of held-out
+winners scored by HP lost against what the winner lost (`evaluate
+--source easy`), and their elite and boss fights by wins.
 """
 
 from __future__ import annotations
@@ -21,7 +27,9 @@ from __future__ import annotations
 import argparse
 import json
 import random
+import re
 import time
+from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -38,6 +46,13 @@ from sts2ai.setups import EASY_HOLDOUT, HOLDOUT
 # Leaves per value-head call: a few hundred MB of observations, and small
 # enough to share the GPU with a training run.
 LEAF_CHUNK = 4096
+# Copies one playout batch holds: its observation buffers take some 12 KB
+# a row.
+PLAYOUT_ROWS = 16384
+# Steps a playout gets, the env's own cap per fight, and the turns it
+# may take: to the fight's end.
+PLAYOUT_STEPS = 500
+PLAYOUT_DEPTH = 10_000
 
 
 class Planner:
@@ -88,6 +103,175 @@ class Planner:
                 actions[i] = best
 
 
+class Hybrid:
+    """The exact search's best `top` lines from a decision, and the
+    policy's best line (the best that opens with its action), each played
+    out `playouts` times to the fight's end on dice and shuffles every line
+    of the fight shares: the search's best action where a copy is still in
+    a state of the searched turn, greedy after. The policy's line stays
+    unless the best by playouts beats it by two standard errors of their
+    paired difference. With `race`, playouts come `race` at a time, and a
+    line that far behind the leader stops. The line picked is followed
+    until chance or the turn's end takes the fight off it."""
+
+    def __init__(self, envs: Envs, top: int, playouts: int, race: int, seed: int, **config: int):
+        self.envs = envs
+        self.planner = Planner(envs, seed=seed, **config)
+        self.top, self.playouts, self.race, self.seed = top, playouts, race, seed
+        L = envs.layout
+        pin = torch.cuda.is_available()
+        self.floats = torch.zeros((PLAYOUT_ROWS, L.n_floats), pin_memory=pin)
+        self.ids = torch.zeros((PLAYOUT_ROWS, L.n_ids), dtype=torch.int64, pin_memory=pin)
+        self.mask = torch.zeros((PLAYOUT_ROWS, L.n_actions), dtype=torch.bool, pin_memory=pin)
+        self.copy_steps = 0
+        self.followed = 0
+        self.overrides = 0
+        self.calls = 0
+        self.unreplayed = 0
+
+    def choose(self, policy: Policy, device: torch.device, roots: list[int], probs: np.ndarray, actions: np.ndarray) -> None:
+        """Replace `actions[i]` for each of `roots` by its committed line's
+        action, or pick a line afresh."""
+        inner, sim = self.planner.inner, self.envs.sim
+        need = []
+        for i in roots:
+            a = inner.planned_action(sim, i)
+            if a is None:
+                need.append(i)
+            else:
+                actions[i] = a
+                self.followed += 1
+        if not need:
+            return
+        fresh = inner.prepare(sim, need, np.ascontiguousarray(probs[need]))
+        self.planner.reused += len(need) - len(fresh)
+        self.planner.score_leaves(policy, device)
+        self.planner.searched += [inner.stats(i) for i in fresh]
+        # Per env: its lines, the ones played out, and the policy's.
+        cands: dict[int, tuple[list, list[int], int]] = {}
+        for i in need:
+            lines = inner.lines(sim, i) or []
+            mine = next((k for k, line in enumerate(lines) if line[0] == actions[i]), None)
+            if mine is None:
+                continue
+            pool = list(range(min(self.top, len(lines))))
+            cands[i] = (lines, pool if mine in pool else pool + [mine], mine)
+        self.calls += 1
+        exact, samples = self.play_lines(policy, device, cands)
+        for i, (lines, pool, mine) in cands.items():
+            if mine not in pool:
+                continue
+            best = max(pool, key=lambda k: self.mean(exact, samples, (i, k)))
+            k = best if best != mine and self.beats(exact, samples, (i, best), (i, mine)) else mine
+            inner.commit(i, k)
+            self.overrides += lines[k][0] != actions[i]
+            actions[i] = lines[k][0]
+
+    @staticmethod
+    def mean(exact: dict, samples: dict, x: tuple[int, int]) -> float:
+        return exact[x] if x in exact else float(samples[x].mean())
+
+    @staticmethod
+    def beats(exact: dict, samples: dict, x: tuple[int, int], y: tuple[int, int]) -> bool:
+        """Whether line x leads line y by two standard errors of their
+        difference over the playouts both had (on the same dice); a line
+        that ends the fight is exact."""
+        m = min((len(samples[z]) for z in (x, y) if z not in exact), default=1)
+        a, b = (np.full(m, exact[z]) if z in exact else samples[z][:m] for z in (x, y))
+        d = a - b
+        se = d.std(ddof=1) / np.sqrt(m) if m > 1 else 0.0
+        return bool(d.mean() > 2 * se)
+
+    def play_lines(self, policy: Policy, device: torch.device, cands: dict) -> tuple[dict, dict]:
+        """Each candidate line's value: exact for one that ends the fight,
+        else its playouts (reward on the way plus what they collected)."""
+        exact: dict[tuple[int, int], float] = {}
+        samples: dict[tuple[int, int], np.ndarray] = {}
+        alive = []
+        for i, (lines, pool, _) in cands.items():
+            for k in pool:
+                if lines[k][3] == "Over":
+                    exact[(i, k)] = lines[k][1]
+                else:
+                    samples[(i, k)] = np.zeros(0, np.float32)
+                    alive.append((i, k))
+        per = self.race or self.playouts
+        for t in range(max(1, self.playouts // per)):
+            batch = max(1, PLAYOUT_ROWS // per)
+            for start in range(0, len(alive), batch):
+                chunk = alive[start : start + batch]
+                # One seed per fight and round: its lines meet the same luck.
+                seeds = [hash((self.seed, self.calls, i, t)) & (2**63 - 1) for i, _ in chunk]
+                forks, last, ok = self.planner.inner.fork_lines(self.envs.sim, chunk, per, seeds, PLAYOUT_DEPTH)
+                self.unreplayed += len(ok) - sum(ok)
+                chunk = [ik for ik, fine in zip(chunk, ok) if fine]
+                sums = self.play_out(policy, device, forks, np.array(last, np.int64), np.array([i for i, _ in chunk], np.int64), per)
+                for p, (i, k) in enumerate(chunk):
+                    samples[(i, k)] = np.concatenate([samples[(i, k)], cands[i][0][k][2] + sums[p * per : (p + 1) * per]])
+            # A line the fight could not follow is out.
+            for ik in [ik for ik in alive if len(samples[ik]) == 0]:
+                del samples[ik]
+                i, k = ik
+                cands[i][1].remove(k)
+            alive = [ik for ik in alive if ik in samples]
+            if self.race:
+                alive = self.still_racing(exact, samples, cands, alive)
+            if not alive:
+                break
+        return exact, samples
+
+    def still_racing(self, exact: dict, samples: dict, cands: dict, alive: list) -> list:
+        """The lines worth more playouts: a fight whose leader already beats
+        the policy's line is decided, and so is one whose policy line leads
+        with every other line beaten; a line the leader beats stops."""
+        by_env = defaultdict(list)
+        for i, k in alive:
+            by_env[i].append(k)
+        out = []
+        for i, ks in by_env.items():
+            _, pool, mine = cands[i]
+            if mine not in pool:
+                continue
+            best = max(pool, key=lambda k: self.mean(exact, samples, (i, k)))
+            if best != mine and self.beats(exact, samples, (i, best), (i, mine)):
+                continue
+            keep = [k for k in ks if k in (best, mine) or not self.beats(exact, samples, (i, best), (i, k))]
+            if best == mine and set(keep) <= {mine}:
+                continue
+            out += [(i, k) for k in keep]
+        return out
+
+    @torch.no_grad()
+    def play_out(self, policy: Policy, device: torch.device, forks, last: np.ndarray, owners: np.ndarray, per: int) -> np.ndarray:
+        """Play every copy to its fight's end, `per` copies per line: the
+        line's last step first, then the search's best action while the
+        copy is in a state of the searched turn, greedy after. Returns each
+        copy's summed reward."""
+        n = len(forks)
+        first, owner = np.repeat(last, per), np.repeat(owners, per)
+        sums = np.zeros(n, np.float32)
+        rewards = np.zeros(n, np.float32)
+        inverse = np.empty(n, np.int64)
+        for step in range(PLAYOUT_STEPS):
+            live = np.array(forks.live(), np.int64)
+            if len(live) == 0:
+                break
+            u = forks.observe_unique(live.tolist(), self.floats.numpy(), self.ids.numpy(), self.mask.numpy(), inverse)
+            logits, _ = search.forward(policy, device, self.floats[:u], self.ids[:u])
+            greedy = masked_logits(logits.float(), self.mask[:u].to(device, non_blocking=True)).argmax(dim=1).cpu().numpy()
+            acts = greedy[inverse[: len(live)]]
+            tree = np.array(self.planner.inner.tree_actions(forks, live.tolist(), owner[live].tolist()), np.int64)
+            acts = np.where(tree >= 0, tree, acts)
+            if step == 0:
+                acts = np.where(first[live] >= 0, first[live], acts)
+            full = np.zeros(n, np.int64)
+            full[live] = acts
+            forks.step(full, rewards)
+            sums += rewards
+            self.copy_steps += len(live)
+        return sums
+
+
 @dataclass
 class Run:
     """One way of playing a set of fights: each fight's end, and cost."""
@@ -98,16 +282,28 @@ class Run:
     searched: list[dict] = field(default_factory=list)
     reused: int = 0
     overrides: int = 0
+    # Copies stepped by playouts or rollouts, and decisions that followed
+    # a line the hybrid had picked.
+    copy_steps: int = 0
+    followed: int = 0
+    unreplayed: int = 0
 
 
 @torch.no_grad()
-def play(policy: Policy, device: torch.device, lines: list[str], mode: str, seed: int, copies: int, config: dict[str, int]) -> Run:
+def play(
+    policy: Policy, device: torch.device, lines: list[str], mode: str, seed: int, copies: int, config: dict[str, int], top: int = 10, race: int = 8
+) -> Run:
     """Play each fight in `lines` (setups as `sts2ai.setups` writes them)
-    once: `greedy`, `forks` (the current search) or `exact`."""
+    once: `greedy`, `forks` (the current search), `exact`, `hybridP` (the
+    hybrid at P playouts per line) or `raceP` (with races of `race`)."""
     envs = Envs(len(lines), seed=seed)
     envs.sim.use_setups("\n".join(lines), 1, seed)
     envs.sim.observe(envs.floats, envs.ids, envs.mask)
     planner = Planner(envs, seed=seed, **config) if mode == "exact" else None
+    hybrid = None
+    if m := re.fullmatch(r"(hybrid|race)(\d+)", mode):
+        hybrid = Hybrid(envs, top, int(m[2]), race if m[1] == "race" else 0, seed, **config)
+        planner = hybrid.planner
     active = set(range(envs.n))
     run = Run()
     t0 = time.time()
@@ -125,12 +321,16 @@ def play(policy: Policy, device: torch.device, lines: list[str], mode: str, seed
             forks = envs.sim.fork(roots, copies, seed=seed + step)
             first = np.concatenate([search.spread(np.flatnonzero(envs.mask[i]), copies) for i in roots])
             second = (np.full(len(first), -1), np.zeros(len(first), np.int64))
-            score = search.rollout(policy, device, forks, first, second=second)
+            score = search.rollout(
+                policy, device, forks, first, second=second, on_step=lambda _, live: setattr(run, "copy_steps", run.copy_steps + len(live))
+            )
             for r, i in enumerate(roots):
                 part = slice(r * copies, (r + 1) * copies)
                 own = int(actions[i])
                 actions[i] = pick(first[part], score[part], own, True, (second[0][part], second[1][part]))
                 run.overrides += actions[i] != own
+        elif hybrid is not None:
+            hybrid.choose(policy, device, roots, masked.softmax(dim=1).cpu().numpy(), actions)
         elif mode == "exact":
             assert planner is not None
             probs = masked.softmax(dim=1).cpu().numpy()
@@ -143,6 +343,8 @@ def play(policy: Policy, device: torch.device, lines: list[str], mode: str, seed
     run.seconds = time.time() - t0
     if planner is not None:
         run.searched, run.reused, run.overrides = planner.searched, planner.reused, planner.overrides
+    if hybrid is not None:
+        run.overrides, run.copy_steps, run.followed, run.unreplayed = hybrid.overrides, hybrid.copy_steps, hybrid.followed, hybrid.unreplayed
     return run
 
 
@@ -159,9 +361,11 @@ def sample(path: Path, n: int, seed: int) -> list[str]:
 
 def cost(run: Run) -> str:
     potions = np.mean([e.potions_used for e in run.ends.values()])
+    d = max(run.decisions, 1)
     return (
-        f"potions {potions:.2f}  {run.seconds / max(run.decisions, 1) * 1000:6.1f} ms/decision over {run.decisions} decisions,"
-        f" {run.overrides / max(run.decisions, 1):.1%} overruled"
+        f"potions {potions:.2f}  {run.seconds / d * 1000:6.1f} ms/decision over {run.decisions} decisions,"
+        f" {run.copy_steps / d:6.0f} copy-steps/decision, {run.overrides / d:.1%} overruled"
+        + (f", {run.followed / d:.0%} followed a picked line, {run.unreplayed} lines did not replay" if run.followed else "")
     )
 
 
@@ -207,7 +411,9 @@ def main() -> None:
     ap.add_argument("--end-samples", type=int, default=8)
     ap.add_argument("--samples", type=int, default=4)
     ap.add_argument("--draw-cap", type=int, default=32)
-    ap.add_argument("--chunk", type=int, default=4096, help="rows per network call in the current search")
+    ap.add_argument("--chunk", type=int, default=4096, help="rows per network call in the current search and playouts")
+    ap.add_argument("--top", type=int, default=10, help="lines the hybrid plays out")
+    ap.add_argument("--race", type=int, default=8, help="playouts per round in raceP")
     args = ap.parse_args()
     search.CHUNK = args.chunk
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -224,7 +430,7 @@ def main() -> None:
         parsed = [json.loads(line) for line in lines]
         print(f"== {name}: {len(lines)} fights from {path.name}", flush=True)
         for mode in modes:
-            run = play(policy, device, lines, mode, args.seed, args.copies, config)
+            run = play(policy, device, lines, mode, args.seed, args.copies, config, args.top, args.race)
             ends = [run.ends[i] for i in range(len(lines))]
             won = np.mean([e.won for e in ends])
             if name == "easy":

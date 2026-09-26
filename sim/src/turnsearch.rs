@@ -104,6 +104,7 @@ struct Outcome {
 #[derive(Clone, Debug)]
 struct Edge {
     key: ActKey,
+    rule: Rule,
     outcomes: Vec<Outcome>,
 }
 
@@ -173,7 +174,39 @@ pub struct Search {
     /// Filled by `set_values`.
     leaf_values: Vec<f32>,
     node_values: Vec<f32>,
+    /// The player turn searched.
+    turn: u32,
     pub stats: Stats,
+}
+
+/// How a line ends.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LineEnd {
+    /// Its last step ends the turn.
+    EndTurn,
+    /// Its last step ends the fight.
+    Over,
+    /// Its last step rolls dice or draws: what follows is not the player's
+    /// to choose until it has happened.
+    Chance,
+    /// It reaches a state the cap left unexpanded.
+    Cut,
+}
+
+/// A line the player can commit to from a decision state: decisions that
+/// each lead to one state, then a step that ends it (`LineEnd`).
+#[derive(Clone, Debug)]
+pub struct Line {
+    /// Each decision as (node, edge), the first at the state the line
+    /// starts from. A cut line's lead to its cut state; the others' last
+    /// is the step that ends the line.
+    steps: Vec<(usize, usize)>,
+    pub end: LineEnd,
+    /// Shaped reward on the way to the line's last state: where its last
+    /// step is taken, or the cut state.
+    pub way: f32,
+    /// `way` plus what the search expects from there on.
+    pub value: f32,
 }
 
 /// A seed derived from visible things only.
@@ -583,7 +616,7 @@ impl Builder<'_> {
                     None => outcomes.push(Outcome { p: p as f32, reward, next }),
                 }
             }
-            edges.push(Edge { key, outcomes });
+            edges.push(Edge { key, rule, outcomes });
         }
         self.nodes[id].edges = edges;
     }
@@ -617,7 +650,15 @@ impl Builder<'_> {
         self.stats.nodes = self.nodes.len();
         self.stats.lines = lines(&self.nodes);
         self.stats.micros = start.elapsed().as_micros() as u64;
-        Search { nodes: self.nodes, by_key: self.by_key, leaves: self.leaves, leaf_values: vec![], node_values: vec![], stats: self.stats }
+        Search {
+            nodes: self.nodes,
+            by_key: self.by_key,
+            leaves: self.leaves,
+            leaf_values: vec![],
+            node_values: vec![],
+            turn: self.turn,
+            stats: self.stats,
+        }
     }
 }
 
@@ -747,6 +788,94 @@ impl Search {
         }
     }
 
+    /// Every line from `c` (a state `find` finds), best value first: from
+    /// each state its one-outcome decisions reach, each step that ends the
+    /// turn, ends the fight or meets chance, and each cut state. `None`
+    /// when the search does not hold `c` or has no values yet.
+    pub fn lines(&self, c: &Combat) -> Option<Vec<Line>> {
+        let start = self.find(c).filter(|_| !self.node_values.is_empty())?;
+        let mut seen = vec![false; self.nodes.len()];
+        seen[start] = true;
+        let mut queue = std::collections::VecDeque::from([(start, vec![], 0.0f32)]);
+        let mut out = vec![];
+        while let Some((id, path, way)) = queue.pop_front() {
+            let node = &self.nodes[id];
+            if let Some(l) = node.cut {
+                out.push(Line { steps: path, end: LineEnd::Cut, way, value: way + self.leaf_values[l] });
+                continue;
+            }
+            for (k, e) in node.edges.iter().enumerate() {
+                let mut steps = path.clone();
+                steps.push((id, k));
+                // Dice that happened to agree in the samples may not agree
+                // in the fight: only a step without them is a sure one.
+                let sure = e.rule != Rule::Sampled;
+                let end = match e.outcomes.as_slice() {
+                    &[Outcome { next: Next::Node(child), reward, .. }] if sure => {
+                        if !seen[child] {
+                            seen[child] = true;
+                            queue.push_back((child, steps, way + reward));
+                        }
+                        continue;
+                    }
+                    [o] if o.next == Next::Over => LineEnd::Over,
+                    outs if outs.iter().all(|o| !matches!(o.next, Next::Node(_))) => LineEnd::EndTurn,
+                    _ => LineEnd::Chance,
+                };
+                out.push(Line { steps, end, way, value: way + self.q(e) });
+            }
+        }
+        out.sort_by(|a, b| b.value.total_cmp(&a.value));
+        Some(out)
+    }
+
+    /// `c`'s action for decision `(node, edge)`: `c` stands in that node's state.
+    fn action_at(&self, c: &Combat, (id, e): (usize, usize)) -> Option<Action> {
+        let key = self.nodes[id].edges[e].key;
+        c.legal_actions().into_iter().find(|&a| act_key(c, a) == key)
+    }
+
+    /// Where `line` takes `c` (the state it starts from) before its last
+    /// step, and that step (none for a cut line): the one-outcome
+    /// decisions replayed on `c`, its own hidden draw order and dice.
+    pub fn line_start(&self, c: &Combat, line: &Line) -> Option<(Combat, Option<Action>)> {
+        let (walk, last) = match line.end {
+            LineEnd::Cut => (&line.steps[..], None),
+            _ => line.steps.split_last().map(|(last, walk)| (walk, Some(*last)))?,
+        };
+        let mut k = c.clone();
+        k.script = Default::default();
+        for &step in walk {
+            let a = self.action_at(&k, step)?;
+            k.step(a);
+        }
+        let last = match last {
+            Some(step) => Some(self.action_at(&k, step)?),
+            None => None,
+        };
+        Some((k, last))
+    }
+
+    /// The action `line` takes in `c`, by index, when `c` is one of the
+    /// states it passes through (the one it starts from, for its first).
+    pub fn line_action(&self, c: &Combat, line: &Line) -> Option<usize> {
+        let id = self.find(c)?;
+        let &step = line.steps.iter().find(|s| s.0 == id)?;
+        index(c, self.action_at(c, step)?)
+    }
+
+    /// The search's best action in `c`, by index, when `c` is a state of
+    /// the searched turn it expanded.
+    pub fn best_action(&self, c: &Combat) -> Option<usize> {
+        if c.player.turn != self.turn || c.is_over() || self.node_values.is_empty() {
+            return None;
+        }
+        let id = self.find(c)?;
+        let edges = &self.nodes[id].edges;
+        let e = (0..edges.len()).max_by(|&a, &b| self.q(&edges[a]).total_cmp(&self.q(&edges[b])))?;
+        index(c, self.action_at(c, (id, e))?)
+    }
+
     fn value_of(&self, next: Next) -> f32 {
         match next {
             Next::Over => 0.0,
@@ -793,6 +922,11 @@ impl Search {
         memo[id] = if best.is_finite() { best } else { 0.0 };
         memo[id]
     }
+}
+
+/// `a`'s index in `c`'s action space.
+pub fn index(c: &Combat, a: Action) -> Option<usize> {
+    encode::index_of(c, &encode::hand_order(c), &encode::choice_order(c), a)
 }
 
 /// Encode `combats` into consecutive rows of the buffers, in parallel.
@@ -910,6 +1044,34 @@ mod tests {
             assert_eq!(keys(&a), keys(&b));
             assert_eq!(root_values(a, &c), root_values(b, &c));
         }
+    }
+
+    /// The best line is worth the root's best action, and replaying a line
+    /// on the root reaches the state it was valued at, by the reward it
+    /// counted on the way.
+    #[test]
+    fn lines_replay_to_their_states() {
+        let mut checked = 0;
+        for c in roots() {
+            let base = Baseline::of(&c);
+            let mut s = Search::run(&c, base, None, &small());
+            s.set_values(&values(&s));
+            let lines = s.lines(&c).unwrap();
+            let best = s.action_values(&c).unwrap().into_iter().map(|x| x.1).fold(f32::MIN, f32::max);
+            assert!((lines[0].value - best).abs() < 1e-5, "best line {} vs best action {best}", lines[0].value);
+            for line in &lines {
+                let (k, last) = s.line_start(&c, line).expect("a line replays");
+                assert_eq!(last.is_none(), line.end == LineEnd::Cut);
+                let way = potential(&k, base) - potential(&c, base);
+                assert!((way - line.way).abs() < 1e-5, "{:?}: way {} vs replayed {way}", line.end, line.way);
+                if let Some(&(id, _)) = line.steps.last().filter(|_| line.end != LineEnd::Cut) {
+                    assert_eq!(state_key(&k), s.nodes[id].key);
+                }
+                assert!(s.line_action(&c, line).is_some());
+                checked += 1;
+            }
+        }
+        assert!(checked > 100);
     }
 
     /// What the player cannot see changes nothing: the draw pile in another

@@ -461,6 +461,9 @@ struct TurnPlanner {
     searches: Vec<Option<sim::turnsearch::Search>>,
     /// Envs searched afresh by the last `prepare`, awaiting values.
     fresh: Vec<usize>,
+    /// Per env: the lines `lines` last listed, and the one committed to.
+    lines: Vec<Vec<sim::turnsearch::Line>>,
+    plans: Vec<Option<sim::turnsearch::Line>>,
 }
 
 impl TurnPlanner {
@@ -476,7 +479,7 @@ impl TurnPlanner {
     #[allow(clippy::too_many_arguments)]
     fn new(n: usize, max_states: usize, quiesce_states: usize, draw_cap: usize, samples: usize, end_samples: usize, max_micros: u64, seed: u64) -> Self {
         let cfg = sim::turnsearch::Config { max_states, quiesce_states, draw_cap, samples, end_samples, max_micros, seed };
-        Self { cfg, searches: (0..n).map(|_| None).collect(), fresh: vec![] }
+        Self { cfg, searches: (0..n).map(|_| None).collect(), fresh: vec![], lines: vec![vec![]; n], plans: vec![None; n] }
     }
 
     /// Get each of `envs` a search holding its current state: the one it
@@ -499,6 +502,8 @@ impl TurnPlanner {
         let done = py.detach(|| sim::turnsearch::Search::run_all(&roots, &bases, &p, &cfg));
         for (&i, s) in fresh.iter().zip(done) {
             self.searches[i] = Some(s);
+            self.lines[i].clear();
+            self.plans[i] = None;
         }
         self.fresh = fresh.clone();
         Ok(fresh)
@@ -545,6 +550,78 @@ impl TurnPlanner {
     /// search does not hold its state.
     fn action_values(&self, env: PyRef<'_, VecEnv>, i: usize) -> Option<Vec<(usize, f32)>> {
         self.searches[i].as_ref()?.action_values(env.inner.combat(i))
+    }
+
+    /// Env `i`'s lines from its current state, best value first, as
+    /// (first action index, value, reward on the way, how it ends); kept
+    /// for `commit` and `fork_lines` to name by position. None when its
+    /// search does not hold the state.
+    fn lines(&mut self, env: PyRef<'_, VecEnv>, i: usize) -> Option<Vec<(usize, f32, f32, String)>> {
+        let s = self.searches[i].as_ref()?;
+        let c = env.inner.combat(i);
+        let lines = s.lines(c)?;
+        let out = lines.iter().map(|l| s.line_action(c, l).map(|a| (a, l.value, l.way, format!("{:?}", l.end)))).collect::<Option<Vec<_>>>()?;
+        self.lines[i] = lines;
+        Some(out)
+    }
+
+    /// Follow env `i`'s line `k` (of the last `lines`) from here.
+    fn commit(&mut self, i: usize, k: usize) {
+        self.plans[i] = self.lines[i].get(k).cloned();
+    }
+
+    /// The committed line's action in env `i`'s current state, when the
+    /// state is on it; None once it has left the line (chance, or the
+    /// turn is over).
+    fn planned_action(&self, env: PyRef<'_, VecEnv>, i: usize) -> Option<usize> {
+        let (s, line) = (self.searches[i].as_ref()?, self.plans[i].as_ref()?);
+        s.line_action(env.inner.combat(i), line)
+    }
+
+    /// `n` copies of where each of `picks` (env, line) takes its env's
+    /// state before the line's last step, the copies of pick p on dice and
+    /// shuffles from `seeds[p]` (the same seed across one env's lines
+    /// compares them on the same luck), each its own shuffle. Returns the
+    /// forks, each forked pick's last step (-1 for a cut line) and which
+    /// picks were forked: a line whose steps the fight's own state does
+    /// not take (the search's draws or dice were not the fight's) is not.
+    fn fork_lines(
+        &self,
+        env: PyRef<'_, VecEnv>,
+        picks: Vec<(usize, usize)>,
+        n: usize,
+        seeds: Vec<u64>,
+        depth: u32,
+    ) -> PyResult<(Forks, Vec<i64>, Vec<bool>)> {
+        let err = |m: &str| pyo3::exceptions::PyValueError::new_err(m.to_string());
+        let (mut starts, mut last, mut ok, mut bases, mut kept_seeds) = (vec![], vec![], vec![], vec![], vec![]);
+        for (&(i, k), &seed) in picks.iter().zip(&seeds) {
+            let s = self.searches[i].as_ref().ok_or_else(|| err("no search for env"))?;
+            let line = self.lines[i].get(k).ok_or_else(|| err("no such line"))?;
+            let start = s.line_start(env.inner.combat(i), line);
+            ok.push(start.is_some());
+            let Some((c, a)) = start else { continue };
+            last.push(a.map_or(-1, |a| sim::turnsearch::index(&c, a).map_or(-1, |x| x as i64)));
+            starts.push(c);
+            bases.push(env.inner.base(i));
+            kept_seeds.push(seed);
+        }
+        let roots: Vec<_> = starts.iter().collect();
+        Ok((Forks { inner: InnerForks::with_seeds(&roots, &bases, &kept_seeds, n, n, depth) }, last, ok))
+    }
+
+    /// For each of `rows` of `forks`: the search's best action (by index)
+    /// in env `owners[k]`'s search, when the copy is in a state of the
+    /// searched turn the search expanded; -1 otherwise.
+    fn tree_actions(&self, py: Python<'_>, forks: PyRef<'_, Forks>, rows: Vec<usize>, owners: Vec<usize>) -> Vec<i64> {
+        use rayon::prelude::*;
+        let f = &forks.inner;
+        py.detach(|| {
+            rows.par_iter()
+                .zip(&owners)
+                .map(|(&r, &o)| self.searches[o].as_ref().and_then(|s| s.best_action(f.combat(r))).map_or(-1, |a| a as i64))
+                .collect()
+        })
     }
 
     /// Env `i`'s search as numbers: states found and expanded, leaves,
