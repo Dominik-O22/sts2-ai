@@ -156,6 +156,41 @@ fn main() {
     let play_ns = 1e9 * secs / n as f64;
     println!("clone+legal+play  : {play_ns:>9.0} ns ({:.0} nodes/s, card plays only)", 1e9 / play_ns);
 
+    // A search that keeps one scratch state per thread and clones each node
+    // into it (`clone_from`) reuses the scratch's buffers.
+    let mut scratch = roots[0].clone();
+    let (n, secs) = best(|_| {
+        let t = cpu_secs();
+        for _ in 0..reps {
+            for r in &roots {
+                scratch.clone_from(r);
+                black_box(&scratch);
+            }
+        }
+        ((reps * roots.len()) as u64, cpu_secs() - t)
+    });
+    println!("clone_from        : {:>9.0} ns", 1e9 * secs / n as f64);
+    let (n, secs) = best(|_| {
+        let mut rng = Rng::new(1);
+        let mut acts = vec![];
+        let mut n = 0;
+        let t = cpu_secs();
+        for _ in 0..reps {
+            for r in &roots {
+                scratch.clone_from(r);
+                acts.clear();
+                acts.extend(scratch.legal_actions().into_iter().filter(|a| matches!(a, sim::Action::PlayCard { .. })));
+                if let Some(&a) = acts.get(rng.next_int(acts.len().max(1))) {
+                    scratch.step(a);
+                    n += 1;
+                }
+                black_box(&scratch);
+            }
+        }
+        (n, cpu_secs() - t)
+    });
+    println!("clone_from+play   : {:>9.0} ns (card plays only)", 1e9 * secs / n as f64);
+
     // The same nodes on four threads expanding the same parents at once, as
     // a parallel search does: anything the clones share gets contended.
     let threads = 4;
