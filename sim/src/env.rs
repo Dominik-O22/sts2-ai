@@ -576,10 +576,18 @@ impl Forks {
     /// player turns: the rest of the current one, then `depth - 1` more.
     /// `bases[r]` is where root r's fight started.
     pub fn of(roots: &[&Combat], bases: &[Baseline], n: usize, groups: usize, seed: u64, depth: u32) -> Self {
-        assert_eq!(roots.len(), bases.len(), "one baseline per root");
+        let seeds: Vec<u64> = (0..roots.len()).map(|r| seed ^ (r as u64).wrapping_mul(0xD6E8_FEB8_6659_FD93)).collect();
+        Self::with_seeds(roots, bases, &seeds, n, groups, depth)
+    }
+
+    /// `of` with each root's seed given: roots with one seed get the same
+    /// dice and shuffles copy for copy, so states compared on them differ
+    /// by what the states are, less by luck.
+    pub fn with_seeds(roots: &[&Combat], bases: &[Baseline], seeds: &[u64], n: usize, groups: usize, depth: u32) -> Self {
+        assert!(roots.len() == bases.len() && roots.len() == seeds.len(), "one baseline and seed per root");
         let per_group = n.div_ceil(groups.max(1)).max(1);
         let n_groups = n.div_ceil(per_group);
-        let root_seed = |r: usize| seed ^ (r as u64).wrapping_mul(0xD6E8_FEB8_6659_FD93);
+        let root_seed = |r: usize| seeds[r];
         let nodes = roots
             .par_iter()
             .enumerate()
@@ -614,6 +622,11 @@ impl Forks {
 
     pub fn is_empty(&self) -> bool {
         self.copies.is_empty()
+    }
+
+    /// Where copy `i`'s fight began.
+    pub fn base(&self, i: usize) -> Baseline {
+        self.copies[i].base
     }
 
     /// Copy `i`'s state. Its `rngs` field is not copy `i`'s dice.

@@ -422,6 +422,16 @@ impl Forks {
         Ok(())
     }
 
+    /// Copies of forks `rows` as new roots, `n` per row, with fresh dice
+    /// and shuffles (`VecEnv.fork`): to value a state a search reached by
+    /// playing it out many times. Rewards stay shaped from the fight's start.
+    #[pyo3(signature = (rows, n, groups=4, seed=0, depth=1))]
+    fn fork(&self, rows: Vec<usize>, n: usize, groups: usize, seed: u64, depth: u32) -> Forks {
+        let roots: Vec<_> = rows.iter().map(|&i| self.inner.combat(i)).collect();
+        let bases: Vec<_> = rows.iter().map(|&i| self.inner.base(i)).collect();
+        Forks { inner: InnerForks::of(&roots, &bases, n, groups, seed, depth) }
+    }
+
     /// The forks still in their turn.
     fn live(&self) -> Vec<usize> {
         self.inner.live()
