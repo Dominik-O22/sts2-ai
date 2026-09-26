@@ -156,11 +156,13 @@ impl Relic {
 
 /// The run's relics in the order they were picked up, which is the order
 /// their hooks run in, with the set of ids held beside them.
-#[derive(Clone, Default, PartialEq, Eq)]
+#[derive(Default, PartialEq, Eq)]
 pub struct Relics {
     list: Vec<Relic>,
     held: IdSet,
 }
+
+clone_by_fields!(Relics { list, held });
 
 impl Relics {
     pub fn push(&mut self, r: Relic) {

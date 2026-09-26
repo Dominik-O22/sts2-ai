@@ -1,6 +1,25 @@
 //! Slay the Spire 2 combat simulator, ported from the decompiled v0.107.1
 //! assembly. See DESIGN.md and docs/survey/README.md for the decisions.
 
+/// `Clone` field by field, with `clone_from` reusing every field's own
+/// buffers, so a search that clones the same parent into a scratch state
+/// allocates nothing. The struct literal in `clone` fails to compile when a
+/// field is left out.
+macro_rules! clone_by_fields {
+    ($ty:ty { $($f:ident),* $(,)? }) => {
+        impl Clone for $ty {
+            #[inline]
+            fn clone(&self) -> Self {
+                Self { $($f: self.$f.clone()),* }
+            }
+            #[inline]
+            fn clone_from(&mut self, src: &Self) {
+                $(self.$f.clone_from(&src.$f);)*
+            }
+        }
+    };
+}
+
 pub mod card;
 pub mod combat;
 pub mod effect;

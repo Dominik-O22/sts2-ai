@@ -21,7 +21,7 @@ pub const BASE_HAND_DRAW: u32 = 5;
 const CLAMP: f64 = 999_999_999.0;
 
 /// `Entities/Creatures/Creature.cs`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct Creature {
     pub hp: i32,
     pub max_hp: i32,
@@ -29,6 +29,8 @@ pub struct Creature {
     /// Insertion ordered. Hook dispatch iterates in this order.
     pub powers: Powers,
 }
+
+clone_by_fields!(Creature { hp, max_hp, block, powers });
 
 impl Creature {
     pub fn alive(&self) -> bool {
@@ -80,6 +82,19 @@ impl Clone for PlayerCombat {
         }
         .with_play(&self.play)
     }
+
+    fn clone_from(&mut self, src: &Self) {
+        self.creature.clone_from(&src.creature);
+        self.hand.clone_from(&src.hand);
+        self.draw.clone_from(&src.draw);
+        self.discard.clone_from(&src.discard);
+        self.exhaust.clone_from(&src.exhaust);
+        self.play.clone_from(&src.play);
+        self.offer.clone_from(&src.offer);
+        self.energy = src.energy;
+        self.base_max_energy = src.base_max_energy;
+        self.turn = src.turn;
+    }
 }
 
 impl PlayerCombat {
@@ -110,7 +125,7 @@ pub struct PlayerCombat {
     pub turn: u32,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct Enemy {
     pub creature: Creature,
     pub monster: Monster,
@@ -122,6 +137,8 @@ pub struct Enemy {
     /// Fled the fight (`CreatureCmd.Escape`). Neither alive nor a corpse.
     pub escaped: bool,
 }
+
+clone_by_fields!(Enemy { creature, monster, slot, reviving, escaped });
 
 impl Enemy {
     /// `Creature.IsPrimaryEnemy`: combat ends when no primary enemy lives.
@@ -164,12 +181,14 @@ pub enum Action {
 
 /// A suspended card selection (`CardSelectCmd`), waiting for `Action::Choose`
 /// or, when `can_skip`, `Action::Skip`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct Pending {
     pub options: Vec<u32>,
     pub then: Then,
     pub can_skip: bool,
 }
+
+clone_by_fields!(Pending { options, then, can_skip });
 
 /// What `Combat::cost` reads that is the same for every card, gathered
 /// once when a whole hand is priced.
@@ -321,6 +340,21 @@ impl Clone for Script {
             log_shuffles: self.log_shuffles,
         }
     }
+
+    fn clone_from(&mut self, src: &Self) {
+        self.shuffles.clone_from(&src.shuffles);
+        self.unscripted_shuffles = src.unscripted_shuffles;
+        self.enemy_hp.clone_from(&src.enemy_hp);
+        self.first_snapshot_pending = src.first_snapshot_pending;
+        self.random_targets.clone_from(&src.random_targets);
+        self.generated.clone_from(&src.generated);
+        self.random_exhausts.clone_from(&src.random_exhausts);
+        self.adopted_offers.clone_from(&src.adopted_offers);
+        self.unforced.clone_from(&src.unforced);
+        self.hit_cards.clone_from(&src.hit_cards);
+        self.spawns.clone_from(&src.spawns);
+        self.log_shuffles = src.log_shuffles;
+    }
 }
 
 impl Script {
@@ -341,7 +375,7 @@ impl Script {
 pub type UidList = smallvec::SmallVec<[u32; 12]>;
 
 /// The parts of `CombatManager.History` that cards and powers read.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Debug, Default, PartialEq)]
 pub struct Stats {
     /// HP the enemies have lost to anything, summed over the fight, and
     /// their HP when it began. Training's reward shaping reads these: a
@@ -451,8 +485,10 @@ pub struct Stats {
     pub cracked: Vec<u32>,
 }
 
+clone_by_fields!(Stats { enemy_hp_lost, enemy_start_hp, player_start_hp, start_potions, random_draw_inserts, skittish_pending, exhausted_this_turn, hp_lost_this_turn, unblocked_hits_taken, block_plays_this_turn, last_drawn, rupture_pending, cards_played_this_turn, skill_played_this_turn, manual_plays_this_turn, last_card, last_turn_card, offer_free, extra_turn, deck_size, offer_disintegration, hp_rerolled, wounds_pending, bound_played, last_block_gained, rebound, attack_skill_plays_this_turn, nostalgia_top, strangle_pending, hatchets_played, hatchets_played_last_turn, last_card_hit, selected, card_plays_finished, finished_this_turn, finished_last_turn, card_dealt, transform_picks, transformed, transform_carried, procured_potions, random_choice, gem_pick, cracked });
 
-#[derive(Clone, Debug)]
+
+#[derive(Debug)]
 pub struct Combat {
     pub player: PlayerCombat,
     /// Indexed by `CreatureRef::Enemy`; indices are stable for the combat.
@@ -489,6 +525,8 @@ pub struct Combat {
     /// False during setup, before the first turn starts.
     started: bool,
 }
+
+clone_by_fields!(Combat { player, enemies, order, round, side, asc, gold, rngs, outcome, pending, stats, relics, room, after, potions, script, shuffle_log, queue, next_uid, started });
 
 impl Combat {
     /// `CombatManager.SetUpCombat` + `StartCombatInternal`. Deck cards are

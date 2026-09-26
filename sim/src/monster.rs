@@ -305,7 +305,7 @@ fn stock_graph(id: MonsterId, asc: Ascension, flags: Flags) -> (&'static [State]
     })
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct Monster {
     pub id: MonsterId,
     pub flags: Flags,
@@ -325,6 +325,8 @@ pub struct Monster {
     /// `MonsterModel.SpawnedThisTurn`: no action until the next side switch.
     pub spawned_this_turn: bool,
 }
+
+clone_by_fields!(Monster { id, flags, vars, states, initial, current, log, performed_first, performed_current, next_move, spawned_this_turn });
 
 impl Monster {
     pub fn new(id: MonsterId, asc: Ascension, flags: Flags) -> Self {

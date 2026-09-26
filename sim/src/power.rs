@@ -55,11 +55,13 @@ impl Power {
 /// A creature's powers in the order they landed, which is the order hooks
 /// see them in, with the set of ids among them kept exact so a lookup of a
 /// power the creature lacks is one bit test.
-#[derive(Clone, Default)]
+#[derive(Default)]
 pub struct Powers {
     list: Vec<Power>,
     held: IdSet,
 }
+
+clone_by_fields!(Powers { list, held });
 
 impl Powers {
     #[inline]
