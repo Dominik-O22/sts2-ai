@@ -342,12 +342,18 @@ impl Clone for Script {
     }
 
     fn clone_from(&mut self, src: &Self) {
-        self.shuffles.clone_from(&src.shuffles);
+        /// A replay's script is the only one with anything in it.
+        fn copy<T: Clone>(dst: &mut VecDeque<T>, src: &VecDeque<T>) {
+            if !(dst.is_empty() && src.is_empty()) {
+                dst.clone_from(src);
+            }
+        }
+        copy(&mut self.shuffles, &src.shuffles);
         self.unscripted_shuffles = src.unscripted_shuffles;
         self.enemy_hp.clone_from(&src.enemy_hp);
         self.first_snapshot_pending = src.first_snapshot_pending;
-        self.random_targets.clone_from(&src.random_targets);
-        self.generated.clone_from(&src.generated);
+        copy(&mut self.random_targets, &src.random_targets);
+        copy(&mut self.generated, &src.generated);
         self.random_exhausts.clone_from(&src.random_exhausts);
         self.adopted_offers.clone_from(&src.adopted_offers);
         self.unforced.clone_from(&src.unforced);
@@ -372,7 +378,38 @@ impl Script {
 
 /// Card uids a turn's history keeps. Inline, since a turn plays a handful
 /// of cards and a clone should not allocate for them.
-pub type UidList = smallvec::SmallVec<[u32; 12]>;
+#[derive(Default, PartialEq)]
+pub struct UidList(smallvec::SmallVec<[u32; 12]>);
+
+impl std::fmt::Debug for UidList {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+/// `SmallVec`'s own `clone_from` goes element by element.
+impl Clone for UidList {
+    fn clone(&self) -> Self {
+        Self(smallvec::SmallVec::from_slice(&self.0))
+    }
+    fn clone_from(&mut self, src: &Self) {
+        self.0.clear();
+        self.0.extend_from_slice(&src.0);
+    }
+}
+
+impl std::ops::Deref for UidList {
+    type Target = smallvec::SmallVec<[u32; 12]>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for UidList {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
 
 /// The parts of `CombatManager.History` that cards and powers read.
 #[derive(Debug, Default, PartialEq)]
