@@ -148,6 +148,69 @@ held-out elite and boss fights greedy and again with the search from the
 same shuffles. On set-6: 66.7% greedy, 85.4% with the search. `--depth 2`
 plays copies one more player turn: 86.7%, at twice the cost.
 
+### Exact turn search
+
+The copies judge a first action by how the policy would finish the turn.
+`sim::turnsearch` walks every line to the end of the turn instead, over
+distinct states: a transposition table keyed on what the player can know
+(`state_key`: piles as multisets, cards by content not uid, no draw order,
+no dice) merges identical cards and commuting plays. A state is worth its
+best action, an action the expectation over its outcomes of the shaped
+reward on the way plus the value head where the next turn starts.
+
+Chance never follows the real RNG. A probe step on fixed dice says what a
+step does: no dice and no draw is one outcome; a draw with no dice is
+every distinct multiset it can take at its hypergeometric weight (up to
+`draw_cap`, 32); dice, a bigger draw, or a draw whose size depends on what
+came are `samples` (4) reseeded outcomes with the draw pile shuffled; the
+enemy turn and the next hand are `end_samples` (8) outcomes whose seeds
+every line shares. Seeds come from the root's key, so the same visible
+state searches the same whatever the real draw order or dice
+(`draw_order_and_dice_stay_hidden`).
+
+States are expanded best first by the policy's prior of the line reaching
+them: the root's probabilities, and deeper down the root's prior of the
+same card or potion. Past `max_states` (500) the rest become leaves the
+value head scores mid-turn, except states where an enemy may still die
+this turn, which go on to `quiesce_states` (1000). `TurnPlanner` keeps
+each fight's search, so a later decision of the same turn reuses it
+unless the cap cut it short.
+
+`uv run python -m sts2ai.exactsearch CKPT --easy 400 --hard 300` plays the
+same held-out winners' fights greedy, with the copies (256, ranked by
+`search.openings` as the advisor does) and with the exact search, the
+policy's pick kept unless beaten by `PLAN_MARGIN`. gen7, 2026-09-26, with
+a training run on the same machine, so the times only compare with each
+other (wall time over all decisions, easy / hard):
+
+| | easy won | easy HP lost (winner 2.71) | hard won | ms/decision |
+|---|---|---|---|---|
+| greedy | 97.8% | 6.68 | 81.0% | 0.1 |
+| copies | 99.0% | 4.96 | 85.0% | 7.4 / 8.6 |
+| exact | 99.0% | 5.16 | 86.0% | 27.2 / 23.4 |
+
+The two searches tie within noise. The states a turn reaches are not
+dozens: half the searches (62% on hard fights) hit the 500 cap, with 1200
+leaves at the median and 8000 at most. Several enemies and potions are
+the likely cause (not measured apart): damage split over targets gives
+distinct states, and a potion can go at any point. Arrivals per distinct state are only 1.3.
+The best line ran into a cut state in 24% (easy) and 37% (hard) of the
+searches; it needed more than 250 expanded states in 4%. Half the
+decisions reuse a search already made.
+
+More does not help. On the same 300 hard fights, a cap of 2000 states
+(3000 for kills) still capped 58% of searches and won 86.0% at three
+times the cost; 16 enemy turns per end instead of 8 won 86.0%. My guess,
+not yet tested, is that the value head is the limit: every line ends on
+its estimate, and a max over thousands of them picks its errors as
+readily as better play.
+
+A second turn with the expectation over next hands would cost about a
+thousand times as much: some 160 turn ends per search, 8 next hands
+each, and a fresh search of about 100 ms and 1200 leaves per hand. Only
+a pruned version fits, the second turn searched from the best few turn
+ends.
+
 ## Search distillation
 
 A plateaued PPO run gains nothing from more iterations; the search's
