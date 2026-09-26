@@ -258,18 +258,42 @@ def remap_run_state(state: dict[str, Tensor], old_text: str, new_text: str, fres
     return out
 
 
+# Float segments that have grown by columns appended at their end, and the
+# input projection whose last columns read them; and the layout fields that
+# only follow from them.
+GROWN = {"global_floats": "global_in.weight", "option_floats": "option_in.weight"}
+FOLLOWS = {"run_floats", "f_deck", "f_relics", "f_potions", "f_options", "f_forecast", "forecast_floats", "forecast_rolls", "map_feats"}
+
+
+def grow_floats(state: dict[str, Tensor], old: dict[str, int], new: RunLayout) -> dict[str, Tensor]:
+    """`state` for a layout whose float segments `GROWN` gained columns at
+    their end: the new columns start at zero weight, so the policy reads
+    as it did (a run policy from before the forecast ignores it)."""
+    out = dict(state)
+    for field, key in GROWN.items():
+        extra = getattr(new, field) - old[field]
+        if extra:
+            w = state[key]
+            out[key] = torch.cat([w, w.new_zeros(w.shape[0], extra)], dim=1)
+    return out
+
+
 def load_run_policy(path: Path, device: torch.device) -> tuple[RunPolicy, dict]:
     """The run policy a checkpoint holds, and the checkpoint. Ids the sim
-    gained since move to their new rows (`remap_run_state`); a layout that
-    moved otherwise is refused."""
+    gained since move to their new rows (`remap_run_state`), and float
+    columns appended since read at zero weight (`grow_floats`); a layout
+    that moved otherwise is refused."""
     ck = torch.load(path, map_location=device, weights_only=False)
     layout = RunLayout.load()
     vocab_sizes = {size for size, _ in EMBEDDINGS.values()}
     moved = {k for k, v in asdict(layout).items() if ck["layout"].get(k) != v} - vocab_sizes
-    if moved:
+    grown = all(ck["layout"][f] <= getattr(layout, f) for f in GROWN)
+    if moved - FOLLOWS - set(GROWN) or not grown:
         raise ValueError(f"{path}: the run layout changed since this checkpoint ({', '.join(sorted(moved))}); retrain")
     policy = RunPolicy(layout, RunArch(**ck["arch"])).to(device)
     state = ck["policy"]
+    if moved:
+        state = grow_floats(state, ck["layout"], layout)
     if ck["vocab"] != current_text():
         state = remap_run_state(state, ck["vocab"], current_text(), policy.state_dict())
     policy.load_state_dict(state)

@@ -25,6 +25,12 @@ Winners' starts); the rest start as before.
 With `--imitate TRAIN_ROWS` the policy first clones winners' decisions
 (`sts2ai.imitation`), checked against the `holdout.npz` beside the rows,
 and saves `imitated.pt`; `--minutes 0` stops there.
+
+With `--forecast CALIBRATION` map steps carry the forecast
+(`sts2ai.forecast`) from the frozen combat checkpoint's value head; the
+checkpoints keep the calibration, so a resumed run and runplay fill it the
+same way. Rows to imitate should be built with the same combat and
+calibration (`imitation build --combat --forecast`).
 """
 
 from __future__ import annotations
@@ -44,6 +50,7 @@ from sts2ai import _sim
 from sts2ai.deckvalue import RunPotential
 from sts2ai.deckvalue import load as load_deckvalue
 from sts2ai.env import START_POINTS, End, Envs, RunFight, RunLayout
+from sts2ai.forecast import Calibration, Forecaster, Read
 from sts2ai.imitation import DECISIONS, Rows, batches, pretrain
 from sts2ai.model import Policy, load_policy, masked_logits
 from sts2ai.runmodel import RunArch, RunPolicy, load_run_policy, save_run_policy
@@ -79,7 +86,11 @@ class RunLoop:
     With `search` copies, fights of `search_kinds` play the pilot's turn
     search instead (`search.choose`, `groups` shuffles, the copies' dice
     drawn from `seed` and the step), all of them in one batch; the others
-    stay greedy."""
+    stay greedy.
+
+    With a `forecast`, each map step's row gets the forecast filled in
+    before `decide` sees it (`Forecaster.fill`); `read` holds what the
+    last round read, by row of that round's `waiting`."""
 
     def __init__(
         self,
@@ -91,8 +102,11 @@ class RunLoop:
         search_kinds: frozenset[str] = frozenset({"Elite", "Boss"}),
         groups: int = 4,
         seed: int = 0,
+        forecast: Forecaster | None = None,
     ):
         self.combat, self.device, self.envs, self.drain = combat, device, envs, drain
+        self.forecast = forecast
+        self.read: Read | None = None
         self.search, self.search_kinds, self.groups, self.seed = search, search_kinds, groups, seed
         self.autocast = torch.autocast(device.type, dtype=torch.bfloat16, enabled=device.type == "cuda")
         self.decisions = 0
@@ -105,6 +119,8 @@ class RunLoop:
         envs = self.envs
         while waiting := envs.run_waiting():
             floats, ids = envs.observe_run(waiting)
+            if self.forecast is not None:
+                self.read = self.forecast.fill(floats, envs.forecast(waiting))
             for env, run in envs.step_run(waiting, decide(waiting, floats, ids)):
                 on_run_end(env, run)
             self.decisions += len(waiting)
@@ -231,6 +247,9 @@ class Config:
     # 0 turns it off.
     win_starts: float = 0.0
     win_runs: str = str(TRACKER)
+    # Calibration of the forecast map steps carry (`sts2ai.forecast`);
+    # empty takes the resumed checkpoint's, if it has one, else none.
+    forecast: str = ""
 
 
 @dataclass
@@ -370,6 +389,8 @@ def train(combat_path: Path, run_dir: Path, cfg: Config, resume: Path | None) ->
     opt = torch.optim.Adam(policy.parameters(), lr=cfg.lr, eps=1e-5)
     if ck and ck.get("optimizer"):
         opt.load_state_dict(ck["optimizer"])
+    calibration = Calibration.load(Path(cfg.forecast)) if cfg.forecast else Calibration(**ck["forecast"]) if ck and ck.get("forecast") else None
+    saved = {"forecast": asdict(calibration) if calibration else None}
     run_dir.mkdir(parents=True, exist_ok=True)
     anchor = Rows.load(Path(cfg.imitate)) if cfg.imitate and cfg.imitate_coef > 0 else None
     if anchor is not None and cfg.imitate_kinds:
@@ -380,7 +401,7 @@ def train(combat_path: Path, run_dir: Path, cfg: Config, resume: Path | None) ->
     if cfg.imitate and resume is None:
         holdout = Path(cfg.imitate).with_name("holdout.npz")
         pretrain(policy, Rows.load(Path(cfg.imitate)), device, cfg.imitate_epochs, cfg.imitate_lr, cfg.imitate_batch, Rows.load(holdout) if holdout.exists() else None)
-        save_run_policy(run_dir / "imitated.pt", policy, None, config=asdict(cfg), combat=str(combat_path))
+        save_run_policy(run_dir / "imitated.pt", policy, None, config=asdict(cfg), combat=str(combat_path), **saved)
         if cfg.minutes <= 0:
             return
     envs = Envs(cfg.envs, seed=cfg.seed)
@@ -389,7 +410,8 @@ def train(combat_path: Path, run_dir: Path, cfg: Config, resume: Path | None) ->
         print("winners' starts: " + ", ".join(f"{n} at {p}" for p, n in zip(START_POINTS, winners) if n), flush=True)
     envs.use_runs(cfg.seed * 1_000_000, choices="caller")
     writer = SummaryWriter(str(run_dir))
-    loop = RunLoop(combat, device, envs, cfg.drain, cfg.search, frozenset(cfg.search_kinds.split(",")), seed=cfg.seed)
+    forecast = Forecaster(combat, device, calibration) if calibration else None
+    loop = RunLoop(combat, device, envs, cfg.drain, cfg.search, frozenset(cfg.search_kinds.split(",")), seed=cfg.seed, forecast=forecast)
     trajs = [Trajectory() for _ in range(cfg.envs)]
     # Relics each env held at its last decision, for `relic_bonus`.
     held: list[int | None] = [None] * cfg.envs
@@ -483,8 +505,8 @@ def train(combat_path: Path, run_dir: Path, cfg: Config, resume: Path | None) ->
             if cfg.start_full < 1.0 or cfg.win_starts > 0:
                 print(f"    starts: frontier {START_POINTS[curriculum.frontier]}, pools {envs.start_pools()}; won {late}", flush=True)
             stats.picks.clear()
-            save_run_policy(run_dir / "latest.pt", policy, opt, iter=it, config=asdict(cfg), combat=str(combat_path), frontier=curriculum.frontier)
-    save_run_policy(run_dir / "latest.pt", policy, opt, iter=it, config=asdict(cfg), combat=str(combat_path), frontier=curriculum.frontier)
+            save_run_policy(run_dir / "latest.pt", policy, opt, iter=it, config=asdict(cfg), combat=str(combat_path), frontier=curriculum.frontier, **saved)
+    save_run_policy(run_dir / "latest.pt", policy, opt, iter=it, config=asdict(cfg), combat=str(combat_path), frontier=curriculum.frontier, **saved)
 
 
 def update(
