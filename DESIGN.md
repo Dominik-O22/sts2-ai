@@ -46,6 +46,20 @@ Change one here before changing the code that depends on it.
 - Run state and combat state are separate structs from day one so the full-run sim and the
   shared value function (below) can plug in later.
 - Speed is the priority. The sim is game-interface independent.
+- Hook dispatch goes through id sets (`types::IdSet`). Each power and relic hook names the
+  ids its match arms react to (`Power::DAMAGE_ADDITIVE`, `Combat::AFTER_CARD_PLAYED`), each
+  creature and the relic list keep the set of ids they hold, and a hook skips anyone whose
+  set misses its own. `hook_sets_name_every_power_that_reacts` and
+  `hook_sets_name_every_relic_that_reacts` fail when an arm is added without its id.
+- `examples/bench_real` times the sim on the played runs' fights (steps/s, clone, a search
+  node); `examples/trajectories` fingerprints random playouts and must print the same before
+  and after a speed change. On 2026-09-26 the speed work took the played runs' fights from
+  0.60M to 1.32M steps/s per thread, a clone from 212 to 178 ns, and a clone plus one card
+  play from 1942 to 745 ns (medians of three interleaved runs with training paused).
+- A search should keep one scratch `Combat` per thread and `clone_from` each node into it:
+  the combat's types clone field by field (`clone_by_fields!`), so that reuses the scratch's
+  buffers and allocates nothing, about half the cost of `clone`. Shuffles are logged only
+  when `Script::log_shuffles` asks (the replay does), so clones share no refcounted state.
 
 ## Fidelity and tests
 

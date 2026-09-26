@@ -194,7 +194,7 @@ impl State {
 
 /// Encounter-set flags. `Nibbit.IsFront/IsAlone`, `Inklet.MiddleInklet`,
 /// `KinFollower.StartsWithDance`, `Wriggler.StartStunned`, `Creature.SlotName`.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Flags {
     pub is_front: bool,
     pub is_alone: bool,
@@ -251,14 +251,68 @@ pub struct Vars {
     pub last_spawned: Option<MonsterId>,
 }
 
-#[derive(Clone, Debug)]
+/// A monster's move graph. Every monster built the same way shares one stock
+/// graph, so a clone copies a pointer; the first rewrite (a stun, a death
+/// blow) gives this monster its own copy, shared with its clones.
+#[derive(Clone)]
+enum Graph {
+    Stock(&'static [State]),
+    Own(Arc<Vec<State>>),
+}
+
+impl std::ops::Deref for Graph {
+    type Target = [State];
+    fn deref(&self) -> &[State] {
+        match self {
+            Graph::Stock(s) => s,
+            Graph::Own(v) => v,
+        }
+    }
+}
+
+impl std::fmt::Debug for Graph {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        (**self).fmt(f)
+    }
+}
+
+impl Graph {
+    fn make_mut(&mut self) -> &mut Vec<State> {
+        if let Graph::Stock(s) = *self {
+            *self = Graph::Own(Arc::new(s.to_vec()));
+        }
+        match self {
+            Graph::Own(v) => Arc::make_mut(v),
+            Graph::Stock(_) => unreachable!(),
+        }
+    }
+}
+
+/// `graph`, built once per (monster, ascension, flags) and kept for the
+/// life of the process.
+fn stock_graph(id: MonsterId, asc: Ascension, flags: Flags) -> (&'static [State], usize) {
+    type Key = (MonsterId, u8, Flags);
+    static GRAPHS: std::sync::OnceLock<std::sync::RwLock<std::collections::HashMap<Key, (&'static [State], usize)>>> =
+        std::sync::OnceLock::new();
+    let graphs = GRAPHS.get_or_init(Default::default);
+    let key = (id, asc.0, flags);
+    if let Some(&g) = graphs.read().unwrap().get(&key) {
+        return g;
+    }
+    *graphs.write().unwrap().entry(key).or_insert_with(|| {
+        let (states, initial) = graph(id, asc, flags);
+        (Vec::leak(states), initial)
+    })
+}
+
+#[derive(Debug)]
 pub struct Monster {
     pub id: MonsterId,
     pub flags: Flags,
     pub vars: Vars,
     /// The move graph, shared between clones until a stun or a death blow
     /// rewrites it.
-    states: Arc<Vec<State>>,
+    states: Graph,
     initial: usize,
     current: usize,
     /// `MonsterMoveStateMachine.StateLog`, move states only.
@@ -272,9 +326,11 @@ pub struct Monster {
     pub spawned_this_turn: bool,
 }
 
+clone_by_fields!(Monster { id, flags, vars, states, initial, current, log, performed_first, performed_current, next_move, spawned_this_turn });
+
 impl Monster {
     pub fn new(id: MonsterId, asc: Ascension, flags: Flags) -> Self {
-        let (states, initial) = graph(id, asc, flags);
+        let (states, initial) = stock_graph(id, asc, flags);
         let mut m = Self {
             id,
             flags,
@@ -284,7 +340,7 @@ impl Monster {
                 stock: flags.stock.map_or(2, i32::from),
                 ..Vars::default()
             },
-            states: Arc::new(states),
+            states: Graph::Stock(states),
             initial,
             current: initial,
             log: vec![],
@@ -580,7 +636,7 @@ impl Monster {
     /// the blast's intent.
     pub fn arm_death_blow(&mut self, damage: i32) {
         self.vars.steam_eruption_damage = damage;
-        for st in Arc::make_mut(&mut self.states) {
+        for st in self.states.make_mut() {
             if let State::Move { name: "EXPLODE_MOVE", intents, .. } = st {
                 *intents = vec![Intent::DeathBlow { damage }];
             }
@@ -606,7 +662,7 @@ impl Monster {
     }
 
     fn force_move(&mut self, name: &'static str, intents: Vec<Intent>, follow_up: Option<usize>) {
-        Arc::make_mut(&mut self.states).push(State::Move { name, intents, follow_up, must_perform_once: true });
+        self.states.make_mut().push(State::Move { name, intents, follow_up, must_perform_once: true });
         let idx = self.states.len() - 1;
         self.current = idx;
         self.performed_current = false;
@@ -623,11 +679,12 @@ impl Monster {
                 .map(|(s, _)| *s)
                 .expect("no conditional branch matched"),
             State::Random(branches) => {
-                let weights: Vec<f32> = branches.iter().map(|b| self.branch_weight(b, ctx)).collect();
-                let total: f32 = weights.iter().sum();
+                // Weights are pure, so the second pass recomputes them rather
+                // than keeping a list.
+                let total: f32 = branches.iter().map(|b| self.branch_weight(b, ctx)).sum();
                 let mut roll = rng.next_float(total);
-                for (b, w) in branches.iter().zip(&weights) {
-                    roll -= w;
+                for b in branches.iter() {
+                    roll -= self.branch_weight(b, ctx);
                     if roll <= 0.0 {
                         return b.state;
                     }
