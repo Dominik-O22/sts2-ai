@@ -306,6 +306,10 @@ impl Script {
     }
 }
 
+/// Card uids a turn's history keeps. Inline, since a turn plays a handful
+/// of cards and a clone should not allocate for them.
+pub type UidList = smallvec::SmallVec<[u32; 12]>;
+
 /// The parts of `CombatManager.History` that cards and powers read.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Stats {
@@ -332,7 +336,7 @@ pub struct Stats {
     /// Unblocked hits the player has taken this combat (Tear Asunder).
     pub unblocked_hits_taken: u32,
     /// Uids of cards that gained the player block this turn (Unmovable).
-    pub block_plays_this_turn: Vec<u32>,
+    pub block_plays_this_turn: UidList,
     pub last_drawn: Option<u32>,
     /// Rupture: Strength owed once the current card play finishes.
     pub rupture_pending: i32,
@@ -390,8 +394,8 @@ pub struct Stats {
     pub card_plays_finished: u32,
     /// Uids whose play finished this player turn and the one before, the
     /// enemy turn in between counting as the earlier one (Bolas).
-    pub finished_this_turn: Vec<u32>,
-    pub finished_last_turn: Vec<u32>,
+    pub finished_this_turn: UidList,
+    pub finished_last_turn: UidList,
     /// Damage the card play in progress has dealt, blocked and overkill
     /// included (`TotalDamage + OverkillDamage`, Fisticuffs), with the
     /// uid of the card that dealt it.
