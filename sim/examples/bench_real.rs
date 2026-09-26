@@ -137,13 +137,12 @@ fn main() {
     // A turn search's inner node: a card played, not the turn ended.
     let (n, secs) = best(|_| {
         let mut rng = Rng::new(1);
-        let mut acts = vec![];
         let mut n = 0;
         let t = cpu_secs();
         for _ in 0..reps {
             for r in &roots {
                 let mut c = r.clone();
-                c.legal_actions_into(&mut acts);
+                let mut acts = c.legal_actions();
                 acts.retain(|a| matches!(a, sim::Action::PlayCard { .. }));
                 if let Some(&a) = acts.get(rng.next_int(acts.len().max(1))) {
                     c.step(a);
