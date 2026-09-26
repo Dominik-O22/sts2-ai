@@ -365,6 +365,7 @@ dependencies = [
  "mimalloc",
  "numpy",
  "pyo3",
+ "rayon",
  "serde_json",
  "sts2-sim",
 ]

@@ -49,6 +49,7 @@ pub mod game_rng;
 pub mod rng;
 pub mod rooms;
 pub mod runobs;
+pub mod turnsearch;
 pub mod types;
 
 pub use combat::{Action, Combat, EnemySpec, Outcome, RoomKind, Setup};

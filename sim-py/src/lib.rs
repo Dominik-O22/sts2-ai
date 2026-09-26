@@ -4,12 +4,12 @@
 //! are numpy arrays the caller allocates once; `observe` and `step` fill
 //! them in place with the GIL released.
 
-use numpy::{IntoPyArray, PyArray1, PyReadonlyArray1, PyReadwriteArray1, PyReadwriteArray2};
+use numpy::{IntoPyArray, PyArray1, PyReadonlyArray1, PyReadonlyArray2, PyReadwriteArray1, PyReadwriteArray2};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use serde_json::Value;
 use sim::encode::*;
-use sim::env::{EnvConfig, Forks as InnerForks, RunChoices, VecEnv as Inner};
+use sim::env::{Baseline, EnvConfig, Forks as InnerForks, RunChoices, VecEnv as Inner};
 use sim::runobs;
 use sim::gen::{holdout, load_recordings, ACTS, LAST_FLOOR};
 use sim::ids::{ALL_CARDS, ALL_MONSTERS};
@@ -106,7 +106,8 @@ impl VecEnv {
     #[pyo3(signature = (envs, n, groups=4, seed=0, depth=1))]
     fn fork(&self, envs: Vec<usize>, n: usize, groups: usize, seed: u64, depth: u32) -> Forks {
         let roots: Vec<_> = envs.iter().map(|&i| self.inner.combat(i)).collect();
-        Forks { inner: InnerForks::of(&roots, n, groups, seed, depth) }
+        let bases: Vec<_> = envs.iter().map(|&i| self.inner.base(i)).collect();
+        Forks { inner: InnerForks::of(&roots, &bases, n, groups, seed, depth) }
     }
 
     /// (encounter, kind) of env `i`'s current fight.
@@ -324,6 +325,8 @@ struct Advisor {
     seed: u64,
     start: Option<Value>,
     inner: Option<Replayer>,
+    /// Where the fight began, for the forks' rewards.
+    base: Option<Baseline>,
 }
 
 /// `Step` as the status string the advisor prints.
@@ -341,7 +344,7 @@ impl Advisor {
     #[new]
     #[pyo3(signature = (seed=0))]
     fn new(seed: u64) -> Self {
-        Self { ids: Ids::new(), seed, start: None, inner: None }
+        Self { ids: Ids::new(), seed, start: None, inner: None, base: None }
     }
 
     /// Feed one line of the recording. Returns "ok", "decision", "ended",
@@ -369,6 +372,7 @@ impl Advisor {
                 }
                 return Ok(match Replayer::new(&rec, None, self.ids.clone(), self.seed) {
                     Ok(r) => {
+                        self.base = Some(Baseline::of(r.combat()));
                         self.inner = Some(r);
                         "ok".into()
                     }
@@ -378,7 +382,10 @@ impl Advisor {
             "snapshot" if self.inner.is_none() => {
                 let Some(start) = self.start.clone() else { return Ok("waiting".into()) };
                 match Replayer::new(&start, Some(&rec), self.ids.clone(), self.seed) {
-                    Ok(r) => self.inner = Some(r),
+                    Ok(r) => {
+                        self.base = Some(Baseline::of(r.combat()));
+                        self.inner = Some(r);
+                    }
                     // Nothing about this fight is followable, so forget the
                     // start: later snapshots wait quietly for the next one.
                     Err(e) => {
@@ -479,7 +486,8 @@ impl Advisor {
     /// turn, in `groups` groups that each share a draw-pile shuffle.
     #[pyo3(signature = (n, groups=4, seed=0))]
     fn fork(&self, n: usize, groups: usize, seed: u64) -> PyResult<Forks> {
-        Ok(Forks { inner: InnerForks::new(self.combat()?, n, groups, seed) })
+        let base = self.base.expect("a combat has its baseline");
+        Ok(Forks { inner: InnerForks::new(self.combat()?, base, n, groups, seed) })
     }
 }
 
@@ -528,6 +536,16 @@ impl Forks {
         Ok(())
     }
 
+    /// Copies of forks `rows` as new roots, `n` per row, with fresh dice
+    /// and shuffles (`VecEnv.fork`): to value a state a search reached by
+    /// playing it out many times. Rewards stay shaped from the fight's start.
+    #[pyo3(signature = (rows, n, groups=4, seed=0, depth=1))]
+    fn fork(&self, rows: Vec<usize>, n: usize, groups: usize, seed: u64, depth: u32) -> Forks {
+        let roots: Vec<_> = rows.iter().map(|&i| self.inner.combat(i)).collect();
+        let bases: Vec<_> = rows.iter().map(|&i| self.inner.base(i)).collect();
+        Forks { inner: InnerForks::of(&roots, &bases, n, groups, seed, depth) }
+    }
+
     /// The forks still in their turn.
     fn live(&self) -> Vec<usize> {
         self.inner.live()
@@ -540,6 +558,216 @@ impl Forks {
     /// An action index in fork `i` in plain words, or None if not legal there.
     fn describe(&self, i: usize, index: usize) -> Option<String> {
         describe(self.inner.combat(i), index)
+    }
+}
+
+/// The exact turn search (`sim::turnsearch`) for the fights of a `VecEnv`,
+/// one search per env kept between decisions: a later decision of the
+/// same turn that the search already expanded reuses it, unless the state
+/// cap cut it short.
+///
+/// Per decision: `prepare` searches where needed, `encode_leaves` and
+/// `set_values` put the value head on the new searches' leaves, and
+/// `action_values` reads each env's action values.
+#[pyclass]
+struct TurnPlanner {
+    cfg: sim::turnsearch::Config,
+    searches: Vec<Option<sim::turnsearch::Search>>,
+    /// Envs searched afresh by the last `prepare`, awaiting values.
+    fresh: Vec<usize>,
+    /// Per env: the lines `lines` last listed, and the one committed to.
+    lines: Vec<Vec<sim::turnsearch::Line>>,
+    plans: Vec<Option<sim::turnsearch::Line>>,
+}
+
+impl TurnPlanner {
+    fn fresh_leaves(&self) -> Vec<&sim::combat::Combat> {
+        self.fresh.iter().flat_map(|&i| self.searches[i].as_ref().unwrap().leaves().iter().map(|l| &*l.combat)).collect()
+    }
+}
+
+#[pymethods]
+impl TurnPlanner {
+    #[new]
+    #[pyo3(signature = (n, max_states=500, quiesce_states=1000, draw_cap=32, samples=4, end_samples=8, max_micros=0, seed=0))]
+    #[allow(clippy::too_many_arguments)]
+    fn new(n: usize, max_states: usize, quiesce_states: usize, draw_cap: usize, samples: usize, end_samples: usize, max_micros: u64, seed: u64) -> Self {
+        let cfg = sim::turnsearch::Config { max_states, quiesce_states, draw_cap, samples, end_samples, max_micros, seed };
+        Self { cfg, searches: (0..n).map(|_| None).collect(), fresh: vec![], lines: vec![vec![]; n], plans: vec![None; n] }
+    }
+
+    /// Get each of `envs` a search holding its current state: the one it
+    /// has, when that expanded the state and was not cut short, or a new
+    /// one ordered by `priors [len(envs), N_ACTIONS]` (the policy's
+    /// probabilities). Returns the envs searched afresh.
+    fn prepare(&mut self, py: Python<'_>, env: PyRef<'_, VecEnv>, envs: Vec<usize>, priors: PyReadonlyArray2<f32>) -> PyResult<Vec<usize>> {
+        let priors = priors.as_slice()?;
+        let inner = &env.inner;
+        let (fresh, rows): (Vec<usize>, Vec<usize>) = envs
+            .iter()
+            .enumerate()
+            .filter(|&(_, &i)| !self.searches[i].as_ref().is_some_and(|s| !s.stats.capped && s.find(inner.combat(i)).is_some()))
+            .map(|(row, &i)| (i, row))
+            .unzip();
+        let roots: Vec<&sim::combat::Combat> = fresh.iter().map(|&i| inner.combat(i)).collect();
+        let bases: Vec<Baseline> = fresh.iter().map(|&i| inner.base(i)).collect();
+        let p: Vec<Option<&[f32]>> = rows.iter().map(|&r| Some(&priors[r * N_ACTIONS..][..N_ACTIONS])).collect();
+        let cfg = self.cfg;
+        let done = py.detach(|| sim::turnsearch::Search::run_all(&roots, &bases, &p, &cfg));
+        for (&i, s) in fresh.iter().zip(done) {
+            self.searches[i] = Some(s);
+            self.lines[i].clear();
+            self.plans[i] = None;
+        }
+        self.fresh = fresh.clone();
+        Ok(fresh)
+    }
+
+    /// Leaves of the searches the last `prepare` made, all together.
+    fn n_leaves(&self) -> usize {
+        self.fresh.iter().map(|&i| self.searches[i].as_ref().unwrap().leaves().len()).sum()
+    }
+
+    /// Encode leaves `start..` into the buffers, as many as they hold.
+    /// Returns how many were written.
+    fn encode_leaves(
+        &self,
+        py: Python<'_>,
+        start: usize,
+        mut floats: PyReadwriteArray2<f32>,
+        mut ids: PyReadwriteArray2<i64>,
+        mut mask: PyReadwriteArray2<bool>,
+    ) -> PyResult<usize> {
+        let (f, i, m) = (floats.as_slice_mut()?, ids.as_slice_mut()?, mask.as_slice_mut()?);
+        let leaves = self.fresh_leaves();
+        let n = (f.len() / N_FLOATS).min(leaves.len().saturating_sub(start));
+        py.detach(|| sim::turnsearch::encode_all(&leaves[start..start + n], f, i, m));
+        Ok(n)
+    }
+
+    /// The value head's value of every leaf `encode_leaves` wrote, in order.
+    fn set_values(&mut self, values: PyReadonlyArray1<f32>) -> PyResult<()> {
+        let mut v = values.as_slice()?;
+        for &i in &self.fresh {
+            let s = self.searches[i].as_mut().unwrap();
+            let n = s.leaves().len();
+            s.set_values(&v[..n]);
+            v = &v[n..];
+        }
+        if !v.is_empty() {
+            return Err(pyo3::exceptions::PyValueError::new_err("more values than leaves"));
+        }
+        Ok(())
+    }
+
+    /// (action index, value) for env `i`'s legal actions, or None when its
+    /// search does not hold its state.
+    fn action_values(&self, env: PyRef<'_, VecEnv>, i: usize) -> Option<Vec<(usize, f32)>> {
+        self.searches[i].as_ref()?.action_values(env.inner.combat(i))
+    }
+
+    /// Env `i`'s lines from its current state, best value first, as
+    /// (first action index, value, reward on the way, how it ends); kept
+    /// for `commit` and `fork_lines` to name by position. None when its
+    /// search does not hold the state.
+    fn lines(&mut self, env: PyRef<'_, VecEnv>, i: usize) -> Option<Vec<(usize, f32, f32, String)>> {
+        let s = self.searches[i].as_ref()?;
+        let c = env.inner.combat(i);
+        let lines = s.lines(c)?;
+        let out = lines.iter().map(|l| s.line_action(c, l).map(|a| (a, l.value, l.way, format!("{:?}", l.end)))).collect::<Option<Vec<_>>>()?;
+        self.lines[i] = lines;
+        Some(out)
+    }
+
+    /// Follow env `i`'s line `k` (of the last `lines`) from here.
+    fn commit(&mut self, i: usize, k: usize) {
+        self.plans[i] = self.lines[i].get(k).cloned();
+    }
+
+    /// The committed line's action in env `i`'s current state, when the
+    /// state is on it; None once it has left the line (chance, or the
+    /// turn is over).
+    fn planned_action(&self, env: PyRef<'_, VecEnv>, i: usize) -> Option<usize> {
+        let (s, line) = (self.searches[i].as_ref()?, self.plans[i].as_ref()?);
+        s.line_action(env.inner.combat(i), line)
+    }
+
+    /// `n` copies of where each of `picks` (env, line) takes its env's
+    /// state before the line's last step, the copies of pick p on dice and
+    /// shuffles from `seeds[p]` (the same seed across one env's lines
+    /// compares them on the same luck), each its own shuffle. Returns the
+    /// forks, each forked pick's last step (-1 for a cut line) and which
+    /// picks were forked: a line whose steps the fight's own state does
+    /// not take (the search's draws or dice were not the fight's) is not.
+    fn fork_lines(
+        &self,
+        env: PyRef<'_, VecEnv>,
+        picks: Vec<(usize, usize)>,
+        n: usize,
+        seeds: Vec<u64>,
+        depth: u32,
+    ) -> PyResult<(Forks, Vec<i64>, Vec<bool>)> {
+        let err = |m: &str| pyo3::exceptions::PyValueError::new_err(m.to_string());
+        let (mut starts, mut last, mut ok, mut bases, mut kept_seeds) = (vec![], vec![], vec![], vec![], vec![]);
+        for (&(i, k), &seed) in picks.iter().zip(&seeds) {
+            let s = self.searches[i].as_ref().ok_or_else(|| err("no search for env"))?;
+            let line = self.lines[i].get(k).ok_or_else(|| err("no such line"))?;
+            let start = s.line_start(env.inner.combat(i), line);
+            ok.push(start.is_some());
+            let Some((c, a)) = start else { continue };
+            last.push(a.map_or(-1, |a| sim::turnsearch::index(&c, a).map_or(-1, |x| x as i64)));
+            starts.push(c);
+            bases.push(env.inner.base(i));
+            kept_seeds.push(seed);
+        }
+        let roots: Vec<_> = starts.iter().collect();
+        Ok((Forks { inner: InnerForks::with_seeds(&roots, &bases, &kept_seeds, n, n, depth) }, last, ok))
+    }
+
+    /// For each of `rows` of `forks`: the search's best action (by index)
+    /// in env `owners[k]`'s search, when the copy is in a state of the
+    /// searched turn the search expanded; -1 otherwise.
+    fn tree_actions(&self, py: Python<'_>, forks: PyRef<'_, Forks>, rows: Vec<usize>, owners: Vec<usize>) -> Vec<i64> {
+        use rayon::prelude::*;
+        let f = &forks.inner;
+        py.detach(|| {
+            rows.par_iter()
+                .zip(&owners)
+                .map(|(&r, &o)| self.searches[o].as_ref().and_then(|s| s.best_action(f.combat(r))).map_or(-1, |a| a as i64))
+                .collect()
+        })
+    }
+
+    /// Env `i`'s search as numbers: states found and expanded, leaves,
+    /// steps by rule, whether the cap bit, time, and the best line's
+    /// rank and cut (`Search::best_line`).
+    fn stats<'py>(&self, py: Python<'py>, i: usize) -> PyResult<Option<Bound<'py, PyDict>>> {
+        let Some(s) = self.searches[i].as_ref() else { return Ok(None) };
+        let d = PyDict::new(py);
+        let t = &s.stats;
+        for (k, v) in [
+            ("nodes", t.nodes),
+            ("expanded", t.expanded),
+            ("end_leaves", t.end_leaves),
+            ("cut_leaves", t.cut_leaves),
+            ("arrivals", t.arrivals),
+            ("det", t.det),
+            ("drawn", t.drawn),
+            ("sampled", t.sampled),
+            ("end_turn", t.end_turn),
+            ("quiesced", t.quiesced),
+        ] {
+            d.set_item(k, v)?;
+        }
+        d.set_item("lines", t.lines)?;
+        d.set_item("capped", t.capped)?;
+        d.set_item("micros", t.micros)?;
+        if !s.leaves().is_empty() {
+            let (rank, cut) = s.best_line();
+            d.set_item("pv_rank", rank)?;
+            d.set_item("pv_cut", cut)?;
+        }
+        Ok(Some(d))
     }
 }
 
@@ -815,6 +1043,7 @@ fn _sim(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<VecEnv>()?;
     m.add_class::<Advisor>()?;
     m.add_class::<Forks>()?;
+    m.add_class::<TurnPlanner>()?;
     m.add_function(wrap_pyfunction!(layout, m)?)?;
     m.add_function(wrap_pyfunction!(run_layout, m)?)?;
     m.add_function(wrap_pyfunction!(run_names, m)?)?;
