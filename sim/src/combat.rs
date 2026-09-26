@@ -253,7 +253,7 @@ pub type ShuffleCard = (CardId, bool, Option<(crate::enchant::EnchantmentId, boo
 /// Recorded outcomes the replay harness forces instead of rolling:
 /// shuffle results and starting enemy HP. Each shuffle consumes one entry;
 /// once the queue is empty the RNG takes over again.
-#[derive(Clone, Debug, Default)]
+#[derive(Debug, Default)]
 pub struct Script {
     /// Draw pile orders, top first.
     pub shuffles: VecDeque<Vec<ShuffleCard>>,
@@ -291,6 +291,32 @@ pub struct Script {
     /// Monsters the recording saw join since the last snapshot. A random
     /// spawn (the Fabricator's bot) takes the first one it can make.
     pub spawns: Vec<MonsterId>,
+}
+
+/// Outside a replay a script is blank, and a clone of it should cost
+/// nothing: the containers are only cloned when something is in them.
+impl Clone for Script {
+    fn clone(&self) -> Self {
+        fn copy<T: Clone>(v: &Vec<T>) -> Vec<T> {
+            if v.is_empty() { Vec::new() } else { v.clone() }
+        }
+        fn copy_deque<T: Clone>(v: &VecDeque<T>) -> VecDeque<T> {
+            if v.is_empty() { VecDeque::new() } else { v.clone() }
+        }
+        Self {
+            shuffles: copy_deque(&self.shuffles),
+            unscripted_shuffles: self.unscripted_shuffles,
+            enemy_hp: copy(&self.enemy_hp),
+            first_snapshot_pending: self.first_snapshot_pending,
+            random_targets: copy_deque(&self.random_targets),
+            generated: copy_deque(&self.generated),
+            random_exhausts: copy(&self.random_exhausts),
+            adopted_offers: copy(&self.adopted_offers),
+            unforced: copy(&self.unforced),
+            hit_cards: copy(&self.hit_cards),
+            spawns: copy(&self.spawns),
+        }
+    }
 }
 
 impl Script {
@@ -420,6 +446,7 @@ pub struct Stats {
     /// snapshot shows which ones the game picked.
     pub cracked: Vec<u32>,
 }
+
 
 #[derive(Clone, Debug)]
 pub struct Combat {
