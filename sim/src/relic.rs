@@ -1377,18 +1377,12 @@ impl Combat {
         }
     }
 
-    /// `TryModifyEnergyCostInCombat` for relics: Spiked Gauntlets taxes powers.
-    pub(crate) fn relic_cost_additive(&self, card: &Card) -> i32 {
-        i32::from(card.ty() == CardType::Power && self.has_relic(RelicId::SpikedGauntlets))
-    }
-
     /// `TryModifyEnergyCostInCombatLate` for relics: Brilliant Scarf makes the
     /// fifth card played by hand each turn free, in hand or being played.
-    pub(crate) fn relic_makes_free(&self, card: &Card) -> bool {
+    /// `scarf` is whether the Scarf is held with four cards played by hand.
+    pub(crate) fn relic_makes_free(&self, scarf: bool, card: &Card) -> bool {
         let p = &self.player;
-        self.has_relic(RelicId::BrilliantScarf)
-            && self.stats.manual_plays_this_turn == 4
-            && p.hand.iter().chain(&p.play).any(|c| c.uid == card.uid)
+        scarf && p.hand.iter().chain(&p.play).any(|c| c.uid == card.uid)
     }
 
     /// `ShouldPlay` for relics: Velvet Choker stops the seventh card a turn.

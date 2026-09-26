@@ -135,6 +135,30 @@ pub struct Pending {
     pub can_skip: bool,
 }
 
+/// What `Combat::cost` reads that is the same for every card, gathered
+/// once when a whole hand is priced.
+struct CostRules {
+    /// Free by type (Corruption, Free Attack), indexed by `CardType`.
+    free: [bool; 5],
+    /// Brilliant Scarf's fifth card is up.
+    scarf: bool,
+    curious: i32,
+    gauntlets: bool,
+    tangled: i32,
+}
+
+/// What `Combat::hook_allows_play` reads that is the same for every card.
+struct PlayRules {
+    ringing: bool,
+    /// An Enthralled in hand.
+    enthralled: bool,
+    /// A Normality in hand with three cards down this turn.
+    normality: bool,
+    relics_allow: bool,
+    sloth: bool,
+    smoggy: bool,
+}
+
 /// A monster to place in the encounter.
 #[derive(Clone, Copy, Debug)]
 pub struct EnemySpec {
@@ -728,67 +752,104 @@ impl Combat {
     /// ones (Spiked Gauntlets, then the late Corruption, Free Attack,
     /// Brilliant Scarf). X-cost cards report `-1`.
     pub fn cost(&self, card: &Card) -> i32 {
+        self.cost_by(&self.cost_rules(), card)
+    }
+
+    /// The parts of `cost` that are the same for every card.
+    fn cost_rules(&self) -> CostRules {
+        let powers = &self.player.creature.powers;
+        let free = |ty| powers.of(Power::FREE_CARD).any(|p| p.free_card(ty));
+        CostRules {
+            free: [free(CardType::Attack), free(CardType::Skill), free(CardType::Power), free(CardType::Status), free(CardType::Curse)],
+            scarf: self.has_relic(crate::relic::RelicId::BrilliantScarf) && self.stats.manual_plays_this_turn == 4,
+            curious: self.player.creature.power_amount(PowerId::Curious),
+            gauntlets: self.has_relic(crate::relic::RelicId::SpikedGauntlets),
+            tangled: self.player.creature.power_amount(PowerId::Tangled),
+        }
+    }
+
+    fn cost_by(&self, rules: &CostRules, card: &Card) -> i32 {
         let local = card.local_cost();
         if local < 0 || card.def().x_cost {
             return local;
         }
-        if self.player.creature.powers.of(Power::FREE_CARD).any(|p| p.free_card(card.ty())) || self.relic_makes_free(card) {
+        let ty = card.ty();
+        if rules.free[ty as usize] || self.relic_makes_free(rules.scarf, card) {
             return 0;
         }
         // CuriousPower.cs: a power, so its hook runs ahead of the relics'.
-        let curious = self.player.creature.power_amount(PowerId::Curious);
-        let local = if card.ty() == CardType::Power && local > 0 { (local - curious).max(0) } else { local };
-        let local = local + self.relic_cost_additive(card);
+        let local = if ty == CardType::Power && local > 0 { (local - rules.curious).max(0) } else { local };
+        // SpikedGauntlets.TryModifyEnergyCostInCombat: powers cost 1 more.
+        let local = local + i32::from(ty == CardType::Power && rules.gauntlets);
         // TangledPower.cs: every attack is afflicted with Entangled (+amount).
-        if card.ty() == CardType::Attack {
-            return local + self.player.creature.power_amount(PowerId::Tangled);
+        if ty == CardType::Attack {
+            return local + rules.tangled;
         }
         local
+    }
+
+    /// The parts of `hook_allows_play` that are the same for every card.
+    fn play_rules(&self) -> PlayRules {
+        let played = self.stats.cards_played_this_turn;
+        PlayRules {
+            ringing: self.player.creature.power(PowerId::Ringing).is_some() && played > 0,
+            enthralled: self.player.hand.iter().any(|c| c.id == CardId::Enthralled),
+            normality: played >= 3 && self.player.hand.iter().any(|c| c.id == CardId::Normality),
+            relics_allow: self.relic_allows_play(),
+            sloth: self.player.creature.power(PowerId::Sloth).is_some_and(|p| p.data >= p.amount),
+            smoggy: self.player.creature.powers.of(Power::BLOCKS_SMOGGED).any(|p| p.blocks_smogged()),
+        }
     }
 
     /// `Hook.ShouldPlay` for the player's own card: Ringing allows only the
     /// first play each turn, Velvet Choker six, and Smoggy blocks anything the
     /// fog has settled on.
     fn hook_allows_play(&self, card: &Card) -> bool {
-        if self.player.creature.power(PowerId::Ringing).is_some() && self.stats.cards_played_this_turn > 0 {
+        self.allows_by(&self.play_rules(), card)
+    }
+
+    fn allows_by(&self, rules: &PlayRules, card: &Card) -> bool {
+        if rules.ringing {
             return false;
         }
         // Two curses veto from hand: Enthralled until it is itself played,
         // Normality once three cards have gone down this turn.
-        let vetoed = |c: &Card| match c.id {
-            CardId::Enthralled => card.id != CardId::Enthralled,
-            CardId::Normality => self.stats.cards_played_this_turn >= 3,
-            _ => false,
-        };
-        if self.player.hand.iter().any(vetoed) || !self.relic_allows_play() {
+        if (rules.enthralled && card.id != CardId::Enthralled) || rules.normality || !rules.relics_allow {
             return false;
         }
         // SlothPower.ShouldPlay: only `amount` cards a turn.
-        if self.player.creature.power(PowerId::Sloth).is_some_and(|p| p.data >= p.amount) {
+        if rules.sloth {
             return false;
         }
         // ChainsOfBindingPower.ShouldPlay: one Bound card a turn.
         if card.affliction == Some(Affliction::Bound) && self.stats.bound_played {
             return false;
         }
-        !(card.smogged && self.player.creature.powers.of(Power::BLOCKS_SMOGGED).any(|p| p.blocks_smogged()))
+        !(card.smogged && rules.smoggy)
     }
 
     /// Every action the player may take right now.
     pub fn legal_actions(&self) -> Vec<Action> {
-        let mut out = vec![];
+        let mut out = Vec::with_capacity(24);
+        self.legal_actions_into(&mut out);
+        out
+    }
+
+    /// `legal_actions` into a buffer the caller reuses, cleared first.
+    pub fn legal_actions_into(&self, out: &mut Vec<Action>) {
+        out.clear();
         if self.is_over() {
-            return out;
+            return;
         }
         if let Some(p) = &self.pending {
             out.extend((0..p.options.len()).map(Action::Choose));
             if p.can_skip {
                 out.push(Action::Skip);
             }
-            return out;
+            return;
         }
         if self.side != Side::Player {
-            return out;
+            return;
         }
         for (slot, id) in self.potions.iter().enumerate() {
             let Some(id) = id else { continue };
@@ -804,8 +865,9 @@ impl Combat {
                 PotionTarget::None => out.push(Action::UsePotion { slot, target: None }),
             }
         }
+        let (play, cost) = (self.play_rules(), self.cost_rules());
         for (i, card) in self.player.hand.iter().enumerate() {
-            if !self.can_play(card) {
+            if !self.can_play_by(&play, &cost, card) {
                 continue;
             }
             match card.def().target {
@@ -818,12 +880,15 @@ impl Combat {
             }
         }
         out.push(Action::EndTurn);
-        out
     }
 
     /// `CardModel.CanPlay` for the reasons we model.
     pub(crate) fn can_play(&self, card: &Card) -> bool {
-        if card.has(Keyword::Unplayable) || !self.hook_allows_play(card) {
+        self.can_play_by(&self.play_rules(), &self.cost_rules(), card)
+    }
+
+    fn can_play_by(&self, play: &PlayRules, cost: &CostRules, card: &Card) -> bool {
+        if card.has(Keyword::Unplayable) || !self.allows_by(play, card) {
             return false;
         }
         // Clash.IsPlayable: only with nothing but attacks in hand. NoLivingAllies:
@@ -836,7 +901,7 @@ impl Combat {
         if card.def().x_cost {
             return true;
         }
-        let cost = self.cost(card);
+        let cost = self.cost_by(cost, card);
         cost >= 0 && self.player.energy >= cost
     }
 
