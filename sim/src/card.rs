@@ -450,7 +450,7 @@ pub struct Vars {
 }
 
 /// A card instance in a deck or a combat pile.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Card {
     /// Unique within a combat. Effects refer to cards by uid because piles move.
     pub uid: u32,

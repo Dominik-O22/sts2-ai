@@ -121,7 +121,7 @@ pub const ANCIENT: &[RelicId] = &[
 ];
 
 /// A relic instance on the run.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Relic {
     pub id: RelicId,
     /// Persistent counter: Nunchaku attacks, Pen Nib attacks, Tuning Fork

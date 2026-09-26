@@ -8,7 +8,7 @@ use crate::effect::{Effect, Pile};
 use crate::ids::PowerId;
 use crate::types::{CardType, CreatureRef, IdSet, Side, ValueProp};
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Power {
     pub id: PowerId,
     pub amount: i32,
