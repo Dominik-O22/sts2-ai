@@ -1019,7 +1019,7 @@ mod tests {
     #[test]
     fn what_follows_prices_what_is_left() {
         let mut c = generate(&mut Rng::new(4), 8, Ascension(10)).combat(3);
-        c.relics = vec![];
+        c.relics = vec![].into();
         c.potions = vec![Some(PotionId::FirePotion), None];
         c.player.creature.hp = c.player.creature.max_hp / 2;
         c.outcome = Some(Outcome::Won);
@@ -1040,7 +1040,7 @@ mod tests {
     #[test]
     fn lost_max_hp_costs_reward() {
         let mut c = generate(&mut Rng::new(4), 8, Ascension(10)).combat(3);
-        c.relics = vec![];
+        c.relics = vec![].into();
         c.potions = vec![None, None];
         c.player.creature.hp = c.player.creature.max_hp / 2;
         c.after = After::Act;
@@ -1057,14 +1057,14 @@ mod tests {
     fn refilled_potions_are_free() {
         use crate::relic::Relic;
         let mut c = generate(&mut Rng::new(4), 8, Ascension(10)).combat(3);
-        c.relics = vec![];
+        c.relics = vec![].into();
         c.potions = vec![Some(PotionId::PotionShapedRock), Some(PotionId::FirePotion)];
         assert_eq!(potions_held(&c), 2);
         c.relics.push(Relic::new(RelicId::PetrifiedToad));
         assert_eq!(potions_held(&c), 1, "the Toad's rock comes back");
         c.relics.push(Relic::new(RelicId::Sozu));
         assert_eq!(potions_held(&c), 2, "Sozu stops the Toad");
-        c.relics = vec![Relic::new(RelicId::DelicateFrond)];
+        c.relics = vec![Relic::new(RelicId::DelicateFrond)].into();
         assert_eq!(potions_held(&c), 0, "the Frond refills every slot");
     }
 

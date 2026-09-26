@@ -11,7 +11,7 @@ use crate::ids::{CardId, MonsterId, PowerId};
 use crate::monster::{Flags, Monster, RollCtx};
 use crate::potion::{PotionId, Target as PotionTarget};
 use crate::power::{instanced, is_debuff, is_debuff_for_amount, Power};
-use crate::relic::Relic;
+use crate::relic::{Relic, Relics};
 use crate::rng::CombatRngs;
 use crate::types::{Ascension, CardType, CreatureRef, Keyword, Side, TargetType, ValueProp};
 
@@ -368,7 +368,7 @@ pub struct Combat {
     pub pending: Option<Pending>,
     pub stats: Stats,
     /// The run's relics, with counters updated in place.
-    pub relics: Vec<Relic>,
+    pub relics: Relics,
     pub room: RoomKind,
     /// What follows the fight; `FightSetup::combat` sets it.
     pub after: After,
@@ -460,7 +460,7 @@ impl Combat {
             outcome: None,
             pending: None,
             stats: Stats::default(),
-            relics: setup.relics.to_vec(),
+            relics: setup.relics.to_vec().into(),
             room: setup.room,
             after: After::Act,
             potions: setup.potions.to_vec(),
@@ -1439,7 +1439,9 @@ impl Combat {
                     self.modify_power(CreatureRef::Player, id, -1);
                 }
                 // ThrowingAxe: the first card each combat is played twice.
-                if let Some(r) = self.relics.iter_mut().find(|r| r.id == crate::relic::RelicId::ThrowingAxe && !r.used) {
+                let axe = crate::relic::RelicId::ThrowingAxe;
+                let axe = if self.relics.has(axe) { self.relics.iter_mut().find(|r| r.id == axe && !r.used) } else { None };
+                if let Some(r) = axe {
                     r.used = true;
                     plays += 1;
                 }

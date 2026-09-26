@@ -130,3 +130,40 @@ impl Ascension {
         }
     }
 }
+
+/// A set of ids from one of the closed vocabularies (`PowerId`, `RelicId`),
+/// by position. Hook dispatch uses it twice: what a creature or the run
+/// holds, and which ids a hook reacts to, so "does anything react" is one
+/// AND before any list is walked.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct IdSet([u64; 3]);
+
+impl IdSet {
+    /// Room for this many ids.
+    pub const CAPACITY: usize = 192;
+
+    pub const EMPTY: IdSet = IdSet([0; 3]);
+
+    /// This set plus one id.
+    pub const fn with(mut self, id: usize) -> Self {
+        self.0[id / 64] |= 1 << (id % 64);
+        self
+    }
+
+    pub fn insert(&mut self, id: usize) {
+        *self = self.with(id);
+    }
+
+    pub fn contains(self, id: usize) -> bool {
+        self.0[id / 64] & (1 << (id % 64)) != 0
+    }
+
+    /// Whether the two sets share an id.
+    pub fn meets(self, other: IdSet) -> bool {
+        (self.0[0] & other.0[0]) | (self.0[1] & other.0[1]) | (self.0[2] & other.0[2]) != 0
+    }
+
+    pub fn union(self, other: IdSet) -> IdSet {
+        IdSet([self.0[0] | other.0[0], self.0[1] | other.0[1], self.0[2] | other.0[2]])
+    }
+}
