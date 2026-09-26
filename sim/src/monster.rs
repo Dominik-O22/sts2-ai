@@ -623,11 +623,12 @@ impl Monster {
                 .map(|(s, _)| *s)
                 .expect("no conditional branch matched"),
             State::Random(branches) => {
-                let weights: Vec<f32> = branches.iter().map(|b| self.branch_weight(b, ctx)).collect();
-                let total: f32 = weights.iter().sum();
+                // Weights are pure, so the second pass recomputes them rather
+                // than keeping a list.
+                let total: f32 = branches.iter().map(|b| self.branch_weight(b, ctx)).sum();
                 let mut roll = rng.next_float(total);
-                for (b, w) in branches.iter().zip(&weights) {
-                    roll -= w;
+                for b in branches.iter() {
+                    roll -= self.branch_weight(b, ctx);
                     if roll <= 0.0 {
                         return b.state;
                     }

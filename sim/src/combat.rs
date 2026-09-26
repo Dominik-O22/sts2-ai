@@ -1042,6 +1042,9 @@ impl Combat {
                 } else {
                     match &targets {
                         AttackTargets::One(t) => Some(*t),
+                        AttackTargets::AllOpponents if self.opponent_count(dealer) <= 1 => {
+                            (self.opponent_count(dealer) == 1).then(|| self.nth_opponent(dealer, 0))
+                        }
                         AttackTargets::AllOpponents => {
                             let ts = self.opponents_of(dealer);
                             if ts.len() > 1 {
@@ -1460,11 +1463,12 @@ impl Combat {
             }
             Effect::Shuffle => {
                 // CardPileCmd.Shuffle: discard then draw, shuffled together.
-                let mut cards = std::mem::take(&mut self.player.discard);
-                cards.append(&mut self.player.draw);
-                shuffle_cards(&mut cards, &mut self.script, &mut self.rngs.shuffle, &mut self.shuffle_log);
-                apply_shuffle_order(&mut cards, false);
-                self.player.draw = cards;
+                // The piles swap buffers, so neither is reallocated.
+                let p = &mut self.player;
+                p.discard.append(&mut p.draw);
+                std::mem::swap(&mut p.draw, &mut p.discard);
+                shuffle_cards(&mut p.draw, &mut self.script, &mut self.rngs.shuffle, &mut self.shuffle_log);
+                apply_shuffle_order(&mut p.draw, false);
                 let subs = self.after_shuffle();
                 self.push_front_all(subs);
             }
@@ -2332,8 +2336,10 @@ impl Combat {
         s.manual_plays_this_turn = 0;
         s.last_turn_card = s.last_card.take();
         s.attack_skill_plays_this_turn = 0;
-        s.hatchets_played_last_turn = std::mem::take(&mut s.hatchets_played);
-        s.finished_last_turn = std::mem::take(&mut s.finished_this_turn);
+        std::mem::swap(&mut s.hatchets_played_last_turn, &mut s.hatchets_played);
+        s.hatchets_played.clear();
+        std::mem::swap(&mut s.finished_last_turn, &mut s.finished_this_turn);
+        s.finished_this_turn.clear();
     }
 
     /// `PlayerCombatState.EndOfTurnCleanup` over every card in combat.
@@ -2656,11 +2662,12 @@ impl Combat {
     /// Returns true when a shuffle happened.
     pub(crate) fn reshuffle_if_needed(&mut self) -> bool {
         if self.player.draw.is_empty() && !self.player.discard.is_empty() {
-            // CardPileCmd.Shuffle: discard becomes the draw pile.
-            let mut cards = std::mem::take(&mut self.player.discard);
-            shuffle_cards(&mut cards, &mut self.script, &mut self.rngs.shuffle, &mut self.shuffle_log);
-            apply_shuffle_order(&mut cards, false);
-            self.player.draw = cards;
+            // CardPileCmd.Shuffle: discard becomes the draw pile, and the
+            // empty draw pile's buffer the discard pile.
+            let p = &mut self.player;
+            std::mem::swap(&mut p.draw, &mut p.discard);
+            shuffle_cards(&mut p.draw, &mut self.script, &mut self.rngs.shuffle, &mut self.shuffle_log);
+            apply_shuffle_order(&mut p.draw, false);
             return true;
         }
         false
