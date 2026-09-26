@@ -155,4 +155,39 @@ fn main() {
     });
     let play_ns = 1e9 * secs / n as f64;
     println!("clone+legal+play  : {play_ns:>9.0} ns ({:.0} nodes/s, card plays only)", 1e9 / play_ns);
+
+    // The same nodes on four threads expanding the same parents at once, as
+    // a parallel search does: anything the clones share gets contended.
+    let threads = 4;
+    let (n, secs) = best(|_| {
+        let per: Vec<(u64, f64)> = std::thread::scope(|sc| {
+            let roots = &roots;
+            let handles: Vec<_> = (0..threads)
+                .map(|k| {
+                    sc.spawn(move || {
+                        let mut rng = Rng::new(k as u64);
+                        let mut n = 0;
+                        let t = cpu_secs();
+                        for _ in 0..reps / 2 {
+                            for r in roots {
+                                let mut c = r.clone();
+                                let mut acts = c.legal_actions();
+                                acts.retain(|a| matches!(a, sim::Action::PlayCard { .. }));
+                                if let Some(&a) = acts.get(rng.next_int(acts.len().max(1))) {
+                                    c.step(a);
+                                    n += 1;
+                                }
+                                black_box(&c);
+                            }
+                        }
+                        (n, cpu_secs() - t)
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        (per.iter().map(|p| p.0).sum(), per.iter().map(|p| p.1).sum())
+    });
+    let mt_ns = 1e9 * secs / n as f64;
+    println!("4 threads, play   : {mt_ns:>9.0} ns per node per thread (CPU time)");
 }
