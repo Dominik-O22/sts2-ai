@@ -51,8 +51,8 @@ Change one here before changing the code that depends on it.
 - `examples/bench_real` times the sim on the played runs' fights (steps/s, clone, a search
   node); `examples/trajectories` fingerprints random playouts and must print the same before
   and after a speed change. On 2026-09-26 the speed work took the played runs' fights from
-  0.59M to 1.28M steps/s per thread, a clone from 214 to 178 ns, and a clone plus one card
-  play from 1960 to 770 ns (measured side by side on a busy machine).
+  0.60M to 1.32M steps/s per thread, a clone from 212 to 178 ns, and a clone plus one card
+  play from 1942 to 745 ns (medians of three interleaved runs with training paused).
 
 ## Fidelity and tests
 
