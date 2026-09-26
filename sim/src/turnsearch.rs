@@ -645,10 +645,13 @@ fn lines(nodes: &[Node]) -> f64 {
 }
 
 impl Search {
-    /// Search the rest of `root`'s turn. `priors` are the policy's
-    /// probabilities over the action space at the root, which order the
-    /// expansion; without them it goes breadth first.
-    pub fn run(root: &Combat, priors: Option<&[f32]>, cfg: &Config) -> Self {
+    /// Search the rest of `root`'s turn. `base` is where its fight began:
+    /// rewards are shaped from it, as the value head's targets were, so a
+    /// line that ends the fight and one the value head scores are on one
+    /// scale (`env::Forks`). `priors` are the policy's probabilities over
+    /// the action space at the root, which order the expansion; without
+    /// them it goes breadth first.
+    pub fn run(root: &Combat, base: Baseline, priors: Option<&[f32]>, cfg: &Config) -> Self {
         let start = Instant::now();
         let mut c = root.clone();
         c.script = Default::default();
@@ -661,7 +664,7 @@ impl Search {
         let mut b = Builder {
             cfg,
             seed: mix(cfg.seed, key),
-            base: Baseline::of(root),
+            base,
             turn: root.player.turn,
             priors: Priors::of(&c, priors),
             nodes: vec![],
@@ -676,8 +679,8 @@ impl Search {
     }
 
     /// `run` over many roots at once, one thread each.
-    pub fn run_all(roots: &[&Combat], priors: &[Option<&[f32]>], cfg: &Config) -> Vec<Self> {
-        roots.par_iter().zip(priors.par_iter()).map(|(r, p)| Self::run(r, *p, cfg)).collect()
+    pub fn run_all(roots: &[&Combat], bases: &[Baseline], priors: &[Option<&[f32]>], cfg: &Config) -> Vec<Self> {
+        roots.par_iter().zip(bases).zip(priors.par_iter()).map(|((r, b), p)| Self::run(r, *b, *p, cfg)).collect()
     }
 
     /// The states the value head scores, in the order `set_values` takes
@@ -854,11 +857,28 @@ mod tests {
     #[test]
     fn order_matters_and_the_search_sees_it() {
         let c = nibbit(&[CardId::StrikeIronclad, CardId::Bash], 60);
-        let mut s = Search::run(&c, None, &Config::default());
+        let mut s = Search::run(&c, Baseline::of(&c), None, &Config::default());
         let (strike, bash) = (value_of(&mut s, &c, 0), value_of(&mut s, &c, 1));
         let three_hp = 0.5 * 3.0 / c.stats.enemy_start_hp as f32;
         assert!((bash - strike - three_hp).abs() < 1e-4, "bash {bash} strike {strike}, expected a gap of {three_hp}");
         assert!(!s.stats.capped);
+    }
+
+    /// Winning now and ending the turn into a fight sure to be won at the
+    /// same HP are worth the same, far into a fight as the root is.
+    #[test]
+    fn winning_now_scores_like_a_sure_win_later() {
+        use crate::env::tests::{fight_nearly_won, sure_win_value};
+        let (root, base) = fight_nearly_won();
+        let mut s = Search::run(&root, base, None, &Config::default());
+        let values: Vec<f32> = s.leaves().iter().map(|l| sure_win_value(&l.combat, base)).collect();
+        assert!(!values.is_empty());
+        s.set_values(&values);
+        let (hand, choices) = (encode::hand_order(&root), encode::choice_order(&root));
+        let q = s.action_values(&root).unwrap();
+        let of = |a| q.iter().find(|(i, _)| Some(*i) == encode::index_of(&root, &hand, &choices, a)).unwrap().1;
+        let (now, later) = (of(Action::PlayCard { hand_idx: 0, target: Some(0) }), of(Action::EndTurn));
+        assert!((now - later).abs() < 1e-5, "won now {now} vs won later {later}");
     }
 
     /// Strike, Defend, Strike and Defend, Strike, Strike end in one state:
@@ -867,7 +887,7 @@ mod tests {
     #[test]
     fn commuting_plays_meet() {
         let c = nibbit(&[CardId::StrikeIronclad, CardId::DefendIronclad, CardId::StrikeIronclad], 60);
-        let s = Search::run(&c, None, &Config::default());
+        let s = Search::run(&c, Baseline::of(&c), None, &Config::default());
         assert_eq!(s.stats.nodes, 6, "{:?}", s.stats);
         assert!(s.stats.arrivals > s.stats.nodes);
     }
@@ -885,7 +905,7 @@ mod tests {
     #[test]
     fn same_root_same_search() {
         for c in roots() {
-            let (a, b) = (Search::run(&c, None, &small()), Search::run(&c, None, &small()));
+            let (a, b) = (Search::run(&c, Baseline::of(&c), None, &small()), Search::run(&c, Baseline::of(&c), None, &small()));
             let keys = |s: &Search| s.leaves().iter().map(|l| state_key(&l.combat)).collect::<Vec<_>>();
             assert_eq!(keys(&a), keys(&b));
             assert_eq!(root_values(a, &c), root_values(b, &c));
@@ -903,7 +923,7 @@ mod tests {
             let n = other.player.draw.len();
             other.player.draw.rotate_left(3.min(n));
             other.rngs = CombatRngs::new(0xBAD5EED);
-            let (a, b) = (Search::run(&c, None, &small()), Search::run(&other, None, &small()));
+            let (a, b) = (Search::run(&c, Baseline::of(&c), None, &small()), Search::run(&other, Baseline::of(&other), None, &small()));
             let keys = |s: &Search| s.leaves().iter().map(|l| state_key(&l.combat)).collect::<Vec<_>>();
             assert_eq!(keys(&a), keys(&b));
             (drawn, sampled) = (drawn + a.stats.drawn, sampled + a.stats.sampled);

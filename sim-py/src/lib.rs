@@ -483,9 +483,10 @@ impl TurnPlanner {
             .map(|(row, &i)| (i, row))
             .unzip();
         let roots: Vec<&sim::combat::Combat> = fresh.iter().map(|&i| inner.combat(i)).collect();
+        let bases: Vec<Baseline> = fresh.iter().map(|&i| inner.base(i)).collect();
         let p: Vec<Option<&[f32]>> = rows.iter().map(|&r| Some(&priors[r * N_ACTIONS..][..N_ACTIONS])).collect();
         let cfg = self.cfg;
-        let done = py.detach(|| sim::turnsearch::Search::run_all(&roots, &p, &cfg));
+        let done = py.detach(|| sim::turnsearch::Search::run_all(&roots, &bases, &p, &cfg));
         for (&i, s) in fresh.iter().zip(done) {
             self.searches[i] = Some(s);
         }

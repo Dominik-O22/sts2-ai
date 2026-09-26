@@ -800,7 +800,7 @@ impl Forks {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// Random masked actions through the batch API: every step returns a
