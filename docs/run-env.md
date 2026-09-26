@@ -659,7 +659,12 @@ of 97% takes its chance of the elite from 58% to 53%. The winners' low
 forecasts come with low HP, which the clone reads already. What the
 forecast does find is where the clone loses: of its act 1 elite fights
 logged, 13% are entered at a forecast under 50%, and those give 60% of
-the losses (184 of 308). Learning to pass those up is PPO's to do.
+the losses (184 of 308). Learning to pass those up is PPO's to do, and
+`runplay --elite-gate P` tries the rule by hand: it passes up an elite
+whose forecast is under P when another option is open. Neither the gate
+nor a 45-minute PPO run from the forecast clone (`runs/run-forecast` in
+the forecast worktree, 54 iterations beside other jobs) has had the
+2048-run evaluation yet.
 
 ### Exactness
 
