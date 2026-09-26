@@ -6,8 +6,9 @@
 //! Reports three numbers: steps per second over whole playouts (the setup's
 //! `Combat` built outside the clock), what cloning a mid-fight state costs,
 //! and what one action costs on a fresh clone (clone, legal actions, step),
-//! the unit a tree search pays per node. Each is the best of five rounds,
-//! which keeps a busy machine's preemptions out of the number.
+//! the unit a tree search pays per node. Time is the thread's time on a
+//! CPU (`/proc/thread-self/schedstat`), and each number is the best of five
+//! rounds, which keeps a busy machine's preemptions out of the number.
 use std::hint::black_box;
 use std::time::Instant;
 
@@ -18,6 +19,16 @@ use sim::Combat;
 
 const ROUNDS: usize = 5;
 
+/// Seconds this thread has spent on a CPU, or wall time where Linux's
+/// schedstat is missing.
+fn cpu_secs() -> f64 {
+    thread_local!(static START: Instant = Instant::now());
+    std::fs::read_to_string("/proc/thread-self/schedstat")
+        .ok()
+        .and_then(|s| s.split_whitespace().next()?.parse::<u64>().ok())
+        .map_or_else(|| START.with(|t| t.elapsed().as_secs_f64()), |ns| ns as f64 * 1e-9)
+}
+
 /// The round with the best rate: units done over seconds taken.
 fn best(mut round: impl FnMut(usize) -> (u64, f64)) -> (u64, f64) {
     (0..ROUNDS).map(&mut round).max_by(|a, b| (a.0 as f64 / a.1).total_cmp(&(b.0 as f64 / b.1))).unwrap()
@@ -27,19 +38,24 @@ fn playouts(setups: &[&FightSetup], passes: std::ops::Range<u64>) -> (u64, f64) 
     let mut steps = 0u64;
     let mut secs = 0.0;
     for pass in passes {
-        for (i, s) in setups.iter().enumerate() {
-            let seed = pass * 100_003 + i as u64;
-            let mut c = s.combat(seed);
-            let mut rng = Rng::new(seed);
-            let t = Instant::now();
+        let mut fights: Vec<(Combat, Rng)> = setups
+            .iter()
+            .enumerate()
+            .map(|(i, s)| {
+                let seed = pass * 100_003 + i as u64;
+                (s.combat(seed), Rng::new(seed))
+            })
+            .collect();
+        let t = cpu_secs();
+        for (c, rng) in &mut fights {
             while !c.is_over() {
                 let acts = c.legal_actions();
                 c.step(acts[rng.next_int(acts.len())]);
                 steps += 1;
             }
-            secs += t.elapsed().as_secs_f64();
-            black_box(&c);
         }
+        secs += cpu_secs() - t;
+        black_box(&fights);
     }
     (steps, secs)
 }
@@ -81,30 +97,30 @@ fn main() {
         println!("playouts {name:>9}: {:>9.0} steps/s ({:.0} ns/step, {steps} steps)", steps as f64 / secs, 1e9 * secs / steps as f64);
     }
 
-    let t = Instant::now();
+    let t = cpu_secs();
     let n_new = 2000;
     for i in 0..n_new {
         black_box(all[i % all.len()].combat(i as u64));
     }
-    println!("Combat::new       : {:>9.0} ns", 1e9 * t.elapsed().as_secs_f64() / n_new as f64);
+    println!("Combat::new       : {:>9.0} ns", 1e9 * (cpu_secs() - t) / n_new as f64);
 
     let roots: Vec<Combat> = all.iter().step_by(4).enumerate().filter_map(|(i, s)| mid_fight(s, i as u64, 12)).collect();
     let reps = 600;
     let (n, secs) = best(|_| {
-        let t = Instant::now();
+        let t = cpu_secs();
         for _ in 0..reps {
             for r in &roots {
                 black_box(r.clone());
             }
         }
-        ((reps * roots.len()) as u64, t.elapsed().as_secs_f64())
+        ((reps * roots.len()) as u64, cpu_secs() - t)
     });
     let clone_ns = 1e9 * secs / n as f64;
     println!("clone             : {clone_ns:>9.0} ns ({} mid-fight states, {:.0} clones/s)", roots.len(), 1e9 / clone_ns);
 
     let (n, secs) = best(|_| {
         let mut rng = Rng::new(1);
-        let t = Instant::now();
+        let t = cpu_secs();
         for _ in 0..reps {
             for r in &roots {
                 let mut c = r.clone();
@@ -113,7 +129,7 @@ fn main() {
                 black_box(&c);
             }
         }
-        ((reps * roots.len()) as u64, t.elapsed().as_secs_f64())
+        ((reps * roots.len()) as u64, cpu_secs() - t)
     });
     let node_ns = 1e9 * secs / n as f64;
     println!("clone+legal+step  : {node_ns:>9.0} ns ({:.0} nodes/s, step after clone {:.0} ns)", 1e9 / node_ns, node_ns - clone_ns);
