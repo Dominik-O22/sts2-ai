@@ -53,8 +53,44 @@ impl Creature {
     }
 }
 
+/// A copy of a pile with room for a few more cards, so the step after a
+/// clone does not grow it. An empty pile stays unallocated.
+fn roomy(pile: &[Card], room: usize) -> Vec<Card> {
+    if pile.is_empty() {
+        return Vec::new();
+    }
+    let mut v = Vec::with_capacity(pile.len() + room);
+    v.extend_from_slice(pile);
+    v
+}
+
+impl Clone for PlayerCombat {
+    fn clone(&self) -> Self {
+        Self {
+            creature: self.creature.clone(),
+            hand: roomy(&self.hand, 2),
+            draw: self.draw.clone(),
+            discard: roomy(&self.discard, 4),
+            exhaust: roomy(&self.exhaust, 2),
+            play: Vec::with_capacity(self.play.len().max(2)),
+            offer: self.offer.clone(),
+            energy: self.energy,
+            base_max_energy: self.base_max_energy,
+            turn: self.turn,
+        }
+        .with_play(&self.play)
+    }
+}
+
+impl PlayerCombat {
+    fn with_play(mut self, play: &[Card]) -> Self {
+        self.play.extend_from_slice(play);
+        self
+    }
+}
+
 /// `Entities/Players/PlayerCombatState.cs` plus the player's `Creature`.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub struct PlayerCombat {
     pub creature: Creature,
     pub hand: Vec<Card>,
@@ -908,6 +944,10 @@ impl Combat {
     /// Apply one player action and resolve everything it triggers.
     pub fn step(&mut self, action: Action) {
         assert!(!self.is_over(), "step after combat ended");
+        // A clone's queue has no buffer; one of this size saves it growing.
+        if self.queue.capacity() == 0 {
+            self.queue.reserve(16);
+        }
         match action {
             Action::Choose(i) => {
                 let p = self.pending.take().expect("no pending choice");
