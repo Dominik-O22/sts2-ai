@@ -864,6 +864,17 @@ impl VecEnv {
         });
     }
 
+    /// The forecast fights of the decisions `envs` wait at
+    /// (`runobs::forecast_fights`, none but at map steps), in `envs` order.
+    pub fn forecast(&self, envs: &[usize]) -> Vec<&[FightSetup]> {
+        envs.iter()
+            .map(|&env| {
+                let obs = self.slots[env].run.as_ref().and_then(RunSlot::waiting).unwrap_or_else(|| panic!("env {env}: not at a run decision"));
+                obs.forecast.as_slice()
+            })
+            .collect()
+    }
+
     /// Answer the run decision each of `envs` waits at with its option
     /// token `options[k]`, and play each run on: to its next decision, or
     /// to a fight, which starts and whose combat row is written to the

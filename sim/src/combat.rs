@@ -128,7 +128,7 @@ pub struct Pending {
 }
 
 /// A monster to place in the encounter.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct EnemySpec {
     pub id: MonsterId,
     pub flags: Flags,

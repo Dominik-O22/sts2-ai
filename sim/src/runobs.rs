@@ -20,7 +20,9 @@
 
 use crate::effects::{DeckAction, RestOption};
 use crate::encode::N_RELICS;
-use crate::encounter::{Act, Encounter};
+use crate::encounter::{Act, Encounter, Kind};
+use crate::gen::FightSetup;
+use crate::rng::Rng;
 use crate::map::{ActMap, PointId, PointType};
 use crate::pools::{sim_card, sim_enchantment, sim_potion, sim_relic};
 use crate::rewards::Offer;
@@ -42,7 +44,13 @@ pub const EVENT_KEY_BUCKETS: usize = 1024;
 /// Ids per token of each segment, then floats. Each segment's first float
 /// is its presence flag, except the global token's, which is always there.
 pub const GLOBAL_IDS: usize = 6;
-pub const GLOBAL_FLOATS: usize = 16;
+pub const GLOBAL_FLOATS: usize = F_FORECAST + FORECAST_FLOATS;
+/// The forecast's slots in the global token, after the run's own floats:
+/// the act's elites' win chance and HP kept, then its boss's (`forecast`).
+/// The sim writes zeros; the caller fills them from the combat model
+/// (`sts2ai.forecast`), at map steps only.
+pub const F_FORECAST: usize = 16;
+pub const FORECAST_FLOATS: usize = 4;
 pub const DECK_IDS: usize = 2;
 pub const DECK_FLOATS: usize = 3;
 pub const RELIC_IDS: usize = 1;
@@ -57,8 +65,8 @@ pub const OPTION_IDS: usize = 5 + OPTION_CARDS + 2;
 pub const OPTION_FLOATS: usize = 3 + OPTION_CARDS + MAP_FEATS;
 /// Per map point type a path can pass (`PATH_POINTS`), the fewest and the
 /// most on paths through a point; then the rows to the nearest rest site
-/// and shop.
-pub const MAP_FEATS: usize = 2 * PATH_POINTS.len() + 2;
+/// and shop; then the fewest and most elites before the next rest site.
+pub const MAP_FEATS: usize = 2 * PATH_POINTS.len() + 4;
 
 pub const F_DECK: usize = GLOBAL_FLOATS;
 pub const F_RELICS: usize = F_DECK + MAX_DECK * DECK_FLOATS;
@@ -214,6 +222,8 @@ pub struct RunObs {
     pub floats: Vec<f32>,
     pub ids: Vec<i64>,
     pub answers: Vec<usize>,
+    /// At a map step, the fights the forecast values (`forecast`).
+    pub forecast: Vec<FightSetup>,
 }
 
 fn position<T: PartialEq>(list: &[T], x: &T) -> i64 {
@@ -307,7 +317,9 @@ impl Opt {
 /// What the paths from a map point to the act's boss hold: per
 /// `PATH_POINTS` type the fewest and the most, the point itself counted,
 /// then the fewest rows to a rest site and to a shop (the point's own row
-/// is 0). Normalized by 8; none reachable reads 2.
+/// is 0), normalized by 8, none reachable reading 2; then the fewest and
+/// most elites on those paths before the first rest site (or the boss),
+/// the point itself counted.
 pub fn path_summary(map: &ActMap, point: PointId) -> [f32; MAP_FEATS] {
     let n = map.all_points().map(PointId::index).max().map_or(0, |m| m + 1);
     let mut memo: Vec<Option<Summary>> = vec![None; n];
@@ -318,8 +330,10 @@ pub fn path_summary(map: &ActMap, point: PointId) -> [f32; MAP_FEATS] {
         out[2 * t + 1] = s.max[t] as f32 / 8.0;
     }
     let far = |d: u32| if d == u32::MAX { 2.0 } else { d as f32 / 8.0 };
-    out[MAP_FEATS - 2] = far(s.rest);
-    out[MAP_FEATS - 1] = far(s.shop);
+    out[MAP_FEATS - 4] = far(s.rest);
+    out[MAP_FEATS - 3] = far(s.shop);
+    out[MAP_FEATS - 2] = s.elites_to_rest.0 as f32;
+    out[MAP_FEATS - 1] = s.elites_to_rest.1 as f32;
     out
 }
 
@@ -329,6 +343,8 @@ struct Summary {
     max: [u32; PATH_POINTS.len()],
     rest: u32,
     shop: u32,
+    /// Fewest and most elites before the first rest site.
+    elites_to_rest: (u32, u32),
 }
 
 fn summarize(map: &ActMap, point: PointId, memo: &mut [Option<Summary>]) -> Summary {
@@ -337,9 +353,15 @@ fn summarize(map: &ActMap, point: PointId, memo: &mut [Option<Summary>]) -> Summ
     }
     let children: Vec<PointId> = map[point].children.iter().collect();
     let mut s = if children.is_empty() {
-        Summary { min: [0; PATH_POINTS.len()], max: [0; PATH_POINTS.len()], rest: u32::MAX, shop: u32::MAX }
+        Summary { min: [0; PATH_POINTS.len()], max: [0; PATH_POINTS.len()], rest: u32::MAX, shop: u32::MAX, elites_to_rest: (0, 0) }
     } else {
-        let mut acc = Summary { min: [u32::MAX; PATH_POINTS.len()], max: [0; PATH_POINTS.len()], rest: u32::MAX, shop: u32::MAX };
+        let mut acc = Summary {
+            min: [u32::MAX; PATH_POINTS.len()],
+            max: [0; PATH_POINTS.len()],
+            rest: u32::MAX,
+            shop: u32::MAX,
+            elites_to_rest: (u32::MAX, 0),
+        };
         for c in children {
             let cs = summarize(map, c, memo);
             for t in 0..PATH_POINTS.len() {
@@ -348,6 +370,7 @@ fn summarize(map: &ActMap, point: PointId, memo: &mut [Option<Summary>]) -> Summ
             }
             acc.rest = acc.rest.min(cs.rest.saturating_add(1));
             acc.shop = acc.shop.min(cs.shop.saturating_add(1));
+            acc.elites_to_rest = (acc.elites_to_rest.0.min(cs.elites_to_rest.0), acc.elites_to_rest.1.max(cs.elites_to_rest.1));
         }
         acc
     };
@@ -358,6 +381,10 @@ fn summarize(map: &ActMap, point: PointId, memo: &mut [Option<Summary>]) -> Summ
     }
     if kind == PointType::RestSite {
         s.rest = 0;
+        s.elites_to_rest = (0, 0);
+    }
+    if kind == PointType::Elite {
+        s.elites_to_rest = (s.elites_to_rest.0 + 1, s.elites_to_rest.1 + 1);
     }
     if kind == PointType::Shop {
         s.shop = 0;
@@ -561,7 +588,7 @@ pub fn observe(run: &RunState, decision: Decision<'_>) -> RunObs {
     let odds = run.unknown_odds.odds();
     let slots = run.potions.len();
     let empty = run.potions.iter().filter(|p| p.is_none()).count();
-    f[..GLOBAL_FLOATS].copy_from_slice(&[
+    f[..F_FORECAST].copy_from_slice(&[
         run.hp.max(0) as f32 / run.max_hp.max(1) as f32,
         run.max_hp as f32 / 100.0,
         run.gold as f32 / 500.0,
@@ -628,10 +655,71 @@ pub fn observe(run: &RunState, decision: Decision<'_>) -> RunObs {
         row[2 + OPTION_CARDS] = o.price as f32 / 100.0;
         row[3 + OPTION_CARDS..].copy_from_slice(&o.map);
     }
+    let mut forecast = Vec::new();
     if let Decision::Path(map, points) = decision {
         map_ahead(map, points, &mut ids[I_MAP..]);
+        forecast = forecast_fights(run);
     }
-    RunObs { floats: f, ids, answers }
+    RunObs { floats: f, ids, answers, forecast }
+}
+
+/// Openings the forecast rolls per encounter.
+pub const FORECAST_ROLLS: usize = 4;
+
+/// The fights a map step's forecast values (docs/run-env.md, The
+/// forecast): each elite the act can hold, as a pool, and the act's boss
+/// and second boss, which the map shows, against the player as they stand,
+/// `FORECAST_ROLLS` openings each. The enemies and each combat's seed come
+/// from the roll's index alone, never the run's seed or streams, so the
+/// forecast is a function of what the player sees; which elite a map point
+/// will hold is the plan's and stays out. Cards, relics and potions the
+/// combat sim lacks (other characters' cards from Splash or Kaleidoscope)
+/// are left out of the fights, as the rest of the player is still worth
+/// reading.
+pub fn forecast_fights(run: &RunState) -> Vec<FightSetup> {
+    let plan = &run.plan.acts[run.act];
+    let mut player = run.clone();
+    player.deck.retain(|c| sim_card(&c.id).is_some_and(|id| !crate::card::UNSUPPORTED_CARDS.iter().any(|(u, _)| *u == id)));
+    for card in &mut player.deck {
+        if card.enchantment.as_ref().is_some_and(|e| sim_enchantment(&e.id).is_none()) {
+            card.enchantment = None;
+        }
+    }
+    player.relics.retain(|r| sim_relic(&r.id).is_some() || crate::gen::INERT_RELICS.contains(&r.id.as_str()));
+    for slot in &mut player.potions {
+        if slot.as_deref().is_some_and(|p| sim_potion(p).is_none()) {
+            *slot = None;
+        }
+    }
+    let run = &player;
+    let elites = crate::encounter::ALL.iter().copied().filter(|e| e.kind() == Kind::Elite && e.act() == plan.act);
+    let encounters: Vec<Encounter> = elites.chain([plan.boss]).chain(plan.second_boss).collect();
+    let mut out = Vec::with_capacity(encounters.len() * FORECAST_ROLLS);
+    for encounter in encounters {
+        for roll in 0..FORECAST_ROLLS {
+            let enemies = encounter.monsters(&mut Rng::new(0xF0CA_57 + roll as u64));
+            match run.fight_setup(encounter, enemies) {
+                Ok(setup) => out.push(setup),
+                Err(_) => return Vec::new(),
+            }
+        }
+    }
+    out
+}
+
+/// `fights` (`forecast_fights`) encoded at their openings as the combat
+/// model reads them, a row each: `floats [n * N_FLOATS]`, `ids [n *
+/// N_IDS]`. Roll `k` of an encounter opens with combat seed `k`.
+pub fn forecast_rows(fights: &[FightSetup]) -> (Vec<f32>, Vec<i64>) {
+    use crate::encode::{encode, N_ACTIONS, N_FLOATS, N_IDS};
+    let mut floats = vec![0f32; fights.len() * N_FLOATS];
+    let mut ids = vec![0i64; fights.len() * N_IDS];
+    let mut mask = [false; N_ACTIONS];
+    for (k, setup) in fights.iter().enumerate() {
+        let combat = setup.combat((k % FORECAST_ROLLS) as u64);
+        encode(&combat, &mut floats[k * N_FLOATS..(k + 1) * N_FLOATS], &mut ids[k * N_IDS..(k + 1) * N_IDS], &mut mask);
+    }
+    (floats, ids)
 }
 
 /// The run vocabularies for `sim/vocab.txt`, after the combat ones.
@@ -710,6 +798,31 @@ mod tests {
         assert_ne!(observe(&a, Decision::Card(&offers)), observe(&c, Decision::Card(&offers)), "HP is visible");
     }
 
+    /// The forecast fights are the act's elites as a pool and its boss,
+    /// against the player as they stand: two runs whose seeds, streams and
+    /// plans (the elites' order among them) differ roll the same fights and
+    /// encode them the same, and HP reaches them.
+    #[test]
+    fn the_forecast_reads_no_hidden_information() {
+        let (a, b) = (visible("SEEDA"), visible("SEEDB"));
+        assert_ne!(a.plan.acts[0].elites, b.plan.acts[0].elites, "the plans' elites should differ for the test to mean anything");
+        let fights = forecast_fights(&a);
+        assert_eq!(fights, forecast_fights(&b));
+        assert_eq!(forecast_rows(&fights), forecast_rows(&forecast_fights(&b)));
+        let act = a.plan.acts[0].act;
+        let elites = crate::encounter::ALL.iter().filter(|e| e.kind() == Kind::Elite && e.act() == act).count();
+        assert_eq!(fights.len(), (elites + 1) * FORECAST_ROLLS, "every elite of the act and the boss");
+        assert!(fights.iter().all(|f| f.hp == a.hp && f.deck.len() == a.deck.len()));
+        assert_eq!(fights.last().map(|f| f.encounter), Some(Encounter::VantomBoss));
+        let map = ActMap::generate(a.rngs.seed, act, a.ascension);
+        let points: Vec<PointId> = map[map.start].children.iter().collect();
+        assert_eq!(observe(&a, Decision::Path(&map, &points)).forecast, fights, "a map step carries them");
+        assert!(observe(&a, Decision::Card(&[Offer::new("BASH")])).forecast.is_empty(), "other decisions do not");
+        let mut c = visible("SEEDA");
+        c.hp -= 10;
+        assert_ne!(forecast_rows(&forecast_fights(&c)), forecast_rows(&fights), "HP is visible");
+    }
+
     #[test]
     fn options_answer_as_the_decision_reads_them() {
         let run = visible("SEEDA");
@@ -736,7 +849,7 @@ mod tests {
             for t in 0..PATH_POINTS.len() {
                 assert!(s[2 * t] <= s[2 * t + 1]);
             }
-            assert!(s[MAP_FEATS - 2] < 2.0, "a rest site ahead");
+            assert!(s[MAP_FEATS - 4] < 2.0, "a rest site ahead");
             assert!(s[2 * 4 + 1] > 0.0, "monsters ahead");
         }
     }
