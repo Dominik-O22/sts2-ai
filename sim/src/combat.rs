@@ -2831,14 +2831,18 @@ impl Combat {
 
     /// Listener order for value hooks: allies then enemies, powers first.
     /// Relics slot in after the player's powers once they exist.
-    /// `hook` is the hook's id set: only those powers are asked.
-    fn listeners(&self, hook: IdSet) -> impl Iterator<Item = (CreatureRef, &Power)> {
-        let player = self.player.creature.powers.of(hook).map(|p| (CreatureRef::Player, p));
-        let enemies = self
-            .order
-            .iter()
-            .flat_map(move |&i| self.enemies[i].creature.powers.of(hook).map(move |p| (CreatureRef::Enemy(i), p)));
-        player.chain(enemies)
+    /// `hook` is the hook's id set: only those powers are asked. A loop
+    /// rather than an iterator, which the hot damage path compiles better.
+    #[inline]
+    fn each_listener(&self, hook: IdSet, mut f: impl FnMut(CreatureRef, &Power)) {
+        for p in self.player.creature.powers.of(hook) {
+            f(CreatureRef::Player, p);
+        }
+        for &i in &self.order {
+            for p in self.enemies[i].creature.powers.of(hook) {
+                f(CreatureRef::Enemy(i), p);
+            }
+        }
     }
 
     /// `Hook.ModifyDamage`: one full additive pass, one multiplicative pass,
@@ -2866,13 +2870,11 @@ impl Combat {
             num += e.damage_additive(props);
             num *= e.damage_multiplicative(props);
         }
-        for (owner, p) in self.listeners(Power::DAMAGE_ADDITIVE) {
-            num += p.modify_damage_additive(owner, target, dealer, props);
-        }
+        self.each_listener(Power::DAMAGE_ADDITIVE, |owner, p| num += p.modify_damage_additive(owner, target, dealer, props));
         num += self.relic_damage_additive(player_card, props);
-        for (owner, p) in self.listeners(Power::DAMAGE_MULTIPLICATIVE) {
-            num *= p.modify_damage_multiplicative(owner, target, dealer, props, dv, dc);
-        }
+        self.each_listener(Power::DAMAGE_MULTIPLICATIVE, |owner, p| {
+            num *= p.modify_damage_multiplicative(owner, target, dealer, props, dv, dc)
+        });
         num *= self.relic_damage_multiplicative(player_card, props);
         // SurroundedPower.ModifyDamageMultiplicative: the crab half behind the
         // player hits for half again, powered or not.
@@ -2901,12 +2903,10 @@ impl Combat {
         }
         // FastenPower only looks at block from Defends or from no card.
         let defend_source = card.and_then(|u| self.find_card(u)).is_none_or(|c| c.has_tag(Tag::Defend));
-        for (owner, p) in self.listeners(Power::BLOCK_ADDITIVE) {
-            num += p.modify_block_additive(owner, source_owner, props, defend_source);
-        }
-        for (owner, p) in self.listeners(Power::BLOCK_MULTIPLICATIVE) {
-            num *= p.modify_block_multiplicative(owner, target, props, plays, card.is_some());
-        }
+        self.each_listener(Power::BLOCK_ADDITIVE, |owner, p| num += p.modify_block_additive(owner, source_owner, props, defend_source));
+        self.each_listener(Power::BLOCK_MULTIPLICATIVE, |owner, p| {
+            num *= p.modify_block_multiplicative(owner, target, props, plays, card.is_some())
+        });
         num.max(0.0)
     }
 
