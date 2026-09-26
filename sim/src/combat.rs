@@ -291,6 +291,9 @@ pub struct Script {
     /// Monsters the recording saw join since the last snapshot. A random
     /// spawn (the Fabricator's bot) takes the first one it can make.
     pub spawns: Vec<MonsterId>,
+    /// Keep every shuffle's result in `Combat::shuffle_log`. Only a replay
+    /// reads it; without it a shuffle builds no log and a clone shares none.
+    pub log_shuffles: bool,
 }
 
 /// Outside a replay a script is blank, and a clone of it should cost
@@ -315,6 +318,7 @@ impl Clone for Script {
             unforced: copy(&self.unforced),
             hit_cards: copy(&self.hit_cards),
             spawns: copy(&self.spawns),
+            log_shuffles: self.log_shuffles,
         }
     }
 }
@@ -474,9 +478,10 @@ pub struct Combat {
     /// Potion slots. Using a potion empties its slot.
     pub potions: Vec<Option<PotionId>>,
     pub script: Script,
-    /// Every shuffle result this combat, top first (the recorder's view).
-    /// Only the replay reads it, so clones share it until the next shuffle.
-    pub shuffle_log: Arc<Vec<Vec<(CardId, bool)>>>,
+    /// Every shuffle result this combat, top first (the recorder's view),
+    /// kept when `Script::log_shuffles` asks for it. Clones share it until
+    /// the next shuffle.
+    pub shuffle_log: Option<Arc<Vec<Vec<(CardId, bool)>>>>,
     /// Effects waiting to resolve, the next one last: `push_front` is a
     /// push and taking the next is a pop.
     queue: Vec<Effect>,
@@ -534,7 +539,7 @@ impl Combat {
                 c
             })
             .collect();
-        let mut shuffle_log = Arc::default();
+        let mut shuffle_log = script.log_shuffles.then(Arc::default);
         shuffle_cards(&mut draw, &mut script, &mut rngs.shuffle, &mut shuffle_log);
         apply_shuffle_order(&mut draw, true);
 
@@ -3865,7 +3870,7 @@ fn apply_shuffle_order(cards: &mut Vec<Card>, initial: bool) {
     *cards = top;
 }
 
-fn shuffle_cards(cards: &mut Vec<Card>, script: &mut Script, rng: &mut crate::rng::Rng, log: &mut Arc<Vec<Vec<(CardId, bool)>>>) {
+fn shuffle_cards(cards: &mut Vec<Card>, script: &mut Script, rng: &mut crate::rng::Rng, log: &mut Option<Arc<Vec<Vec<(CardId, bool)>>>>) {
     cards.sort_by_key(|c| (c.id, c.upgraded));
     match script.shuffles.pop_front() {
         Some(order) => {
@@ -3888,7 +3893,9 @@ fn shuffle_cards(cards: &mut Vec<Card>, script: &mut Script, rng: &mut crate::rn
             rng.shuffle(cards);
         }
     }
-    Arc::make_mut(log).push(cards.iter().map(|c| (c.id, c.upgraded)).collect());
+    if let Some(log) = log {
+        Arc::make_mut(log).push(cards.iter().map(|c| (c.id, c.upgraded)).collect());
+    }
 }
 
 /// The cards a `GenPool` draws from: `CardFactory.FilterForCombat` (can be

@@ -900,6 +900,7 @@ impl Replayer {
             hit_cards: vec![],
             spawns: vec![],
             unscripted_shuffles: 0,
+            log_shuffles: true,
         };
         let mut c = Combat::with_script(&fs.as_setup(seed), script);
         c.after = fs.after;
@@ -1483,7 +1484,8 @@ mod tests {
             }
             let potions = [Some(PotionId::FirePotion), Some(*rng.pick(crate::potion::ALL).unwrap())];
             let relics = [Relic::new(RelicId::Vajra)];
-            let mut c = Combat::with_setup(&Setup {
+            let log = Script { log_shuffles: true, ..Script::default() };
+            let mut c = Combat::with_script(&Setup {
                 deck: &deck,
                 hp: 70,
                 max_hp: 80,
@@ -1495,7 +1497,7 @@ mod tests {
                 asc: Ascension(10),
                 seed: seed + 100,
                 gold: 0,
-            });
+            }, log);
             let mut lines = vec![json!({
                 "t": "start",
                 "encounter": slug(&format!("{enc:?}")),
@@ -1537,11 +1539,12 @@ mod tests {
                 steps += 1;
                 // The recorder logs shuffles as they happen, then the play
                 // or potion that caused them.
-                for s in &c.shuffle_log[logged_shuffles..] {
+                let log = c.shuffle_log.as_deref().expect("logging shuffles");
+                for s in &log[logged_shuffles..] {
                     let cards: Vec<Value> = s.iter().map(|&(id, up)| card_json(id, up)).collect();
                     lines.push(json!({ "t": "shuffle", "cards": cards }));
                 }
-                logged_shuffles = c.shuffle_log.len();
+                logged_shuffles = log.len();
                 for e in &c.enemies[known_enemies..] {
                     lines.push(json!({ "t": "spawn", "id": slug(&format!("{:?}", e.monster.id)) }));
                 }
@@ -1715,7 +1718,7 @@ mod tests {
             gold: 0,
         };
         // The game's side of the fight, same seed.
-        let mut game = Combat::with_setup(&setup);
+        let mut game = Combat::with_script(&setup, Script { log_shuffles: true, ..Script::default() });
         assert!(game.pending.is_some(), "the chip's choice is open at turn 1's start");
         let start = json!({
             "t": "start",
@@ -1728,7 +1731,7 @@ mod tests {
             "deck": deck.iter().map(|k| card_json(k.id, k.upgraded)).collect::<Vec<_>>(),
             "relics": ["GAMBLING_CHIP"],
             "potions": [null, null],
-            "opening": game.shuffle_log[0].iter().map(|&(id, up)| card_json(id, up)).collect::<Vec<_>>(),
+            "opening": game.shuffle_log.as_ref().expect("logging shuffles")[0].iter().map(|&(id, up)| card_json(id, up)).collect::<Vec<_>>(),
             "early": [],
             "enemies": game.enemies.iter().map(|e| json!({
                 "id": slug(&format!("{:?}", e.monster.id)),
