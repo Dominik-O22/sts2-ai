@@ -53,6 +53,10 @@ Change one here before changing the code that depends on it.
   and after a speed change. On 2026-09-26 the speed work took the played runs' fights from
   0.60M to 1.32M steps/s per thread, a clone from 212 to 178 ns, and a clone plus one card
   play from 1942 to 745 ns (medians of three interleaved runs with training paused).
+- A search should keep one scratch `Combat` per thread and `clone_from` each node into it:
+  the combat's types clone field by field (`clone_by_fields!`), so that reuses the scratch's
+  buffers and allocates nothing, about half the cost of `clone`. Shuffles are logged only
+  when `Script::log_shuffles` asks (the replay does), so clones share no refcounted state.
 
 ## Fidelity and tests
 
