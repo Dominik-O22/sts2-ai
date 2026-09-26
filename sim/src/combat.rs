@@ -947,8 +947,8 @@ impl Combat {
                 if let Some(t) = target {
                     self.face_crab(t);
                 }
-                let mut subs = id.on_use(self, target);
-                subs.push(Effect::AfterPotionUsed);
+                let subs = id.on_use(self, target);
+                self.queue.push(Effect::AfterPotionUsed);
                 self.push_front_all(subs);
             }
             Action::PlayCard { hand_idx, target } => {
@@ -1029,61 +1029,64 @@ impl Combat {
     fn resolve(&mut self, e: Effect) {
         match e {
             Effect::Attack { dealer, base, hits, targets, props, card } => {
-                self.push_front_all(vec![Effect::AttackHits { dealer, base, left: hits, targets, props, card }]);
+                self.queue.push(Effect::AttackHits { dealer, base, left: hits, targets, props, card });
             }
             // AttackCommand.Execute's hit loop: before each hit, stop if the
             // attacker died (Thorns can kill a monster mid-flurry) or no
             // target is left, and recompute the living targets.
             Effect::AttackHits { dealer, base, left, targets, props, card } => {
-                let ts: Vec<CreatureRef> = if left == 0 || !self.creature(dealer).alive() {
-                    vec![]
+                // One target needs no list: the common case, and the only
+                // one a single hit on the player or a chosen enemy takes.
+                let one = if left == 0 || !self.creature(dealer).alive() {
+                    None
                 } else {
                     match &targets {
-                        AttackTargets::One(t) => vec![*t],
-                        AttackTargets::AllOpponents => self.opponents_of(dealer),
-                        AttackTargets::RandomOpponent => {
-                            let opts = self.opponents_of(dealer);
-                            match self.script.random_targets.pop_front() {
-                                Some(t) if t < opts.len() => vec![opts[t]],
-                                _ => self.rngs.targets.pick(&opts).copied().into_iter().collect(),
+                        AttackTargets::One(t) => Some(*t),
+                        AttackTargets::AllOpponents => {
+                            let ts = self.opponents_of(dealer);
+                            if ts.len() > 1 {
+                                let subs = self.damage_many(&ts, base, props, Some(dealer), card);
+                                self.queue.push(Effect::AttackHits { dealer, base, left: left - 1, targets, props, card });
+                                self.push_front_all(subs);
+                                self.check_win();
+                                return;
                             }
+                            ts.first().copied()
+                        }
+                        AttackTargets::RandomOpponent => {
+                            let n = self.opponent_count(dealer);
+                            let i = match self.script.random_targets.pop_front() {
+                                Some(t) if t < n => Some(t),
+                                _ => (n > 0).then(|| self.rngs.targets.next_int(n)),
+                            };
+                            i.map(|i| self.nth_opponent(dealer, i))
                         }
                     }
                 };
-                if ts.is_empty() {
-                    self.push_front_all(vec![Effect::EndAttack { dealer, card, props }]);
+                let Some(t) = one else {
+                    self.queue.push(Effect::EndAttack { dealer, card, props });
                     return;
-                }
-                let next = Effect::AttackHits { dealer, base, left: left - 1, targets, props, card };
-                if ts.len() > 1 {
-                    let mut subs = self.damage_many(&ts, base, props, Some(dealer), card);
-                    subs.push(next);
-                    self.push_front_all(subs);
-                    self.check_win();
-                } else {
-                    let mut subs: Vec<Effect> =
-                        ts.into_iter().map(|t| Effect::Damage { target: t, amount: base, props, dealer: Some(dealer), card }).collect();
-                    subs.push(next);
-                    self.push_front_all(subs);
-                }
+                };
+                self.queue.push(Effect::AttackHits { dealer, base, left: left - 1, targets, props, card });
+                self.queue.push(Effect::Damage { target: t, amount: base, props, dealer: Some(dealer), card });
             }
             Effect::EndAttack { dealer, card, props } => {
-                let mut subs = vec![Effect::AfterAttack];
+                // Pushed last to first: AfterAttack, Vigor, Gigantification.
+                // GigantificationPower.AfterAttack: one charge per card attack.
+                if dealer == CreatureRef::Player && card.is_some() && props.is_powered() {
+                    if self.player.creature.power(PowerId::Gigantification).is_some() {
+                        self.queue.push(Effect::DecrementPower { target: dealer, id: PowerId::Gigantification });
+                    }
+                }
                 // VigorPower.AfterAttack: whoever swung spends it, and the
                 // Terror Eel swings with it too.
                 if props.is_powered() {
                     let v = self.creature(dealer).power_amount(PowerId::Vigor);
                     if v > 0 {
-                        subs.push(Effect::ApplyPower { target: dealer, id: PowerId::Vigor, amount: -v, applier: None });
+                        self.queue.push(Effect::ApplyPower { target: dealer, id: PowerId::Vigor, amount: -v, applier: None });
                     }
                 }
-                // GigantificationPower.AfterAttack: one charge per card attack.
-                if dealer == CreatureRef::Player && card.is_some() && props.is_powered() {
-                    if self.player.creature.power(PowerId::Gigantification).is_some() {
-                        subs.push(Effect::DecrementPower { target: dealer, id: PowerId::Gigantification });
-                    }
-                }
-                self.push_front_all(subs);
+                self.queue.push(Effect::AfterAttack);
             }
             Effect::Damage { target, amount, props, dealer, card } => {
                 if !self.creature(target).alive() {
@@ -1447,10 +1450,7 @@ impl Combat {
                 let subs = self.relic_step(id, step);
                 self.push_front_all(subs);
             }
-            Effect::TurnDraw => {
-                let subs = self.turn_draw();
-                self.push_front_all(subs);
-            }
+            Effect::TurnDraw => self.turn_draw(),
             Effect::ExtraPlayerTurn => {
                 // SwitchSides with a player taking an extra turn: the turn
                 // number moves on, the round does not.
@@ -1518,9 +1518,10 @@ impl Combat {
                     r.used = true;
                     plays += 1;
                 }
-                let mut subs: Vec<Effect> = (0..plays).map(|_| Effect::CardPlayIter { uid, target, paid }).collect();
-                subs.push(Effect::FinishCardPlay { uid });
-                self.push_front_all(subs);
+                self.queue.push(Effect::FinishCardPlay { uid });
+                for _ in 0..plays {
+                    self.queue.push(Effect::CardPlayIter { uid, target, paid });
+                }
             }
             Effect::CardPlayIter { uid, target, paid } => {
                 let Some(card) = self.find_card(uid).cloned() else { return };
@@ -1536,15 +1537,18 @@ impl Combat {
                 if let Some(t) = target {
                     self.face_crab(t);
                 }
-                let mut subs = self.before_card_played(&card);
-                subs.extend(self.relic_before_card_played(&card, paid));
-                subs.extend(card.on_play(self, target));
-                // CardModel.OnPlayWrapper runs the enchantment after the card.
+                let before = self.before_card_played(&card);
+                let relics = self.relic_before_card_played(&card, paid);
+                let played = card.on_play(self, target);
+                // Queued last to first. CardModel.OnPlayWrapper runs the
+                // enchantment after the card.
+                self.queue.push(Effect::AfterCardPlayed { uid });
                 if card.enchantment.is_some() {
-                    subs.push(Effect::EnchantOnPlay { uid, target });
+                    self.queue.push(Effect::EnchantOnPlay { uid, target });
                 }
-                subs.push(Effect::AfterCardPlayed { uid });
-                self.push_front_all(subs);
+                self.push_front_all(played);
+                self.push_front_all(relics);
+                self.push_front_all(before);
             }
             Effect::EnchantOnPlay { uid, target } => {
                 let Some(card) = self.find_card(uid).cloned() else { return };
@@ -1977,6 +1981,22 @@ impl Combat {
         }
     }
 
+    /// `opponents_of(dealer).len()`, without the list.
+    fn opponent_count(&self, dealer: CreatureRef) -> usize {
+        match dealer.side() {
+            Side::Player => self.living_enemies().count(),
+            Side::Enemy => usize::from(self.player.creature.alive()),
+        }
+    }
+
+    /// `opponents_of(dealer)[i]`, without the list.
+    fn nth_opponent(&self, dealer: CreatureRef, i: usize) -> CreatureRef {
+        match dealer.side() {
+            Side::Player => CreatureRef::Enemy(self.living_enemies().nth(i).expect("opponent index")),
+            Side::Enemy => CreatureRef::Player,
+        }
+    }
+
     fn opponents_of(&self, dealer: CreatureRef) -> Vec<CreatureRef> {
         match dealer.side() {
             Side::Player => self.living_enemies().map(CreatureRef::Enemy).collect(),
@@ -2003,7 +2023,7 @@ impl Combat {
         for e in &mut self.enemies {
             e.monster.spawned_this_turn = false;
         }
-        let mut subs = Vec::new();
+        let mut subs = Vec::with_capacity(8);
         // Hook.BeforeSideTurnStart.
         subs.extend(self.collect_powers(Power::BEFORE_SIDE_TURN_START, |p, owner, c| p.before_side_turn_start(owner, side, c.round)));
         subs.extend(self.relic_before_side_turn_start(side));
@@ -2123,8 +2143,8 @@ impl Combat {
             subs.extend(self.relic_auto_pre_play());
         }
         if side == Side::Enemy {
-            subs.extend(self.order.iter().map(|&i| Effect::EnemyAct(i)));
-            subs.push(Effect::EndEnemyTurn);
+            self.queue.push(Effect::EndEnemyTurn);
+            self.queue.extend(self.order.iter().rev().map(|&i| Effect::EnemyAct(i)));
         }
         self.push_front_all(subs);
     }
@@ -2132,7 +2152,7 @@ impl Combat {
     /// The hand draw in `SetupPlayerTurn`, once the `BeforeHandDraw` hooks
     /// have resolved: `ModifyHandDraw`, Innate cards to the top on turn 1,
     /// then the draw.
-    fn turn_draw(&mut self) -> Vec<Effect> {
+    fn turn_draw(&mut self) {
         let draw = self.player.creature.powers.of(Power::HAND_DRAW).fold(BASE_HAND_DRAW, |n, p| p.modify_hand_draw(n));
         let mut draw = self.relic_modify_hand_draw(draw);
         if self.player.turn == 1 {
@@ -2145,7 +2165,7 @@ impl Combat {
             }
             draw = draw.max(n).min(MAX_HAND as u32);
         }
-        vec![Effect::Draw { count: draw, from_hand_draw: true }]
+        self.queue.push(Effect::Draw { count: draw, from_hand_draw: true });
     }
 
     /// `EndPlayerTurnPhaseOneInternal`, first half: the AutoPostPlay phase
@@ -2159,7 +2179,7 @@ impl Combat {
         subs.extend(howls.into_iter().map(|uid| Effect::AutoPlay { uid, force_exhaust: false }));
         // BeforeSideTurnEndEarly (Plating), then BeforeSideTurnEnd relics.
         subs.extend(self.collect_powers(Power::BEFORE_SIDE_TURN_END_VERY_EARLY, |p, owner, _| p.before_side_turn_end_very_early(owner, Side::Player)));
-        subs.push(Effect::SideTurnEndEarly(Side::Player));
+        self.queue.push(Effect::SideTurnEndEarly(Side::Player));
         self.push_front_all(subs);
     }
 
@@ -2194,7 +2214,7 @@ impl Combat {
                 subs.push(Effect::ApplyPower { target: CreatureRef::Player, id, amount: 1, applier: None });
             }
         }
-        subs.push(Effect::FlushHand);
+        self.queue.push(Effect::FlushHand);
         self.push_front_all(subs);
     }
 
@@ -2206,17 +2226,16 @@ impl Combat {
             c.cost_this_combat = Some((c.cost_this_combat.unwrap_or(c.base_cost()) - 1).max(0));
         }
         if self.relic_should_flush() && self.player.creature.powers.of(Power::SHOULD_FLUSH).all(|p| p.should_flush()) {
-            let (retain, flush): (Vec<Card>, Vec<Card>) = self.player.hand.drain(..).partition(|c| c.has(Keyword::Retain));
-            self.player.hand = retain;
-            self.player.discard.extend(flush);
+            let p = &mut self.player;
+            p.discard.extend(p.hand.extract_if(.., |c| !c.has(Keyword::Retain)));
         }
         self.end_of_turn_cleanup();
-        let mut subs = self.after_side_turn_end(Side::Player);
+        let subs = self.after_side_turn_end(Side::Player);
         // SwitchFromPlayerToEnemySide asks Hook.ShouldTakeExtraTurn first.
         if self.relic_take_extra_turn() {
-            subs.push(Effect::ExtraPlayerTurn);
+            self.queue.push(Effect::ExtraPlayerTurn);
         } else {
-            subs.push(Effect::StartTurn(Side::Enemy));
+            self.queue.push(Effect::StartTurn(Side::Enemy));
         }
         self.push_front_all(subs);
     }
@@ -2226,8 +2245,8 @@ impl Combat {
     /// player's turn gets: Lagavulin sheds its shell before Plating tops it
     /// back up, and every plated enemy blocks up for the coming turn.
     fn end_enemy_turn(&mut self) {
-        let mut subs = self.collect_powers(Power::BEFORE_SIDE_TURN_END_VERY_EARLY, |p, owner, _| p.before_side_turn_end_very_early(owner, Side::Enemy));
-        subs.push(Effect::SideTurnEndEarly(Side::Enemy));
+        let subs = self.collect_powers(Power::BEFORE_SIDE_TURN_END_VERY_EARLY, |p, owner, _| p.before_side_turn_end_very_early(owner, Side::Enemy));
+        self.queue.push(Effect::SideTurnEndEarly(Side::Enemy));
         self.push_front_all(subs);
     }
 
@@ -2240,9 +2259,9 @@ impl Combat {
             subs.extend(self.bombs_before_turn_end());
             subs.extend(self.relic_before_side_turn_end());
             self.unbind();
-            subs.push(Effect::TurnEndInHand);
+            self.queue.push(Effect::TurnEndInHand);
         } else {
-            subs.push(Effect::FinishEnemyTurn);
+            self.queue.push(Effect::FinishEnemyTurn);
         }
         self.push_front_all(subs);
     }
@@ -2294,10 +2313,10 @@ impl Combat {
 
     fn finish_enemy_turn(&mut self) {
         self.end_of_turn_cleanup();
-        let mut subs = self.after_side_turn_end(Side::Enemy);
+        let subs = self.after_side_turn_end(Side::Enemy);
         self.round += 1;
         self.begin_player_turn();
-        subs.push(Effect::StartTurn(Side::Player));
+        self.queue.push(Effect::StartTurn(Side::Player));
         self.push_front_all(subs);
     }
 
@@ -2450,8 +2469,11 @@ impl Combat {
         if self.stats.skill_played_this_turn {
             self.spread_smog();
         }
-        let strangled: Vec<(usize, i32)> =
-            self.stats.strangle_pending.iter().filter(|s| s.0 == card.uid).map(|&(_, i, n)| (i, n)).collect();
+        let strangled: Vec<(usize, i32)> = if self.stats.strangle_pending.is_empty() {
+            vec![]
+        } else {
+            self.stats.strangle_pending.iter().filter(|s| s.0 == card.uid).map(|&(_, i, n)| (i, n)).collect()
+        };
         self.stats.strangle_pending.retain(|s| s.0 != card.uid);
         for (i, e) in self.enemies.iter_mut().enumerate() {
             let alive = e.creature.alive();
@@ -2472,7 +2494,7 @@ impl Combat {
                 }
             }
         }
-        for i in self.living_enemies().collect::<Vec<_>>() {
+        for i in self.living_enemies() {
             let me = CreatureRef::Enemy(i);
             let c = &self.enemies[i].creature;
             // CurlUpPower.AfterCardPlayed: once the attack that hit is done.
@@ -2489,7 +2511,7 @@ impl Combat {
         // GalvanicPower.AfterCardPlayed: each Galvanic hurts you for a
         // Galvanized card, by its own amount.
         if card.affliction == Some(Affliction::Galvanized) {
-            for i in self.living_enemies().collect::<Vec<_>>() {
+            for i in self.living_enemies() {
                 if let Some(amount) = self.enemies[i].creature.power(PowerId::Galvanic).map(|p| p.amount) {
                     out.push(Effect::Damage {
                         target: CreatureRef::Player,
@@ -2700,8 +2722,10 @@ impl Combat {
         if self.find_card(uid).is_some_and(|k| k.id == CardId::Void) {
             out.push(Effect::LoseEnergy { amount: 1 });
         }
+        // The rest of the draw goes under what this one set off, which the
+        // caller queues on top.
         if count > 1 {
-            out.push(Effect::Draw { count: count - 1, from_hand_draw });
+            self.queue.push(Effect::Draw { count: count - 1, from_hand_draw });
         }
         out
     }
