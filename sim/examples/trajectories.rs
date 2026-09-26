@@ -9,7 +9,8 @@
 //! The fights: generated ones from every act (`gen::holdout`), plus the
 //! played runs' fights in the tracker's setups when they are on disk. Each
 //! step the state is cloned now and then and the clone plays on, so a clone
-//! that differs from its original shows up too.
+//! that differs from its original shows up too; every fifth step goes through
+//! `clone_from` into a stale state from another fight instead.
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
@@ -60,6 +61,7 @@ fn main() {
         }
     }
     let mut buf = (vec![0f32; N_FLOATS], vec![0i64; N_IDS], vec![false; N_ACTIONS]);
+    let mut scratch = sets[0].1[0].combat(0);
     for (name, setups) in &sets {
         for (i, setup) in setups.iter().enumerate() {
             for seed in 0..2u64 {
@@ -75,6 +77,10 @@ fn main() {
                     steps += 1;
                     if steps % 5 == 2 {
                         c = c.clone();
+                    }
+                    if steps % 5 == 4 {
+                        scratch.clone_from(&c);
+                        std::mem::swap(&mut scratch, &mut c);
                     }
                     fingerprint(&c, &mut h, &mut buf);
                 }
