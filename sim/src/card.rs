@@ -35,7 +35,7 @@ pub const UNSUPPORTED_CARDS: &[(CardId, &str)] = &[
     (CardId::MadScience, "type and rider come from Tinker Time and are not recorded"),
 ];
 
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct CardDef {
     pub id: CardId,
     /// Printed energy cost. `-1` means no cost (unplayable, statuses).
@@ -54,7 +54,24 @@ pub struct CardDef {
 macro_rules! defs {
     ($( $id:ident : $cost:expr, $ty:ident, $rar:ident, $tgt:ident
         $(, kw = [$($kw:ident),*])? $(, tags = [$($tag:ident),*])? $(, x = $x:expr)? $(, gen = $gen:expr)? ; )*) => {
+        /// The definitions by `CardId` position, so a lookup is one index
+        /// rather than a jump through the match below.
+        static DEFS: [CardDef; crate::ids::ALL_CARDS.len()] = {
+            let all = crate::ids::ALL_CARDS;
+            let mut t = [*def_of(CardId::Aggression); crate::ids::ALL_CARDS.len()];
+            let mut i = 0;
+            while i < all.len() {
+                t[all[i] as usize] = *def_of(all[i]);
+                i += 1;
+            }
+            t
+        };
+
         pub fn def(id: CardId) -> &'static CardDef {
+            &DEFS[id as usize]
+        }
+
+        const fn def_of(id: CardId) -> &'static CardDef {
             match id {
                 $( CardId::$id => {
                     const D: CardDef = CardDef {
