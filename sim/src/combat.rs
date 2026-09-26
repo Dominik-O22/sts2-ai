@@ -2347,6 +2347,9 @@ impl Combat {
     /// effects; nothing reads the bomb between now and its blast.
     fn bombs_before_turn_end(&mut self) -> Vec<Effect> {
         let mut out = vec![];
+        if !self.player.creature.powers.has(PowerId::TheBomb) {
+            return out;
+        }
         self.player.creature.powers.retain_mut(|p| {
             if p.id != PowerId::TheBomb {
                 return true;
@@ -2778,6 +2781,7 @@ impl Combat {
         }
         let mut card = self.player.draw.remove(0);
         let uid = card.uid;
+        let void = card.id == CardId::Void;
         let strike = card.has_tag(Tag::Strike);
         // Slither.AfterCardDrawn: reroll the cost, for this combat.
         if card.enchantment.is_some_and(|e| e.randomizes_cost_on_draw()) {
@@ -2797,7 +2801,7 @@ impl Combat {
             out.push(Effect::AutoPlay { uid, force_exhaust: false });
         }
         // Void.AfterCardDrawn: drawing it costs energy.
-        if self.find_card(uid).is_some_and(|k| k.id == CardId::Void) {
+        if void {
             out.push(Effect::LoseEnergy { amount: 1 });
         }
         // The rest of the draw goes under what this one set off, which the
