@@ -2737,10 +2737,11 @@ impl Combat {
         self.after_card_exhausted(uid, ethereal)
     }
 
-    /// Remove a card from whichever combat pile holds it.
+    /// Remove a card from whichever combat pile holds it. Uids are unique,
+    /// so the search order is free: the card in play first, as in `find_card`.
     pub(crate) fn take_card(&mut self, uid: u32) -> Option<Card> {
         let p = &mut self.player;
-        for pile in [&mut p.hand, &mut p.draw, &mut p.discard, &mut p.exhaust, &mut p.play] {
+        for pile in [&mut p.play, &mut p.hand, &mut p.discard, &mut p.draw, &mut p.exhaust] {
             if let Some(i) = pile.iter().position(|c| c.uid == uid) {
                 return Some(pile.remove(i));
             }
