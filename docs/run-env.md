@@ -713,11 +713,14 @@ The score of a settled state is the calibrated win chance
 (`sts2ai.forecast`) of the act's elites, pooled, plus the boss's, read
 from `forecast_fights` of that state, with its HP as the calibration's
 HP; a run that died or is stuck in the option scores 0, one won scores
-1. `sts2ai.afterstate.Scorer` batches every waiting env's leaves into one
-value-head read, each distinct settled state encoded once, takes the max
-over sub-decisions, the mean over samples and the argmax over options,
-the policy's pick breaking an exact tie. It is computed only when asked,
-so training pays nothing for it.
+1. The sim keeps the trees (`VecEnv::afterstates`) and hands out only
+the distinct settled states' forecast rows; the value head reads them in
+as few batches as it takes, and the sim reduces the values
+(`VecEnv::afterstate_scores`): the openings' mean, the calibration, the
+elites plus the boss, the max over sub-decisions and the mean over
+samples. `sts2ai.afterstate.Scorer` is the glue and takes the argmax over
+options, the policy's pick breaking an exact tie. It is computed only
+when asked, so training pays nothing for it.
 
 `runplay --afterstate K` (with the forecast's calibration, `--forecast
 CAL` for a policy without one) makes every decision but a map step that
