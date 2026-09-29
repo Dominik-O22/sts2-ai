@@ -4,12 +4,13 @@
 //! are numpy arrays the caller allocates once; `observe` and `step` fill
 //! them in place with the GIL released.
 
-use numpy::{PyReadonlyArray1, PyReadwriteArray1, PyReadwriteArray2};
+use numpy::{IntoPyArray, PyArray1, PyReadonlyArray1, PyReadwriteArray1, PyReadwriteArray2};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use serde_json::Value;
 use sim::encode::*;
-use sim::env::{EnvConfig, Forks as InnerForks, VecEnv as Inner};
+use sim::env::{EnvConfig, Forks as InnerForks, RunChoices, VecEnv as Inner};
+use sim::runobs;
 use sim::gen::{holdout, load_recordings, ACTS, LAST_FLOOR};
 use sim::ids::{ALL_CARDS, ALL_MONSTERS};
 use sim::replay::{command, Ids, Replayer, Step};
@@ -27,8 +28,32 @@ struct VecEnv {
     inner: Inner,
 }
 
-/// One finished fight: (env, won, hp_frac, hp_lost, potions_used, steps, floor, encounter, kind, reward).
-type End = (usize, bool, f32, f32, u32, u32, u32, String, String, f32);
+/// One finished fight: (env, won, hp_frac, hp_lost, potions_used, steps, floor, encounter, kind, reward, run).
+type End = (usize, bool, f32, f32, u32, u32, u32, String, String, f32, Option<RunFight>);
+
+/// A run fight's place in its run: (seed index, act, floor, deck size, how
+/// the run ended with it: "won", "died", "stuck: <why>", or None; where the
+/// run started: its place in `start_points()`, None for floor 1; with what
+/// player there: "gen" generated, "own" the envs' own state, "win" a
+/// winner's run, "" for floor 1).
+type RunFight = (u64, u32, u32, u32, Option<String>, Option<usize>, &'static str);
+
+fn run_fight(r: sim::env::RunFight) -> RunFight {
+    use sim::env::Began;
+    use sim::forward::End;
+    let end = r.end.map(|end| match end {
+        End::Won => "won".into(),
+        End::Died => "died".into(),
+        End::Stuck(why) => format!("stuck: {why}"),
+    });
+    let (start, source) = match r.began {
+        Began::Floor1 => (None, ""),
+        Began::Generated(at) => (Some(at.index()), "gen"),
+        Began::Own(at) => (Some(at.index()), "own"),
+        Began::Winner(at) => (Some(at.index()), "win"),
+    };
+    (r.seed, r.act, r.floor, r.deck, end, start, source)
+}
 
 impl VecEnv {
     fn inner_asc(&self) -> Ascension {
@@ -144,6 +169,92 @@ impl VecEnv {
         Ok(n)
     }
 
+    /// Switch to run mode: every env plays whole runs at `asc`, fight
+    /// after fight; the envs' k-th runs are seed indices `seed + env + k *
+    /// n` (`sim::env::VecEnv::set_runs`). `choices` makes the run
+    /// decisions: "random", "first", or "caller" (`run_waiting`,
+    /// `observe_run`, `step_run`).
+    /// Log each run elite and boss fight as it starts, as a recorder
+    /// `start` record with the run's act (`take_fights` drains them).
+    fn log_fights(&mut self, on: bool) {
+        self.inner.log_fights(on);
+    }
+
+    fn take_fights(&mut self) -> Vec<String> {
+        self.inner.take_fights()
+    }
+
+    #[pyo3(signature = (seed=0, asc=10, choices="random"))]
+    fn use_runs(&mut self, py: Python<'_>, seed: u64, asc: u8, choices: &str) -> PyResult<()> {
+        let choices = match choices {
+            "random" => RunChoices::Random,
+            "first" => RunChoices::First,
+            "caller" => RunChoices::Caller,
+            other => return Err(pyo3::exceptions::PyValueError::new_err(format!("unknown run choices {other:?}: random, first or caller"))),
+        };
+        py.detach(|| self.inner.set_runs(Ascension(asc), seed, choices));
+        Ok(())
+    }
+
+    /// Where the runs that start from now on start: floor 1 with chance
+    /// `full`, else a start point by `weights`, from the envs' own state
+    /// there with chance `own` when they have one (`sim::env::Starts`;
+    /// both lists in `start_points()` order).
+    fn set_starts(&mut self, full: f32, weights: Vec<f32>, own: Vec<f32>) -> PyResult<()> {
+        let per_point = |v: Vec<f32>| v.try_into().map_err(|_| pyo3::exceptions::PyValueError::new_err("a value per start point"));
+        self.inner.set_starts(full, per_point(weights)?, per_point(own)?);
+        Ok(())
+    }
+
+    /// Start a `share` of the runs that start from now on with winners'
+    /// players, each in a fresh run: the player of each history file of
+    /// `runs` at the entrances of acts 2 and 3, where its rooms so far
+    /// match the record (`sim::history::entrances`). Returns how many
+    /// players each start point holds, in `start_points()` order.
+    fn use_winner_starts(&mut self, py: Python<'_>, runs: Vec<String>, share: f32) -> PyResult<Vec<usize>> {
+        let runs = py.detach(|| sim::history::winner_starts(&runs)).map_err(pyo3::exceptions::PyValueError::new_err)?;
+        Ok(self.inner.set_winner_starts(runs, share).to_vec())
+    }
+
+    /// States the envs' runs have kept per start point.
+    fn start_pools(&self) -> Vec<usize> {
+        self.inner.start_pools().to_vec()
+    }
+
+    /// The envs whose run waits at a decision for the caller.
+    fn run_waiting(&self) -> Vec<usize> {
+        self.inner.run_waiting()
+    }
+
+    /// Fill rows `0..len(envs)` of `floats [k, RUN_FLOATS]` and `ids [k,
+    /// RUN_IDS]` with the decision each env waits at (`sim::runobs`).
+    fn observe_run(&self, py: Python<'_>, envs: Vec<usize>, mut floats: PyReadwriteArray2<f32>, mut ids: PyReadwriteArray2<i64>) -> PyResult<()> {
+        let f = floats.as_slice_mut()?;
+        let i = ids.as_slice_mut()?;
+        py.detach(|| self.inner.observe_run(&envs, f, i));
+        Ok(())
+    }
+
+    /// Answer each of `envs`' run decision with its option token
+    /// `options[k]` and play on, writing the combat rows of the fights that
+    /// start. Returns the runs that ended: (env, run).
+    fn step_run(
+        &mut self,
+        py: Python<'_>,
+        envs: Vec<usize>,
+        options: PyReadonlyArray1<i64>,
+        mut floats: PyReadwriteArray2<f32>,
+        mut ids: PyReadwriteArray2<i64>,
+        mut mask: PyReadwriteArray2<bool>,
+    ) -> PyResult<Vec<(usize, RunFight)>> {
+        let o = options.as_slice()?;
+        let f = floats.as_slice_mut()?;
+        let i = ids.as_slice_mut()?;
+        let m = mask.as_slice_mut()?;
+        let ended = py.detach(|| self.inner.step_run(&envs, o, f, i, m));
+        Ok(ended.into_iter().map(|(env, r)| (env, run_fight(r))).collect())
+    }
+
     /// Switch to cycling through the recordings in `dir` (the held-out
     /// set). Returns the number loaded and the files that failed to parse.
     /// With `ascension`, only the fights recorded at it.
@@ -197,7 +308,10 @@ impl VecEnv {
         let ends = py.detach(|| self.inner.step(a, f, i, m, r, d));
         Ok(ends
             .into_iter()
-            .map(|e| (e.env, e.won, e.hp_frac, e.hp_lost, e.potions_used, e.steps, e.floor, format!("{:?}", e.encounter), format!("{:?}", e.kind), e.reward))
+            .map(|e| {
+                let (encounter, kind) = (format!("{:?}", e.encounter), format!("{:?}", e.kind));
+                (e.env, e.won, e.hp_frac, e.hp_lost, e.potions_used, e.steps, e.floor, encounter, kind, e.reward, e.run.map(run_fight))
+            })
             .collect())
     }
 }
@@ -487,6 +601,93 @@ fn layout(py: Python<'_>) -> PyResult<Bound<'_, PyDict>> {
     Ok(d)
 }
 
+/// The points a run can start at besides floor 1, the latest first
+/// (`sim::forward::START_POINTS`): "act 3 boss", "act 3 entrance", ...
+#[pyfunction]
+fn start_points() -> Vec<String> {
+    use sim::forward::StartPoint;
+    sim::forward::START_POINTS
+        .iter()
+        .map(|p| match p {
+            StartPoint::Entrance(act) => format!("act {} entrance", act + 1),
+            StartPoint::BossDoor(act) => format!("act {} boss", act + 1),
+        })
+        .collect()
+}
+
+/// Offsets and sizes of the run observation (`sim::runobs`), by name.
+#[pyfunction]
+fn run_layout(py: Python<'_>) -> PyResult<Bound<'_, PyDict>> {
+    use runobs::*;
+    let d = PyDict::new(py);
+    for (k, v) in [
+        ("run_floats", RUN_FLOATS),
+        ("run_ids", RUN_IDS),
+        ("max_deck", MAX_DECK),
+        ("max_relics", MAX_RELICS),
+        ("max_potions", MAX_POTIONS),
+        ("max_options", MAX_OPTIONS),
+        ("option_cards", OPTION_CARDS),
+        ("global_ids", GLOBAL_IDS),
+        ("global_floats", GLOBAL_FLOATS),
+        ("deck_ids", DECK_IDS),
+        ("deck_floats", DECK_FLOATS),
+        ("relic_ids", RELIC_IDS),
+        ("relic_floats", RELIC_FLOATS),
+        ("potion_ids", POTION_IDS),
+        ("potion_floats", POTION_FLOATS),
+        ("option_ids", OPTION_IDS),
+        ("option_floats", OPTION_FLOATS),
+        ("f_deck", F_DECK),
+        ("f_relics", F_RELICS),
+        ("f_potions", F_POTIONS),
+        ("f_options", F_OPTIONS),
+        ("i_deck", I_DECK),
+        ("i_relics", I_RELICS),
+        ("i_potions", I_POTIONS),
+        ("i_options", I_OPTIONS),
+        ("i_map", I_MAP),
+        ("map_rows", MAP_ROWS),
+        ("map_cols", MAP_COLS),
+        ("map_node_ids", MAP_NODE_IDS),
+        ("card_vocab", CARD_VOCAB),
+        ("enchant_vocab", ENCHANT_VOCAB),
+        ("potion_vocab", POTION_VOCAB),
+        ("relic_vocab", RELIC_VOCAB),
+        ("decision_vocab", DECISION_VOCAB),
+        ("option_vocab", OPTION_VOCAB),
+        ("room_vocab", ROOM_VOCAB),
+        ("act_vocab", ACT_VOCAB),
+        ("event_vocab", EVENT_VOCAB),
+        ("boss_vocab", BOSS_VOCAB),
+        ("event_key_vocab", EVENT_KEY_VOCAB),
+    ] {
+        d.set_item(k, v)?;
+    }
+    Ok(d)
+}
+
+/// The run vocabularies' names by id, id 0 the pad: "decision", "option",
+/// "room", "act", "event", "boss", and "relic" with the relics the combat
+/// sim leaves out after its own (`sim::runobs`).
+#[pyfunction]
+fn run_names() -> std::collections::HashMap<&'static str, Vec<String>> {
+    use runobs::*;
+    let named = |names: Vec<String>| std::iter::once("<pad>".to_string()).chain(names).collect::<Vec<_>>();
+    std::collections::HashMap::from([
+        ("decision", named(DECISIONS.iter().map(|d| d.to_string()).collect())),
+        ("option", named(OPTION_KINDS.iter().map(|k| format!("{k:?}")).collect())),
+        ("room", named(ROOMS.iter().map(|r| r.to_string()).collect())),
+        ("act", named(ACTS.iter().map(|a| format!("{a:?}")).collect())),
+        ("event", named(RUN_EVENTS.iter().map(|e| e.to_string()).collect())),
+        ("boss", named(RUN_BOSSES.iter().map(|b| format!("{b:?}")).collect())),
+        (
+            "relic",
+            named(sim::relic::ALL.iter().map(|r| sim::replay::slug(&format!("{r:?}"))).chain(RUN_RELICS.iter().map(|r| r.to_string())).collect()),
+        ),
+    ])
+}
+
 /// Card names by vocabulary index (index 0 is the pad).
 #[pyfunction]
 fn card_names() -> Vec<String> {
@@ -518,6 +719,29 @@ fn game_ids() -> std::collections::HashMap<&'static str, Vec<String>> {
 #[pyfunction]
 fn generate_run(seed: u64, floor: u32) -> String {
     sim::gen::generate(&mut sim::rng::Rng::new(seed), floor, sim::types::Ascension(10)).run_json().to_string()
+}
+
+/// Rows, options taken, floors, streamed flags and what was left out (`imitation`).
+type Imitation<'py> = (Bound<'py, PyArray1<f32>>, Bound<'py, PyArray1<i64>>, Vec<usize>, Vec<usize>, Vec<bool>, std::collections::BTreeMap<String, usize>);
+
+/// A run history's decisions as the run policy would see them, where the
+/// walk is faithful to the record (`sim::history::imitate`), or None for a
+/// run the port cannot walk: run rows `floats [n * RUN_FLOATS]` and `ids [n
+/// * RUN_IDS]`, the option token taken, the floor, whether the Rewards
+/// stream was still followed, and the decisions left out by why.
+#[pyfunction]
+fn imitation<'py>(py: Python<'py>, run: &str) -> PyResult<Option<Imitation<'py>>> {
+    let run: Value = serde_json::from_str(run).map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+    if !sim::history::eligible(&run) {
+        return Ok(None);
+    }
+    let im = py.detach(|| sim::history::imitate(&run));
+    let floats: Vec<f32> = im.rows.iter().flat_map(|r| r.obs.floats.iter().copied()).collect();
+    let ids: Vec<i64> = im.rows.iter().flat_map(|r| r.obs.ids.iter().copied()).collect();
+    let option = im.rows.iter().map(|r| r.option).collect();
+    let floor = im.rows.iter().map(|r| r.floor).collect();
+    let streamed = im.rows.iter().map(|r| r.streamed).collect();
+    Ok(Some((floats.into_pyarray(py), ids.into_pyarray(py), option, floor, streamed, im.left_out)))
 }
 
 /// Game ids of the cards the sim refuses to play (`card::UNSUPPORTED_CARDS`).
@@ -592,11 +816,15 @@ fn _sim(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Advisor>()?;
     m.add_class::<Forks>()?;
     m.add_function(wrap_pyfunction!(layout, m)?)?;
+    m.add_function(wrap_pyfunction!(run_layout, m)?)?;
+    m.add_function(wrap_pyfunction!(run_names, m)?)?;
+    m.add_function(wrap_pyfunction!(start_points, m)?)?;
     m.add_function(wrap_pyfunction!(card_names, m)?)?;
     m.add_function(wrap_pyfunction!(card_ids, m)?)?;
     m.add_function(wrap_pyfunction!(game_ids, m)?)?;
     m.add_function(wrap_pyfunction!(generate_run, m)?)?;
     m.add_function(wrap_pyfunction!(unsupported_cards, m)?)?;
+    m.add_function(wrap_pyfunction!(imitation, m)?)?;
     m.add_function(wrap_pyfunction!(monster_names, m)?)?;
     m.add_function(wrap_pyfunction!(encounters, m)?)?;
     m.add_function(wrap_pyfunction!(transform_options, m)?)?;

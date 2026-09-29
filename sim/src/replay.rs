@@ -1481,7 +1481,13 @@ mod tests {
             for _ in 0..6 {
                 deck.push(Card::new(0, *rng.pick(crate::card::IRONCLAD_POOL).unwrap(), rng.next_int(2) == 0));
             }
-            let potions = [Some(PotionId::FirePotion), Some(*rng.pick(crate::potion::ALL).unwrap())];
+            // Not a potion that makes random cards: the recorder logs no
+            // generated card this playout could force.
+            let makes_cards = |p: &&PotionId| {
+                matches!(p, PotionId::AttackPotion | PotionId::SkillPotion | PotionId::PowerPotion | PotionId::ColorlessPotion | PotionId::OrobicAcid)
+            };
+            let potions: Vec<PotionId> = crate::potion::ALL.iter().filter(|p| !makes_cards(p)).copied().collect();
+            let potions = [Some(PotionId::FirePotion), Some(*rng.pick(&potions).unwrap())];
             let relics = [Relic::new(RelicId::Vajra)];
             let mut c = Combat::with_setup(&Setup {
                 deck: &deck,

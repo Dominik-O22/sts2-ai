@@ -704,7 +704,7 @@ pub fn vocab_text() -> String {
     for name in monster::INTENT_KINDS {
         out += &format!("intent {name}\n");
     }
-    out
+    out + &crate::runobs::vocab_text()
 }
 
 #[cfg(test)]

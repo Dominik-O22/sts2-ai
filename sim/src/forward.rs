@@ -1,0 +1,491 @@
+//! A run played forward from its seed: each act's map walked point by
+//! point, each room entered, fights fought by a `Fights`, the rewards
+//! taken, rest sites used, treasure opened, ancients' relics taken, shops
+//! bought from, events passed through, act after act, to the last boss or
+//! a death. Every decision goes to a `Chooser` (`rooms.rs`), which is where
+//! a run policy plugs in.
+//!
+//! What the port lacks is counted, not an error: events not ported
+//! (entered and left) and relic pickups that come back `Offered::Unported`.
+//! From the first of them that draws on the Rewards stream the run no
+//! longer rolls what the game would (docs/run-env.md, Exactness).
+
+use std::collections::BTreeMap;
+
+use crate::card::UNSUPPORTED_CARDS;
+use crate::effects::Offered;
+use crate::encounter::Encounter;
+use crate::events::EventFight;
+use crate::gen::FightSetup;
+use crate::map::{ActMap, PointId};
+use crate::plan::{select_acts, Unlocks};
+use crate::pools::sim_card;
+use crate::rewards::Offer;
+use crate::rng::Rng;
+use crate::rooms::{Chooser, Decision};
+use crate::run::{Carried, Room, RoomType, RunState};
+use crate::shop::{Item, Ware};
+use crate::types::Ascension;
+
+/// How a fight went, once `Fights::fight` has written it into the run.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Fought {
+    pub won: bool,
+    /// `CombatRoom.GoldProportion` (`RunState::end_fight`).
+    pub gold_proportion: f32,
+}
+
+/// Plays a fight out and writes it back into the run (`end_fight` for a
+/// combat the sim played).
+pub trait Fights {
+    fn fight(&mut self, run: &mut RunState, setup: FightSetup) -> Fought;
+}
+
+impl<F: FnMut(&mut RunState, FightSetup) -> Fought> Fights for F {
+    fn fight(&mut self, run: &mut RunState, setup: FightSetup) -> Fought {
+        self(run, setup)
+    }
+}
+
+/// Every fight won at seven tenths of the HP it started with, rounded up,
+/// with nothing else changed.
+pub fn stub_fight(run: &mut RunState, _: FightSetup) -> Fought {
+    run.hp = (run.hp * 7 + 9) / 10;
+    Fought { won: true, gold_proportion: 1.0 }
+}
+
+/// Whether the combat sim can play a card.
+fn playable(offer: &Offer) -> bool {
+    sim_card(offer.id).is_some_and(|id| !UNSUPPORTED_CARDS.iter().any(|(u, _)| *u == id))
+}
+
+/// Whether `Playable` puts `decision` to its chooser whole: it offers no
+/// card the sim cannot play.
+pub fn shown_whole(decision: Decision<'_>) -> bool {
+    match decision {
+        Decision::Card(offers) => offers.iter().all(playable),
+        Decision::Bundle(bundles) => bundles.iter().flatten().all(playable),
+        Decision::Shop(wares) => wares.iter().all(|w| !matches!(&w.item, Item::Card(c) if !playable(c))),
+        _ => true,
+    }
+}
+
+/// The map points the player can go to from `point`: its children, or
+/// with Winged Boots any point of the next row, three times
+/// (`MapTravel.GetTravelablePointsFrom`, `WingedBoots.AfterRoomEntered`).
+pub fn path_options(map: &ActMap, point: PointId, state: &RunState) -> Vec<PointId> {
+    let children: Vec<PointId> = map[point].children.iter().collect();
+    let boots = state.relics.iter().any(|r| r.id == "WINGED_BOOTS" && r.counter < 3);
+    let row: Vec<PointId> = map.grid_points().filter(|&p| map[p].row == map[point].row + 1).collect();
+    if boots && !row.is_empty() { row } else { children }
+}
+
+/// A chooser that never sees a card the sim cannot play: those are left
+/// out of card and bundle offers and off the shop's shelves before `inner`
+/// chooses.
+struct Playable<'a, C: Chooser>(&'a mut C);
+
+impl<C: Chooser> Chooser for Playable<'_, C> {
+    fn choose(&mut self, run: &RunState, decision: Decision<'_>) -> usize {
+        match decision {
+            Decision::Card(offers) => {
+                let kept: Vec<usize> = (0..offers.len()).filter(|&i| playable(&offers[i])).collect();
+                let cards: Vec<Offer> = kept.iter().map(|&i| offers[i]).collect();
+                kept.get(self.0.choose(run, Decision::Card(&cards))).copied().unwrap_or(offers.len())
+            }
+            Decision::Bundle(bundles) => {
+                let kept: Vec<usize> = (0..bundles.len()).filter(|&i| bundles[i].iter().all(playable)).collect();
+                let offered: Vec<Vec<Offer>> = kept.iter().map(|&i| bundles[i].clone()).collect();
+                kept.get(self.0.choose(run, Decision::Bundle(&offered))).copied().unwrap_or(bundles.len())
+            }
+            Decision::Shop(wares) => {
+                let kept: Vec<usize> = (0..wares.len()).filter(|&i| !matches!(&wares[i].item, Item::Card(c) if !playable(c))).collect();
+                let offered: Vec<Ware> = kept.iter().map(|&i| wares[i].clone()).collect();
+                kept.get(self.0.choose(run, Decision::Shop(&offered))).copied().unwrap_or(wares.len())
+            }
+            other => self.0.choose(run, other),
+        }
+    }
+}
+
+/// How a run ended.
+#[derive(Clone, Debug, PartialEq)]
+pub enum End {
+    /// Beat the last act's bosses.
+    Won,
+    /// Lost a fight, or HP ran out, on the run's last floor.
+    Died,
+    /// A fight the sim cannot build (a card, relic or potion it lacks).
+    Stuck(String),
+}
+
+/// Where a run stopped: at a fight to play, or at its end.
+#[derive(Clone, Debug)]
+pub enum Next {
+    Fight(FightSetup),
+    End(End),
+}
+
+/// A fight handed out and not yet fought: a combat room's, or one an event
+/// started, whose rewards are the event's to give.
+#[derive(Clone, Debug)]
+enum Fighting {
+    Room(RoomType),
+    Event(EventFight),
+}
+
+/// Where a run can start besides floor 1 (docs/training.md, The run
+/// policy): an act's entrance, before its Ancient, or its boss door,
+/// before the rest site the boss follows. Acts are 0-based.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StartPoint {
+    Entrance(usize),
+    BossDoor(usize),
+}
+
+/// Every start point, the latest first: the order a curriculum walks back
+/// from the run's end.
+pub const START_POINTS: [StartPoint; 5] =
+    [StartPoint::BossDoor(2), StartPoint::Entrance(2), StartPoint::BossDoor(1), StartPoint::Entrance(1), StartPoint::BossDoor(0)];
+
+impl StartPoint {
+    pub fn act(self) -> usize {
+        match self {
+            StartPoint::Entrance(act) | StartPoint::BossDoor(act) => act,
+        }
+    }
+
+    /// Its place in `START_POINTS`.
+    pub fn index(self) -> usize {
+        START_POINTS.iter().position(|&p| p == self).expect("a start point")
+    }
+}
+
+/// A run in progress, stopped between rooms. `next` plays it to its next
+/// fight and hands the fight out, so whoever plays fights (`play` with a
+/// `Fights`, or a `VecEnv` slot over many steps) owns the loop.
+#[derive(Clone, Debug)]
+pub struct Run {
+    pub state: RunState,
+    map: ActMap,
+    /// The map point to enter next, or, while `fighting`, the fight's.
+    point: PointId,
+    fighting: Option<Fighting>,
+    /// Fights handed out, won or not.
+    pub fights: usize,
+    /// What the port lacks that the run met, by what, with how often.
+    pub unported: BTreeMap<String, usize>,
+    /// The start points the run passed, with what the player carried
+    /// there, for a curriculum to start later runs from. The caller drains
+    /// it.
+    pub passed: Vec<(StartPoint, Carried)>,
+}
+
+impl Run {
+    /// The run `seed` names at `ascension` on a fully unlocked profile, at
+    /// the first act's start.
+    pub fn new(seed: &str, ascension: Ascension) -> Self {
+        Self::in_act(seed, ascension, 0)
+    }
+
+    /// The run `seed` names, at the start of act `act` with nothing
+    /// played before it.
+    fn in_act(seed: &str, ascension: Ascension, act: usize) -> Self {
+        let unlocks = Unlocks::default();
+        let acts = select_acts(crate::game_rng::RunRngs::new(seed).seed, &unlocks);
+        let mut state = RunState::new(seed, acts, ascension, &unlocks);
+        state.enter_act(act);
+        let map = ActMap::generate(state.rngs.seed, acts[act], ascension);
+        let point = map.start;
+        Self { state, map, point, fighting: None, fights: 0, unported: BTreeMap::new(), passed: Vec::new() }
+    }
+
+    /// The run `seed` names, picked up at `at` with the player `carried`:
+    /// the acts before it are skipped, their floors counted, and the run's
+    /// streams and plan are the seed's own, untouched by them. A boss door
+    /// stands before the first of the rest sites under the boss.
+    pub fn start_at(seed: &str, ascension: Ascension, at: StartPoint, carried: Carried) -> Self {
+        let mut run = Self::in_act(seed, ascension, at.act());
+        run.state.carry(carried);
+        let acts: Vec<_> = run.state.plan.acts.iter().map(|a| a.act).collect();
+        let rooms = |act: usize| crate::map::rooms(acts[act]);
+        // An act is its Ancient, its rooms and its boss.
+        run.state.floor = (0..at.act()).map(|a| rooms(a) + 2).sum();
+        if let StartPoint::BossDoor(act) = at {
+            run.state.floor += rooms(act);
+            run.point = run.map[run.map.boss].parents.iter().next().expect("a rest site under the boss");
+        }
+        run
+    }
+
+    /// Whether a fight has been handed out and not yet fought.
+    pub fn fighting(&self) -> bool {
+        self.fighting.is_some()
+    }
+
+    /// Plays the run on to its next fight or its end: first the rewards of
+    /// the fight handed out last, `fought` (written into `state` already),
+    /// then room after room. `fought` is `Some` exactly when `fighting`.
+    /// The same seed, choices and fights play the same run.
+    pub fn next(&mut self, fought: Option<Fought>, chooser: &mut impl Chooser) -> Next {
+        assert_eq!(fought.is_some(), self.fighting(), "a fight's result goes with the fight");
+        let mut chooser = Playable(chooser);
+        if let (Some(fighting), Some(fought)) = (self.fighting.take(), fought) {
+            if !fought.won || self.state.hp <= 0 {
+                return Next::End(End::Died);
+            }
+            let mut log = Vec::new();
+            match fighting {
+                Fighting::Room(kind) => {
+                    self.state.fight_won(kind);
+                    let rewards = self.state.combat_rewards(kind, fought.gold_proportion);
+                    self.state.take_rewards(rewards, &mut chooser, &mut log);
+                }
+                Fighting::Event(fight) => drop(self.state.event_fight_won(&fight, fought.gold_proportion, &mut chooser, &mut log)),
+            }
+            if let Some(end) = self.left(log) {
+                return Next::End(end);
+            }
+            if !self.move_on(&mut chooser) {
+                return Next::End(End::Won);
+            }
+        }
+        loop {
+            let fighting = match self.state.enter(&self.map, self.point) {
+                Room::Combat(kind, encounter) => Some((Fighting::Room(kind), encounter)),
+                room => match self.room(room, &mut chooser) {
+                    Err(end) => return Next::End(end),
+                    Ok(fight) => fight.map(|f| (f.encounter, Fighting::Event(f))).map(|(e, f)| (f, e)),
+                },
+            };
+            if let Some((fighting, encounter)) = fighting {
+                return self.hand_out(fighting, encounter);
+            }
+            if !self.move_on(&mut chooser) {
+                return Next::End(End::Won);
+            }
+        }
+    }
+
+    /// Hands a fight out: its enemies rolled from the run's seed and the
+    /// floor, not on the run's streams, and created on the run's Niche
+    /// stream unless an event's layout created them already.
+    fn hand_out(&mut self, fighting: Fighting, encounter: Encounter) -> Next {
+        let mut rng = Rng::new((self.state.rngs.seed as u64) << 8 | self.state.floor as u64);
+        let enemies = match &fighting {
+            Fighting::Event(fight) => fight.enemies(&mut rng),
+            Fighting::Room(_) => encounter.monsters(&mut rng),
+        };
+        match self.state.fight_setup(encounter, enemies) {
+            Ok(setup) => {
+                if !matches!(&fighting, Fighting::Event(f) if f.created) {
+                    self.state.enemies_created(setup.enemies.len());
+                }
+                self.fighting = Some(fighting);
+                self.fights += 1;
+                Next::Fight(setup)
+            }
+            Err(why) => Next::End(End::Stuck(why)),
+        }
+    }
+
+    /// Steps to the next map point (`path_options`), or the next act's
+    /// start. False past the last act.
+    fn move_on(&mut self, chooser: &mut impl Chooser) -> bool {
+        if self.map[self.point].children.is_empty() {
+            let act = self.state.act + 1;
+            let Some(plan) = self.state.plan.acts.get(act) else { return false };
+            self.map = ActMap::generate(self.state.rngs.seed, plan.act, self.state.ascension);
+            self.state.enter_act(act);
+            self.point = self.map.start;
+            self.passed.push((StartPoint::Entrance(act), self.state.carried()));
+            return true;
+        }
+        let options = path_options(&self.map, self.point, &self.state);
+        let i = chooser.choose(&self.state, Decision::Path(&self.map, &options));
+        let next = options[i.min(options.len() - 1)];
+        if !self.map[self.point].children.contains(next) {
+            self.state.relic_mut("WINGED_BOOTS").expect("Winged Boots").counter += 1;
+        }
+        self.point = next;
+        if self.map[next].children.contains(self.map.boss) {
+            self.passed.push((StartPoint::BossDoor(self.state.act), self.state.carried()));
+        }
+        true
+    }
+
+    fn count(&mut self, what: String) {
+        *self.unported.entry(what).or_default() += 1;
+    }
+
+    /// Plays a room that is not a combat room: the run's end if it ended
+    /// there, else the fight an event started, if one did.
+    fn room(&mut self, room: Room, chooser: &mut impl Chooser) -> Result<Option<EventFight>, End> {
+        let mut log = Vec::new();
+        let mut fight = None;
+        match room {
+            Room::Combat(..) => unreachable!("fights are handed out"),
+            Room::Treasure => {
+                self.state.treasure_room(chooser, &mut log);
+            }
+            Room::RestSite => self.state.rest_site(chooser, &mut log),
+            Room::Shop => {
+                self.state.shop_room(chooser, &mut log);
+            }
+            Room::Event(name) => match self.state.event(name, chooser, &mut log) {
+                Some(visit) => fight = visit.fight,
+                None => self.count(format!("event {name}")),
+            },
+            Room::Ancient(name) => {
+                self.state.ancient(name, chooser, &mut log);
+            }
+        }
+        match self.left(log) {
+            Some(end) => Err(end),
+            None => Ok(fight),
+        }
+    }
+
+    /// Counts the unported relics a room's `log` met; `Some` if the player
+    /// left the room dead.
+    fn left(&mut self, log: Vec<Offered>) -> Option<End> {
+        for offer in log {
+            if let Offered::Unported(relic) = offer {
+                self.count(format!("relic {relic}"));
+            }
+        }
+        (self.state.hp <= 0).then_some(End::Died)
+    }
+}
+
+/// A run played to its end.
+#[derive(Clone, Debug)]
+pub struct Played {
+    pub state: RunState,
+    pub end: End,
+    /// Fights fought, won or not.
+    pub fights: usize,
+    /// What the port lacks that the run met, by what, with how often.
+    pub unported: BTreeMap<String, usize>,
+}
+
+/// Plays the run `seed` names at `ascension` on a fully unlocked profile,
+/// each fight played by `fights`. The same seed, chooser and fights play
+/// the same run.
+pub fn play(seed: &str, ascension: Ascension, chooser: &mut impl Chooser, fights: &mut impl Fights) -> Played {
+    play_on(Run::new(seed, ascension), chooser, fights)
+}
+
+/// Plays `run` on from where it stands to its end, as `play` does.
+pub fn play_on(mut run: Run, chooser: &mut impl Chooser, fights: &mut impl Fights) -> Played {
+    let mut fought = None;
+    loop {
+        match run.next(fought, chooser) {
+            Next::Fight(setup) => fought = Some(fights.fight(&mut run.state, setup)),
+            Next::End(end) => return Played { state: run.state, end, fights: run.fights, unported: run.unported },
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rooms::First;
+
+    /// A seeded A10 run with every fight won at 70% HP and the first option
+    /// always taken climbs all 49 floors, the same way twice: the same
+    /// floors, deck, relics, potions, HP and gold, and the same draws on
+    /// the Rewards stream.
+    #[test]
+    fn plays_a_seed_to_the_end_the_same_way_twice() {
+        let run = || play("RUNSIM1", Ascension(10), &mut First, &mut stub_fight);
+        let (a, b) = (run(), run());
+        assert_eq!(a.end, End::Won, "unported: {:?}", a.unported);
+        assert_eq!(a.state.floor, 49);
+        assert_eq!(a.fights, b.fights);
+        assert_eq!((a.state.hp, a.state.max_hp, a.state.gold), (b.state.hp, b.state.max_hp, b.state.gold));
+        assert_eq!(a.state.deck, b.state.deck);
+        assert_eq!(a.state.relics, b.state.relics);
+        assert_eq!(a.state.potions, b.state.potions);
+        assert_eq!(a.unported, b.unported);
+        let mut a = a.state;
+        assert_eq!(a.rewards().counter, b.state.clone().rewards().counter);
+        assert!(a.deck.len() > 10 + 16, "took a card from every fight: {}", a.deck.len());
+    }
+
+    /// The first decision a run puts, then the first option every time.
+    struct FirstSeen(Option<&'static str>);
+
+    impl Chooser for FirstSeen {
+        fn choose(&mut self, _: &RunState, decision: Decision<'_>) -> usize {
+            self.0.get_or_insert(match decision {
+                Decision::Ancient(_) => "ancient",
+                Decision::Rest(_) => "rest",
+                _ => "other",
+            });
+            0
+        }
+    }
+
+    /// A won run passes every start point once, latest last, with the
+    /// player as they stood there. A fresh seed picked up at each of them
+    /// with that player opens on the act's Ancient or the rest site under
+    /// the boss and wins on floor 49, as the run it came from did.
+    #[test]
+    fn a_run_picked_up_at_a_start_point_plays_on_to_the_end() {
+        let mut run = Run::new("RUNSIM1", Ascension(10));
+        let mut fought = None;
+        let mut passed = vec![];
+        let end = loop {
+            match run.next(fought, &mut First) {
+                Next::Fight(setup) => fought = Some(stub_fight(&mut run.state, setup)),
+                Next::End(end) => break end,
+            }
+            passed.append(&mut run.passed);
+        };
+        assert_eq!(end, End::Won);
+        let points: Vec<StartPoint> = passed.iter().map(|(p, _)| *p).collect();
+        assert_eq!(points, START_POINTS.iter().rev().copied().collect::<Vec<_>>());
+        assert!(passed.windows(2).all(|w| w[0].1.deck.len() <= w[1].1.deck.len()), "the deck grows along the run");
+        for (at, carried) in passed {
+            let mut picked = Run::start_at("RUNSIM2", Ascension(10), at, carried.clone());
+            assert_eq!(picked.state.carried(), carried, "{at:?}");
+            let mut first = FirstSeen(None);
+            let mut fought = None;
+            let end = loop {
+                match picked.next(fought, &mut first) {
+                    Next::Fight(setup) => fought = Some(stub_fight(&mut picked.state, setup)),
+                    Next::End(end) => break end,
+                }
+            };
+            assert_eq!((end, picked.state.floor), (End::Won, 49), "{at:?}");
+            let opens = if matches!(at, StartPoint::Entrance(_)) { "ancient" } else { "rest" };
+            assert_eq!(first.0, Some(opens), "{at:?}");
+        }
+    }
+
+    /// A generated player, in game ids, builds every fight of the run it
+    /// is put into: no id is lost between the sim's names and the game's.
+    #[test]
+    fn generated_players_build_their_fights() {
+        let mut rng = Rng::new(11);
+        for seed in 0..40 {
+            for at in START_POINTS {
+                let setup = crate::gen::generate(&mut rng, 16 * at.act() as u32 + 15, Ascension(10));
+                let carried = Carried::generated(&setup);
+                assert_eq!(carried.deck.len(), setup.deck.len());
+                let played = {
+                    let mut run = Run::start_at(&format!("GEN{seed}"), Ascension(10), at, carried);
+                    let mut fought = None;
+                    loop {
+                        match run.next(fought, &mut First) {
+                            Next::Fight(setup) => fought = Some(stub_fight(&mut run.state, setup)),
+                            Next::End(end) => break end,
+                        }
+                    }
+                };
+                assert!(!matches!(&played, End::Stuck(why) if why.starts_with("unknown")), "seed {seed} {at:?}: {played:?}");
+            }
+        }
+    }
+}

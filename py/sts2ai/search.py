@@ -1,5 +1,6 @@
 """Turn search: play copies of a fight to the end of the turn and score
-them. Used by the advisor's plan and by `searcheval`.
+them. Used by the advisor's plan, by `searcheval`, and by `runplay`, which
+plays many fights' decisions as the pilot does (`choose`).
 
 Each copy starts with a given first action; the policy samples the rest of
 the turn. A copy's score is the shaped reward it collected plus the value
@@ -33,17 +34,24 @@ MAX_PLAN_STEPS = 40
 # Copies per network call: a search over many fights at once is too big for
 # one batch on the GPU.
 CHUNK = 16384
+# `choose`'s, smaller: runplay shares the GPU with training, and a quarter
+# of `CHUNK` keeps its peak near a gigabyte.
+CHOOSE_CHUNK = 4096
 # Copies each second action needs before `second` tries them all for what a
 # first action led to; fewer and the max over them picks luck, so those
 # copies keep the policy's play.
 SECOND_MIN = 8
+# Plan scores closer than this are value-head noise: the policy's pick
+# keeps the top line, and the search only overrules it by a clear margin.
+# The unit is half an HP fraction, so 0.02 is about three HP.
+PLAN_MARGIN = 0.02
 
 
-def forward(policy: Policy, device: torch.device, floats: torch.Tensor, ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    """The policy over a batch of any size, in `CHUNK`-sized pieces."""
+def forward(policy: Policy, device: torch.device, floats: torch.Tensor, ids: torch.Tensor, chunk: int = CHUNK) -> tuple[torch.Tensor, torch.Tensor]:
+    """The policy over a batch of any size, in `chunk`-sized pieces."""
     parts = [
-        policy(floats[i : i + CHUNK].to(device, non_blocking=True), ids[i : i + CHUNK].to(device, non_blocking=True))
-        for i in range(0, len(floats), CHUNK)
+        policy(floats[i : i + chunk].to(device, non_blocking=True), ids[i : i + chunk].to(device, non_blocking=True))
+        for i in range(0, len(floats), chunk)
     ]
     return torch.cat([p[0] for p in parts]), torch.cat([p[1] for p in parts])
 
@@ -78,6 +86,7 @@ def rollout(
     on_step: Callable[[np.ndarray, np.ndarray], None] | None = None,
     depth: int = 1,
     second: tuple[np.ndarray, np.ndarray] | None = None,
+    chunk: int = CHUNK,
 ) -> np.ndarray:
     """Play every copy in `forks` (forked with this `depth`) to the end of its turn, `first[i]` as copy
     i's first action. `on_step(actions, live)` sees each step's actions and
@@ -87,7 +96,7 @@ def rollout(
     spread their second action over its legal ones when there are
     `SECOND_MIN` copies for each; `groups[i]` is copy i's observation group,
     or -1 where the policy played on or the turn was already over, and
-    `actions[i]` its second action."""
+    `actions[i]` its second action. The network sees `chunk` rows a call."""
     n = len(forks)
     floats, ids, mask = buffers(n, Layout.load())
     inverse = np.empty(n, np.int64)
@@ -105,7 +114,7 @@ def rollout(
             # The network sees each distinct observation once; every copy
             # still samples its own action.
             n_unique = forks.observe_unique(live.tolist(), floats.numpy(), ids.numpy(), mask.numpy(), inverse)
-            logits, _ = forward(policy, device, floats[:n_unique], ids[:n_unique])
+            logits, _ = forward(policy, device, floats[:n_unique], ids[:n_unique], chunk)
             masked = masked_logits(logits.float(), mask[:n_unique].to(device, non_blocking=True))
             per_copy = masked[torch.from_numpy(inverse[: len(live)]).to(device)]
             actions = np.zeros(n, np.int64)
@@ -131,7 +140,7 @@ def rollout(
     rows = np.flatnonzero(~np.array(forks.is_over()))
     if len(rows):
         n_unique = forks.observe_unique(rows.tolist(), floats.numpy(), ids.numpy(), mask.numpy(), inverse)
-        _, value = forward(policy, device, floats[:n_unique], ids[:n_unique])
+        _, value = forward(policy, device, floats[:n_unique], ids[:n_unique], chunk)
         score[rows] += value.float().cpu().numpy()[inverse[: len(rows)]]
     return score
 
@@ -175,3 +184,26 @@ def openings(first: np.ndarray, score: np.ndarray, second: tuple[np.ndarray, np.
 def spread(legal: np.ndarray, n: int) -> np.ndarray:
     """First actions for `n` copies: every legal action gets an equal share."""
     return legal[np.arange(n) % len(legal)]
+
+
+@torch.no_grad()
+def choose(policy: Policy, device: torch.device, sim, roots: list[int], mask: np.ndarray, own: np.ndarray, n: int, groups: int, seed: int) -> np.ndarray:
+    """The pilot's pick (`advise.Session.plan`) at the decisions of many
+    fights at once: `n` copies of each env in `roots` of the VecEnv `sim`,
+    over `groups` draw-pile shuffles, every legal first action (`mask[r]`)
+    with its share, openings ranked by their best second action
+    (`openings`). The policy's own action `own[r]` stays unless another
+    beats it by `PLAN_MARGIN`. Returns the action per root. The copies roll
+    their own dice from `seed`, never the env's."""
+    forks = sim.fork(roots, n, groups, seed)
+    first = np.concatenate([spread(np.flatnonzero(m), n) for m in mask])
+    second = (np.full(len(first), -1), np.zeros(len(first), np.int64))
+    score = rollout(policy, device, forks, first, second=second, chunk=CHOOSE_CHUNK)
+    picks = own.copy()
+    for r in range(len(roots)):
+        part = slice(r * n, (r + 1) * n)
+        value = openings(first[part], score[part], (second[0][part], second[1][part]))
+        best = max(value, key=lambda a: value[a][0])
+        if int(own[r]) not in value or value[best][0] - value[int(own[r])][0] >= PLAN_MARGIN:
+            picks[r] = best
+    return picks

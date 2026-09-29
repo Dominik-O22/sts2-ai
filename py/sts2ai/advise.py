@@ -36,13 +36,9 @@ import torch
 from sts2ai import _sim
 from sts2ai.env import DEFAULT_RECORDINGS, Layout
 from sts2ai.model import Policy, load_policy, masked_logits
-from sts2ai.search import openings, rollout, spread
+from sts2ai.search import PLAN_MARGIN, openings, rollout, spread
 
 ALTERNATIVES = 2
-# Plan scores closer than this are value-head noise: the policy's pick
-# keeps the top line, and the search only overrules it by a clear margin.
-# The unit is half an HP fraction, so 0.02 is about three HP.
-PLAN_MARGIN = 0.02
 
 
 class Session:

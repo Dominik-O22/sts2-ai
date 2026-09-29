@@ -1,21 +1,35 @@
 //! Slay the Spire 2 combat simulator, ported from the decompiled v0.107.1
 //! assembly. See DESIGN.md and docs/survey/README.md for the decisions.
 
+pub mod ancients;
 pub mod card;
 pub mod combat;
 pub mod effect;
+pub mod effects;
 pub mod enchant;
 pub mod encode;
 pub mod encounter;
 pub mod env;
+pub mod events;
+pub mod forward;
 pub mod gen;
+pub mod history;
+pub mod map;
+pub mod plan;
+pub mod pools;
 pub mod ids;
 pub mod monster;
 pub mod potion;
 pub mod power;
 pub mod relic;
 pub mod replay;
+pub mod rewards;
+pub mod run;
+pub mod shop;
+pub mod game_rng;
 pub mod rng;
+pub mod rooms;
+pub mod runobs;
 pub mod types;
 
 pub use combat::{Action, Combat, EnemySpec, Outcome, RoomKind, Setup};

@@ -1,5 +1,6 @@
 //! Small shared enums and value types. Ported from `Entities/Cards/*.cs`,
-//! `ValueProps/ValueProp.cs`, `Entities/Ascension/AscensionLevel.cs`.
+//! `ValueProps/ValueProp.cs`, `Entities/Ascension/AscensionLevel.cs`,
+//! `Entities/Relics/RelicRarity.cs`.
 
 /// `ValueProps/ValueProp.cs`. Flags on a damage or block amount.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -44,6 +45,18 @@ pub enum CardRarity {
     Uncommon,
     Rare,
     Special,
+}
+
+/// `Entities/Relics/RelicRarity.cs`, less `None`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum RelicRarity {
+    Starter,
+    Common,
+    Uncommon,
+    Rare,
+    Shop,
+    Event,
+    Ancient,
 }
 
 /// `Entities/Cards/TargetType.cs`, single-player subset.

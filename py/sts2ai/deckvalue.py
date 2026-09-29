@@ -27,7 +27,7 @@ from torch import Tensor, nn
 
 from sts2ai import _sim
 from sts2ai.cards import BOSS_FLOOR, fights, horizon
-from sts2ai.env import ASCENSION, DEFAULT_RECORDINGS
+from sts2ai.env import ASCENSION, DEFAULT_RECORDINGS, RunLayout
 from sts2ai.model import Policy, load_policy
 
 ACTS = ["Overgrowth", "Underdocks", "Hive", "Glory"]
@@ -37,6 +37,7 @@ INDEX = {kind: {name: i + 1 for i, name in enumerate(names)} for kind, names in 
 # The model's outputs: every elite and boss encounter, by game name.
 ENCOUNTERS = [name for name, _, kind in _sim.encounters() if kind in ("Elite", "Boss")]
 ACT_OF = {name: act for name, act, _ in _sim.encounters()}
+KIND_OF = {name: kind for name, _, kind in _sim.encounters()}
 # Cards a reward can offer: the Ironclad's Common, Uncommon and Rare (what
 # Bash, a Basic, can transform into), less the ones the sim cannot play.
 REWARD_POOL = sorted(set(_sim.transform_options("BASH")[1]) - set(_sim.unsupported_cards()))
@@ -103,6 +104,76 @@ class DeckValue(nn.Module):
             self.card.weight.copy_(policy.card.weight[: self.card.num_embeddings].to(self.card.weight.device))
 
 
+def load(path: Path, device: torch.device) -> DeckValue:
+    """A saved net. Ids only ever append (CLAUDE.md), so ids added since it
+    was trained get a zero embedding: they read as nothing held."""
+    saved = torch.load(path, map_location=device)
+    if saved["encounters"] != ENCOUNTERS:
+        raise ValueError(f"{path}: the encounters changed since it was trained; retrain")
+    state = saved["model"]
+    for kind in ("card", "enchant", "relic", "potion"):
+        old = saved["vocab"][kind]
+        if old != IDS[kind][: len(old)]:
+            raise ValueError(f"{path}: the {kind} ids moved since it was trained; retrain")
+        weight = state[f"{kind}.weight"]
+        state[f"{kind}.weight"] = torch.cat([weight, weight.new_zeros((len(IDS[kind]) - len(old), weight.shape[1]))])
+    model = DeckValue().to(device)
+    model.load_state_dict(state)
+    return model.eval()
+
+
+class RunPotential:
+    """Phi for the run policy's shaping (docs/training.md, The run policy):
+    the net's mean predicted fight value over the current act's elites and
+    the boss or bosses its map shows, times `scale`, read off run decision
+    rows (`sim::runobs`) alone, so it sees only what the policy sees. The
+    rows index cards, enchantments, potions and the combat sim's relics as
+    this net does; relics only the run knows read as none."""
+
+    def __init__(self, model: DeckValue, layout: RunLayout, scale: float):
+        self.model, self.L, self.scale = model, layout, scale
+        device = next(model.parameters()).device
+        names = _sim.run_names()
+        # Per act id (the rows' `ACTS` order, which is ours), its elites;
+        # per boss id, its column.
+        acts = [None, *ACTS]
+        self.elites = torch.tensor(
+            [[float(ACT_OF[e] == a and KIND_OF[e] == "Elite") for e in ENCOUNTERS] for a in acts], device=device
+        )
+        bosses = [slug(b) for b in names["boss"][1:]]
+        self.bosses = torch.zeros((len(bosses) + 1, len(ENCOUNTERS)), device=device)
+        for i, b in enumerate(bosses):
+            self.bosses[i + 1, ENCOUNTERS.index(b)] = 1.0
+        self.sim_relics = len(IDS["relic"])
+
+    @torch.no_grad()
+    def __call__(self, floats: Tensor, ids: Tensor) -> Tensor:
+        """Phi per row `[B]`."""
+        L, B = self.L, floats.shape[0]
+
+        def seg(x: Tensor, start: int, count: int, width: int) -> Tensor:
+            return x[:, start : start + count * width].view(B, count, width)
+
+        deck_ids, deck_f = seg(ids, L.i_deck, L.max_deck, L.deck_ids), seg(floats, L.f_deck, L.max_deck, L.deck_floats)
+        relics = seg(ids, L.i_relics, L.max_relics, L.relic_ids)[..., 0]
+        g, act = floats[:, : L.global_floats], ids[:, 2]
+        numbers = torch.zeros((B, 8), device=floats.device)
+        # HP fraction, max HP / 100, deck size / 40, energy / 3, the act.
+        numbers[:, 0], numbers[:, 1], numbers[:, 2], numbers[:, 3] = g[:, 0], g[:, 1], g[:, 11], 1.0
+        numbers[torch.arange(B), 3 + act.clamp(min=1)] = 1.0
+        x = {
+            "cards": deck_ids[..., 0],
+            "upgraded": deck_f[..., 1].long(),
+            "enchants": deck_ids[..., 1],
+            "relics": relics.where(relics <= self.sim_relics, 0),
+            "potions": seg(ids, L.i_potions, L.max_potions, L.potion_ids)[..., 0],
+            "numbers": numbers,
+        }
+        weights = self.elites[act] + self.bosses[ids[:, 3]] + self.bosses[ids[:, 4]]
+        values = self.model(x).float()
+        return self.scale * (values * weights).sum(1) / weights.sum(1).clamp(min=1.0)
+
+
 def variant(run: dict, rng: np.random.Generator) -> dict:
     """The run one deck change away: a random reward card added, a random
     card upgraded, or one removed."""
@@ -159,7 +230,7 @@ def cmd_train(args) -> None:
     rng = np.random.default_rng(0)
     val_pairs = set(rng.choice(pairs.unique().numpy(), size=max(1, len(pairs.unique()) // 5), replace=False).tolist())
     val = torch.tensor([p in val_pairs for p in pairs.tolist()])
-    model = DeckValue()
+    model = load(args.init, torch.device("cpu")).train() if args.init else DeckValue()
     if args.policy:
         policy = load_policy(args.policy, torch.device("cpu"))
         model.seed_cards(policy)
@@ -240,10 +311,7 @@ def cmd_check(args) -> None:
     pick gives up against the fights' best, each beside a random pick's."""
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     policy = load_policy(args.checkpoint, device).eval()
-    saved = torch.load(args.model, map_location="cpu")
-    model = DeckValue()
-    model.load_state_dict(saved["model"])
-    model.eval()
+    model = load(args.model, torch.device("cpu"))
     rng = np.random.default_rng(args.seed)
     starts = played_starts(args.recordings)
     if not starts:
@@ -283,6 +351,7 @@ def main() -> None:
     tr = sub.add_parser("train", help="fit the network to labels")
     tr.add_argument("labels", type=Path)
     tr.add_argument("--policy", type=Path, help="combat checkpoint to seed the card embedding from")
+    tr.add_argument("--init", type=Path, help="a trained net to start from, for labels from a newer combat checkpoint")
     tr.add_argument("--epochs", type=int, default=200)
     tr.add_argument("--weight-decay", type=float, default=0.1)
     tr.add_argument("--out", type=Path, default=Path("deckvalue.pt"))

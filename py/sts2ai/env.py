@@ -73,8 +73,84 @@ class Layout:
         return cls(**_sim.layout())
 
 
+@dataclass(frozen=True)
+class RunLayout:
+    """Offsets and sizes of the run observation (`sim::runobs`): per row,
+    a global token, then deck, relic, potion and option tokens, each
+    segment a fixed number of tokens of fixed width in `floats` and `ids`,
+    whose first float says the token is there; then, in `ids` alone, the
+    map ahead at a map step (`map_rows` by `map_cols` nodes of type and
+    links, type 0 where there is no point)."""
+
+    run_floats: int
+    run_ids: int
+    max_deck: int
+    max_relics: int
+    max_potions: int
+    max_options: int
+    option_cards: int
+    global_ids: int
+    global_floats: int
+    deck_ids: int
+    deck_floats: int
+    relic_ids: int
+    relic_floats: int
+    potion_ids: int
+    potion_floats: int
+    option_ids: int
+    option_floats: int
+    f_deck: int
+    f_relics: int
+    f_potions: int
+    f_options: int
+    i_deck: int
+    i_relics: int
+    i_potions: int
+    i_options: int
+    i_map: int
+    map_rows: int
+    map_cols: int
+    map_node_ids: int
+    card_vocab: int
+    enchant_vocab: int
+    potion_vocab: int
+    relic_vocab: int
+    decision_vocab: int
+    option_vocab: int
+    room_vocab: int
+    act_vocab: int
+    event_vocab: int
+    boss_vocab: int
+    event_key_vocab: int
+
+    @classmethod
+    def load(cls) -> RunLayout:
+        return cls(**_sim.run_layout())
+
+
+class RunFight(NamedTuple):
+    """A run-mode fight's place in its run, or where a run ended between
+    fights (`Envs.step_run`)."""
+
+    seed: int
+    act: int  # 0-based
+    floor: int
+    deck: int  # cards in the deck the fight was fought with
+    # How the run ended with this fight: "won", "died", "stuck: <why>".
+    end: str | None
+    # Where the run started: its place in `START_POINTS`, None for floor 1;
+    # and with what player there: "gen" generated, "own" the envs' own
+    # state, "win" a winner's run (`Envs.use_winner_starts`), "" for floor 1.
+    start: int | None
+    source: str
+
+
+# The points a run can start at besides floor 1, the latest first.
+START_POINTS: list[str] = _sim.start_points()
+
+
 class End(NamedTuple):
-    """One finished fight."""
+    """One finished fight. In run mode `floor` is the run's floor."""
 
     env: int
     won: bool
@@ -86,6 +162,7 @@ class End(NamedTuple):
     encounter: str
     kind: str
     reward: float
+    run: RunFight | None
 
 
 def pinned(shape: tuple[int, ...], dtype: torch.dtype) -> np.ndarray:
@@ -119,7 +196,7 @@ class Envs:
             self.rewards,
             self.dones,
         )
-        return [End(*e) for e in ends]
+        return [End(*e[:-1], RunFight(*e[-1]) if e[-1] else None) for e in ends]
 
     def set_floors(self, lo: int, hi: int) -> None:
         self.sim.set_floors(lo, hi)
@@ -138,6 +215,54 @@ class Envs:
         n = self.sim.use_holdout(seed, per_encounter, acts)
         self.sim.observe(self.floats, self.ids, self.mask)
         return n
+
+    def use_runs(self, seed: int = 0, asc: int = 10, choices: str = "random") -> None:
+        """Play whole runs, fight after fight; a run that ends starts a
+        fresh one from the next seed. `choices` makes the run decisions:
+        "random", "first", or "caller", where each run stops at its
+        decisions until `step_run` answers them."""
+        self.sim.use_runs(seed, asc, choices)
+        if choices == "caller":
+            self.run_layout = RunLayout.load()
+            self.run_floats = pinned((self.n, self.run_layout.run_floats), torch.float32)
+            self.run_ids = pinned((self.n, self.run_layout.run_ids), torch.int64)
+        self.sim.observe(self.floats, self.ids, self.mask)
+
+    def set_starts(self, full: float, weights: list[float], own: list[float]) -> None:
+        """Where the runs that start from now on start: floor 1 with chance
+        `full`, else a start point by `weights`, from the envs' own state
+        there with chance `own` when they have one; both lists in
+        `START_POINTS` order."""
+        self.sim.set_starts(full, weights, own)
+
+    def use_winner_starts(self, runs: list[Path], share: float) -> list[int]:
+        """Start a `share` of the runs that start from now on from the
+        winners' history files `runs`, at the entrances of acts 2 and 3
+        each reaches faithful to its record; returns how many runs each
+        start point holds, in `START_POINTS` order."""
+        return self.sim.use_winner_starts([p.read_text() for p in runs], share)
+
+    def start_pools(self) -> list[int]:
+        """States the runs have kept per start point."""
+        return self.sim.start_pools()
+
+    def run_waiting(self) -> list[int]:
+        """The envs whose run waits at a decision. A combat `step` leaves
+        them where they are."""
+        return self.sim.run_waiting()
+
+    def observe_run(self, envs: list[int]) -> tuple[np.ndarray, np.ndarray]:
+        """The run decisions `envs` wait at, one row each, in the first
+        rows of `run_floats` and `run_ids`."""
+        self.sim.observe_run(envs, self.run_floats, self.run_ids)
+        return self.run_floats[: len(envs)], self.run_ids[: len(envs)]
+
+    def step_run(self, envs: list[int], options: np.ndarray) -> list[tuple[int, RunFight]]:
+        """Answer each env's decision with an option token and play on;
+        the fights that start fill their combat rows. Returns the runs
+        that ended, by env."""
+        ended = self.sim.step_run(envs, np.ascontiguousarray(options, dtype=np.int64), self.floats, self.ids, self.mask)
+        return [(env, RunFight(*r)) for env, r in ended]
 
     def use_setups(self, path: Path, repeats: int = 1, seed: int = 0) -> int:
         """Cycle through played runs' fights (`sts2ai.setups`), `repeats`
