@@ -341,12 +341,10 @@ The run's closed vocabularies (decisions, option kinds, rooms, acts,
 events, bosses, those relics) are appended to `vocab.txt`; tests fail
 when a ported event, a boss or an inert relic is missing from them.
 
-Every option has a token in this first cut, including those whose
-outcome is a known state (take this card, buy this, smith that). Scoring
-those by the value of the state they lead to (afterstates: the run
-encoder values each resulting state and the policy is a softmax over the
-values, DESIGN.md's "argmax over offered options by value") can come
-later; it needs the run value head to be good first.
+Every option has a token, including those whose outcome is a known
+state (take this card, buy this, smith that). Scoring those by the state
+they lead to is what Afterstates (below) do with the forecast, not the
+run value head.
 
 The run policy (`sts2ai.runmodel`) is a small transformer over the tokens
 (128 wide, 2 layers), a pointer head scoring each option token against
@@ -665,6 +663,87 @@ whose forecast is under P when another option is open. Neither the gate
 nor a 45-minute PPO run from the forecast clone (`runs/run-forecast` in
 the forecast worktree, 54 iterations beside other jobs) has had the
 2048-run evaluation yet.
+
+### Afterstates
+
+The winners' clone wins about 4% of A10 runs, and forcing winners'
+majority event picks on it moved nothing (76 against 84 wins of 2,048).
+A winner's pick is one sample of a high-variance game, the picks that
+killed people are not in the data, and the clone cannot reason about
+what an option does: an event option reaches it as a hashed key, a card
+as an id. Afterstates compute the consequence instead of learning it.
+
+For every decision but a map step, `VecEnv::afterstates` applies each
+option in the sim and scores the player it leaves with the forecast: the
+segment is replayed with the option (`env::Branch`, as `Replay` replays
+the caller's answers), and the copy settles at the first map step, fight
+or run end. A sub-decision in the same room (which card to smith, an
+event's next page, a shop after a purchase, the potion and card after a
+relic reward) is opened breadth first, every option of it, and the
+option's value is the best of them; without that a smith settles as
+doing nothing and a heal always wins. Two caps bound the tree: `depth`
+sub-decisions on the way (3) and `nodes` branches played per option and
+sample (256); a sub-decision they keep shut settles as it stands, and the
+runplay report counts the decisions where that happened, by kind and
+cap. In a smoke run the depth cap shut a sub-decision in about a third
+of shop and deck decisions (a shop's third purchase, the shop after a
+removal), the node cap in a quarter of shop and deck decisions, and
+neither touched a card, potion or rest decision.
+
+A map step with one option is not asked, but the branch settles at it
+all the same: it ends the room, and walking on would make the next
+room's shop or event part of a card reward's value.
+
+The afterstate sees no hidden information. The moment the option is
+chosen, `RunState::reseed` gives the run fresh streams from a sample
+index alone, reshuffles both grab bags from a canonical order over the
+relics they hold (so the new order says nothing of the old, and `refill`
+stays), and an event under way re-derives its own stream
+(`Chooser::reseed`, asked by `RunState::ask`, the one place every choice
+passes; wrappers like `Playable` pass it through, and a branch panics
+if nothing took the reseed). A random outcome (a transform, a relic off
+the bag, an event's random card) is the mean over `K` samples; an option
+whose first two samples settle the same is taken as deterministic and
+gets no more. `env::tests::the_afterstate_reads_no_hidden_information`
+fails when an afterstate reads the run's streams, the bags' order or the
+event's stream: two runs alike but for those deal Dig and Trash Heap
+different relics on their own draws and the same under a reseed.
+
+The score of a settled state is the calibrated win chance
+(`sts2ai.forecast`) of the act's elites, pooled, plus the boss's, read
+from `forecast_fights` of that state, with its HP as the calibration's
+HP; a run that died or is stuck in the option scores 0, one won scores
+1. `sts2ai.afterstate.Scorer` batches every waiting env's leaves into one
+value-head read, each distinct settled state encoded once, takes the max
+over sub-decisions, the mean over samples and the argmax over options,
+the policy's pick breaking an exact tie. It is computed only when asked,
+so training pays nothing for it.
+
+`runplay --afterstate K` (with the forecast's calibration, `--forecast
+CAL` for a policy without one) makes every decision but a map step that
+way, prints how often the pick differs from the policy's per decision
+kind and the cost per decision, and `--show-afterstates N` prints N
+decisions with each option's score and the sub-decisions on its best
+path. gen8 playing the fights, `imitate-noforecast` the map steps, 32
+envs, one run each (2026-09-29): a decision costs 176 branches, 40
+distinct states, 658 combat rows, 7 ms of sim and 4 ms of value head;
+the pick differs from the clone's on 54% of decisions (card rewards 63%,
+shops 73%, deck picks 74%, rest sites 50%, events 46%).
+
+What the forecast misses, and so the score:
+
+- Value beyond the act: the forecast plays the act's elites and boss,
+  so a relic whose worth is later (an egg, Dream Catcher, a gold relic)
+  scores as noise, and leaving one can tie with or edge out taking it.
+  Gold scores only through what it buys before the settle point.
+- A potion is counted in every forecast fight, though it can be drunk
+  once; keeping or buying one reads strong.
+- An option that starts a fight (Punch Off, the Lantern Key) settles at
+  the fight, whose cost and rewards are not in the score.
+- Near a sure win the calibration saturates, and at 80% HP with the act
+  well in hand a heal edges out a smith by 0.01; the winners smith there.
+  The value head's read of a deck also carries its own noise: removing a
+  Defend scored above removing a curse in one smoke decision.
 
 ### Exactness
 
