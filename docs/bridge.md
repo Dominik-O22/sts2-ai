@@ -7,7 +7,7 @@ card choices included.
 
 ```
 ./scripts/build-mod.sh                      # with the game closed; it refuses otherwise
-uv run python -m sts2ai.play runs/<run>/latest.pt --search 256
+uv run python -m sts2ai.play runs/<run>/latest.pt --search 1
 ```
 
 Start it before or during a run, in or out of combat. A client that
@@ -16,7 +16,10 @@ point. Ctrl-C hands the game back to you. A card choice open at that moment
 goes to a card grid for you to pick.
 
 The player prints the same advice lines as `sts2ai.advise`, then acts on
-them. When the sim cannot follow a fight (a divergence, or an encounter it
+them. `--search` turns the turn search on: the hybrid by default
+(`exactsearch.Hybrid`, `--top` lines played out `--playouts` times to the
+fight's end), or `--search-mode copies` with N copies to the end of the
+turn. When the sim cannot follow a fight (a divergence, or an encounter it
 does not model) it says so once and leaves the fight to you. Card choices
 in that fight go to the grid.
 

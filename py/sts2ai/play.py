@@ -1,11 +1,15 @@
 """Let a trained policy play combats in the running game.
 
-    uv run python -m sts2ai.play runs/<run>/latest.pt --search 256
+    uv run python -m sts2ai.play runs/<run>/latest.pt --search 1
+    uv run python -m sts2ai.play runs/<run>/latest.pt --search 2048 --search-mode copies
 
 Connects to the mod's bridge (mod/Bridge.cs, 127.0.0.1:47474), follows the
 fight the way the advisor does, and sends the advisor's pick back at every
 decision point, card choices included. You play everything outside combat;
-the next fight is picked up when it starts. Stop it with Ctrl-C to take a
+the next fight is picked up when it starts. `--search` turns the
+advisor's turn search on (`sts2ai.advise`): the hybrid by default, whose
+lines are played out to the fight's end, or `--search-mode copies` with
+N copies to the end of the turn. Stop it with Ctrl-C to take a
 fight over: with nobody connected the game is yours again, and a card
 choice left open goes to a card grid for you.
 
@@ -33,7 +37,8 @@ from typing import Iterator
 
 import torch
 
-from sts2ai.advise import Session
+from sts2ai.advise import Session, add_search_args, hybrid_of
+from sts2ai.exactsearch import Hybrid
 from sts2ai.model import Policy, load_policy
 
 DEFAULT_PORT = 47474
@@ -51,9 +56,16 @@ class Pilot(Session):
     """An advisor session that answers the bridge instead of waiting for you."""
 
     def __init__(
-        self, conn: socket.socket, policy: Policy, device: torch.device, search: int = 0, groups: int = 4, record: bool = False
+        self,
+        conn: socket.socket,
+        policy: Policy,
+        device: torch.device,
+        search: int = 0,
+        groups: int = 4,
+        record: bool = False,
+        hybrid: Hybrid | None = None,
     ):
-        super().__init__(policy, device, search, groups)
+        super().__init__(policy, device, search, groups, hybrid)
         self.conn = conn
         self.record = self.sample = record
         # This fight has been ended with `win`; nothing more to do in it.
@@ -166,8 +178,7 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("checkpoint", type=Path)
     ap.add_argument("--port", type=int, default=DEFAULT_PORT)
-    ap.add_argument("--search", type=int, default=0, help="turn search with this many sim copies (0: policy only)")
-    ap.add_argument("--groups", type=int, default=4, help="draw-pile shuffles the search copies are split over")
+    add_search_args(ap)
     ap.add_argument("--record", action="store_true", help="unattended recording: sample moves, end lost or diverged fights with win")
     args = ap.parse_args()
     sys.stdout.reconfigure(line_buffering=True)
@@ -181,7 +192,7 @@ def main() -> None:
     except ConnectionRefusedError:
         sys.exit(f"nothing listening on port {args.port}: is the game running with the sts2ai mod? (scripts/build-mod.sh)")
     conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-    pilot = Pilot(conn, policy, device, args.search, args.groups, args.record)
+    pilot = Pilot(conn, policy, device, args.search, args.groups, args.record, hybrid_of(args))
     try:
         for line in lines(conn):
             if line:

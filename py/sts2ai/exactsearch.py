@@ -37,7 +37,7 @@ import numpy as np
 import torch
 
 from sts2ai import _sim, search
-from sts2ai.advise import PLAN_MARGIN
+from sts2ai.search import PLAN_MARGIN
 from sts2ai.env import End, Envs, Layout
 from sts2ai.model import Policy, load_policy, masked_logits
 from sts2ai.searcheval import pick

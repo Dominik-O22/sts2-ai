@@ -690,7 +690,7 @@ def main() -> None:
     ap.add_argument("--redo", action="store_true", help="include jobs that already replay clean")
     ap.add_argument("--repeat", type=int, default=1, metavar="N", help="run each job N times")
     ap.add_argument("--pilot", type=Path, metavar="CKPT", help="let this checkpoint play the fights")
-    ap.add_argument("--search", type=int, default=0, metavar="N", help="the pilot runs a turn search with N sim copies (stronger, slower)")
+    ap.add_argument("--search", type=int, default=0, metavar="N", help="the pilot runs its turn search, the hybrid (sts2ai.play --search N; stronger, slower)")
     ap.add_argument("--queue", action="store_true", help="keep running, taking jobs from sts2ai/queue.jsonl")
     ap.add_argument("--no-deck", action="store_true", help="leave the run's deck alone")
     ap.add_argument("--plain", action="store_true", help="drop Fresnel Lens, so no card arrives enchanted")
