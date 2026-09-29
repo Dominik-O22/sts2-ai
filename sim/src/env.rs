@@ -925,6 +925,15 @@ impl VecEnv {
         self.slots[i].base
     }
 
+    /// Put `combat`, begun at `base`, in env `i`, so a search over envs
+    /// (`turnsearch`) can search a fight followed elsewhere: the live
+    /// pilot's. Env `i` is not meant to be stepped after.
+    pub fn load(&mut self, i: usize, combat: &Combat, base: Baseline) {
+        let s = &mut self.slots[i];
+        s.combat.clone_from(combat);
+        s.base = base;
+    }
+
     /// Encode every env's current state. A run waiting at a decision
     /// shows the fight it last finished.
     pub fn observe(&self, floats: &mut [f32], ids: &mut [i64], mask: &mut [bool]) {

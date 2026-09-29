@@ -100,6 +100,14 @@ impl VecEnv {
         Ok(())
     }
 
+    /// Put the advisor's current combat in env `i`, for `TurnPlanner` (and
+    /// `exactsearch.Hybrid`) to search the fight the live pilot follows.
+    fn load_combat(&mut self, i: usize, advisor: PyRef<'_, Advisor>) -> PyResult<()> {
+        let base = advisor.base.ok_or_else(|| pyo3::exceptions::PyValueError::new_err("no combat yet"))?;
+        self.inner.load(i, advisor.combat()?, base);
+        Ok(())
+    }
+
     /// Copies of the current fight in each of `envs`, `n` per env, for a
     /// turn search over many fights in one batch.
     /// `depth` player turns are played: the rest of this one, then more.
