@@ -12,7 +12,7 @@ use crate::card::{Card, Tag};
 use crate::combat::{Combat, RoomKind};
 use crate::effect::{AttackTargets, CardFilter, Effect, GenPool, Pile, Then};
 use crate::ids::{CardId, PowerId};
-use crate::types::{CardRarity, CardType, CreatureRef, Keyword, Side, TargetType, ValueProp};
+use crate::types::{CardRarity, CardType, CreatureRef, IdSet, Keyword, Side, TargetType, ValueProp};
 
 /// `Models/Relics/<Name>.cs`. Event pool relics that never reach a fight
 /// are not here but in `gen::INERT_RELICS`, and the other characters'
@@ -121,7 +121,7 @@ pub const ANCIENT: &[RelicId] = &[
 ];
 
 /// A relic instance on the run.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Relic {
     pub id: RelicId,
     /// Persistent counter: Nunchaku attacks, Pen Nib attacks, Tuning Fork
@@ -152,6 +152,92 @@ impl Relic {
         };
         Self { id, counter, combat_counter: 0, scratch: 0, used: false }
     }
+}
+
+/// The run's relics in the order they were picked up, which is the order
+/// their hooks run in, with the set of ids held beside them.
+#[derive(Default, PartialEq, Eq)]
+pub struct Relics {
+    list: Vec<Relic>,
+    held: IdSet,
+}
+
+clone_by_fields!(Relics { list, held });
+
+impl Relics {
+    pub fn push(&mut self, r: Relic) {
+        self.held.insert(r.id as usize);
+        self.list.push(r);
+    }
+
+    pub fn has(&self, id: RelicId) -> bool {
+        self.held.contains(id as usize)
+    }
+
+    /// Whether a relic held reacts to a hook, given the ids its match arms
+    /// name. A hook returns before its loop when none does; the test
+    /// `hook_sets_name_every_relic_that_reacts` keeps the sets honest.
+    fn any(&self, hook: IdSet) -> bool {
+        #[cfg(test)]
+        if tests::UNGATED.get() {
+            return true;
+        }
+        self.held.meets(hook)
+    }
+}
+
+impl From<Vec<Relic>> for Relics {
+    fn from(list: Vec<Relic>) -> Self {
+        let held = list.iter().fold(IdSet::EMPTY, |s, r| s.with(r.id as usize));
+        Self { list, held }
+    }
+}
+
+impl std::ops::Deref for Relics {
+    type Target = [Relic];
+    fn deref(&self) -> &[Relic] {
+        &self.list
+    }
+}
+
+/// Counters change in place; the ids never do.
+impl std::ops::DerefMut for Relics {
+    fn deref_mut(&mut self) -> &mut [Relic] {
+        &mut self.list
+    }
+}
+
+impl<'a> IntoIterator for &'a Relics {
+    type Item = &'a Relic;
+    type IntoIter = std::slice::Iter<'a, Relic>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.list.iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a mut Relics {
+    type Item = &'a mut Relic;
+    type IntoIter = std::slice::IterMut<'a, Relic>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.list.iter_mut()
+    }
+}
+
+impl std::fmt::Debug for Relics {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.list.fmt(f)
+    }
+}
+
+/// The ids a hook's match arms name.
+const fn set(ids: &[RelicId]) -> IdSet {
+    let mut s = IdSet::EMPTY;
+    let mut i = 0;
+    while i < ids.len() {
+        s = s.with(ids[i] as usize);
+        i += 1;
+    }
+    s
 }
 
 fn gain_block(amount: i32) -> Effect {
@@ -187,7 +273,7 @@ fn generate(id: CardId, to: Pile) -> Effect {
 
 impl Combat {
     pub fn has_relic(&self, id: RelicId) -> bool {
-        self.relics.iter().any(|r| r.id == id)
+        self.relics.has(id)
     }
 
     fn relic_mut(&mut self, id: RelicId) -> Option<&mut Relic> {
@@ -277,10 +363,18 @@ impl Combat {
         out
     }
 
+    const BEFORE_SIDE_TURN_START: IdSet = {
+        use RelicId::*;
+        set(&[BagOfMarbles, RedMask, Kunai, Shuriken, OrnamentalFan, RainbowRing, BeatingRemnant, DemonTongue, Orichalcum, Pocketwatch, MusicBox, VelvetChoker, PollinousCore])
+    };
+
     /// `Hook.BeforeSideTurnStart` for relics (player side).
     pub(crate) fn relic_before_side_turn_start(&mut self, side: Side) -> Vec<Effect> {
         use RelicId::*;
         if side != Side::Player {
+            return vec![];
+        }
+        if !self.relics.any(Self::BEFORE_SIDE_TURN_START) {
             return vec![];
         }
         let turn = self.player.turn;
@@ -332,9 +426,17 @@ impl Combat {
         !(self.has_relic(RelicId::IceCream) && self.player.turn > 1)
     }
 
+    const AFTER_ENERGY_RESET: IdSet = {
+        use RelicId::*;
+        set(&[VenerableTeaSet, FakeVenerableTeaSet, ArtOfWar])
+    };
+
     /// `Hook.AfterEnergyReset`.
     pub(crate) fn relic_after_energy_reset(&mut self) -> Vec<Effect> {
         use RelicId::*;
+        if !self.relics.any(Self::AFTER_ENERGY_RESET) {
+            return vec![];
+        }
         let turn = self.player.turn;
         let mut out = vec![];
         for r in &mut self.relics {
@@ -361,9 +463,17 @@ impl Combat {
         out
     }
 
+    const MODIFY_HAND_DRAW: IdSet = {
+        use RelicId::*;
+        set(&[BagOfPreparation, Pocketwatch, BigMushroom, BoomingConch, PaelsBlood, SneckoEye, PollinousCore, Fiddle])
+    };
+
     /// `Hook.ModifyHandDraw`, `AfterModifyingHandDraw`, then the `Late` pass.
     pub(crate) fn relic_modify_hand_draw(&mut self, count: u32) -> u32 {
         use RelicId::*;
+        if !self.relics.any(Self::MODIFY_HAND_DRAW) {
+            return count;
+        }
         let turn = self.player.turn;
         let elite = self.room == RoomKind::Elite;
         let mut n = count;
@@ -388,9 +498,17 @@ impl Combat {
         n
     }
 
+    const MODIFY_MAX_ENERGY: IdSet = {
+        use RelicId::*;
+        set(&[Bread, PaelsFlesh, BlessedAntler, BloodSoakedRose, Ectoplasm, PhilosophersStone, PrismaticGem, Sozu, SpikedGauntlets, VelvetChoker, WhisperingEarring, PumpkinCandle])
+    };
+
     /// `Hook.ModifyMaxEnergy` for relics: Bread after turn 1, Pael's Flesh
     /// from turn 3, a flat +1 from the ancient energy relics.
     pub(crate) fn relic_modify_max_energy(&self, amount: i32) -> i32 {
+        if !self.relics.any(Self::MODIFY_MAX_ENERGY) {
+            return amount;
+        }
         let mut a = amount;
         if self.has_relic(RelicId::Bread) && self.player.turn > 1 {
             a += 1;
@@ -410,10 +528,18 @@ impl Combat {
         a
     }
 
+    const AFTER_SIDE_TURN_START: IdSet = {
+        use RelicId::*;
+        set(&[FakeHappyFlower, BoneTea, BoomingConch, VeryHotCocoa, Crossbow, PaelsLegion, PaelsTears, Sai, SealOfGold, HappyFlower, Lantern, Chandelier, Candelabra, Bread, Brimstone, Akabeko, LetterOpener])
+    };
+
     /// `Hook.AfterSideTurnStart` for relics (player side).
     pub(crate) fn relic_after_side_turn_start(&mut self, side: Side) -> Vec<Effect> {
         use RelicId::*;
         if side != Side::Player {
+            return vec![];
+        }
+        if !self.relics.any(Self::AFTER_SIDE_TURN_START) {
             return vec![];
         }
         let turn = self.player.turn;
@@ -479,9 +605,17 @@ impl Combat {
         out
     }
 
+    const AFTER_PLAYER_TURN_START: IdSet = {
+        use RelicId::*;
+        set(&[BloodVial, FestivePopper, Pendulum, MercuryHourglass, VexingPuzzlebox, MrStruggles, RoyalPoison, ChoicesParadox, Bellows, GamblingChip, FakeBloodVial])
+    };
+
     /// `Hook.AfterPlayerTurnStart` for relics.
     pub(crate) fn relic_after_player_turn_start(&mut self) -> Vec<Effect> {
         use RelicId::*;
+        if !self.relics.any(Self::AFTER_PLAYER_TURN_START) {
+            return vec![];
+        }
         let turn = self.player.turn;
         let mut out = vec![];
         for r in &mut self.relics {
@@ -532,9 +666,17 @@ impl Combat {
         out
     }
 
+    const BEFORE_HAND_DRAW: IdSet = {
+        use RelicId::*;
+        set(&[BlessedAntler, JeweledMask, RadiantPearl, ToastyMittens])
+    };
+
     /// `Hook.BeforeHandDraw`, after the energy reset.
     pub(crate) fn relic_before_hand_draw(&self) -> Vec<Effect> {
         use RelicId::*;
+        if !self.relics.any(Self::BEFORE_HAND_DRAW) {
+            return vec![];
+        }
         let turn = self.player.turn;
         let mut out = vec![];
         for r in &self.relics {
@@ -564,9 +706,17 @@ impl Combat {
         out
     }
 
+    const BEFORE_CARD_PLAYED: IdSet = {
+        use RelicId::*;
+        set(&[IntimidatingHelmet, PenNib, MusicBox])
+    };
+
     /// `Hook.BeforeCardPlayed` for relics. `energy_paid` is the card's cost.
     pub(crate) fn relic_before_card_played(&mut self, card: &Card, energy_paid: i32) -> Vec<Effect> {
         use RelicId::*;
+        if !self.relics.any(Self::BEFORE_CARD_PLAYED) {
+            return vec![];
+        }
         let mut out = vec![];
         for r in &mut self.relics {
             match r.id {
@@ -586,17 +736,24 @@ impl Combat {
         out
     }
 
+    const AFTER_CARD_PLAYED: IdSet = {
+        use RelicId::*;
+        set(&[GamePiece, MummifiedHand, RazorTooth, RainbowRing, Kunai, Shuriken, Kusarigama, OrnamentalFan, LetterOpener, Nunchaku, TuningFork, ArtOfWar, Pocketwatch, Permafrost, RippleBasin, Vambrace, PenNib, UnsettlingLamp, DaughterOfTheWind, LostWisp, IronClub, DiamondDiadem, VelvetChoker, MusicBox, PaelsLegion])
+    };
+
     /// `Hook.AfterCardPlayed` for relics.
     pub(crate) fn relic_after_card_played(&mut self, card: &Card) -> Vec<Effect> {
         use RelicId::*;
+        if !self.relics.any(Self::AFTER_CARD_PLAYED) {
+            return vec![];
+        }
         let ty = card.ty();
-        let hand_costing: Vec<u32> = self
-            .player
-            .hand
-            .iter()
-            .filter(|c| c.uid != card.uid && self.cost(c) > 0)
-            .map(|c| c.uid)
-            .collect();
+        // Mummified Hand's candidates, costed before any relic below runs.
+        let hand_costing: Vec<u32> = if ty == CardType::Power && self.has_relic(MummifiedHand) {
+            self.player.hand.iter().filter(|c| c.uid != card.uid && self.cost(c) > 0).map(|c| c.uid).collect()
+        } else {
+            vec![]
+        };
         let mut out = vec![];
         let mut mummified: Option<u32> = None;
         for r in &mut self.relics {
@@ -708,9 +865,17 @@ impl Combat {
         out
     }
 
+    const AFTER_CARD_EXHAUSTED: IdSet = {
+        use RelicId::*;
+        set(&[CharonsAshes, JossPaper, ForgottenSoul, BurningSticks])
+    };
+
     /// `Hook.AfterCardExhausted` for relics.
     pub(crate) fn relic_after_card_exhausted(&mut self, card: &Card, ethereal: bool) -> Vec<Effect> {
         use RelicId::*;
+        if !self.relics.any(Self::AFTER_CARD_EXHAUSTED) {
+            return vec![];
+        }
         let mut out = vec![];
         for r in &mut self.relics {
             match r.id {
@@ -737,9 +902,17 @@ impl Combat {
         out
     }
 
+    const MODIFY_HP_LOST: IdSet = {
+        use RelicId::*;
+        set(&[TungstenRod, BeatingRemnant])
+    };
+
     /// `Hook.ModifyHpLost` for relics on the player: Tungsten Rod, Beating Remnant.
     pub(crate) fn relic_modify_hp_lost(&self, amount: f64) -> f64 {
         use RelicId::*;
+        if !self.relics.any(Self::MODIFY_HP_LOST) {
+            return amount;
+        }
         let mut a = amount;
         for r in &self.relics {
             match r.id {
@@ -763,9 +936,17 @@ impl Combat {
         Some(((max_hp as f64 * 0.5) as i32).max(1))
     }
 
+    const AFTER_DAMAGE_RECEIVED: IdSet = {
+        use RelicId::*;
+        set(&[CentennialPuzzle, DemonTongue, SelfFormingClay, BeatingRemnant, RedSkull])
+    };
+
     /// `Hook.AfterDamageReceived` for relics when the player is hit.
     pub(crate) fn relic_after_damage_received(&mut self, lost: i32, props: ValueProp, own_turn: bool) -> Vec<Effect> {
         use RelicId::*;
+        if !self.relics.any(Self::AFTER_DAMAGE_RECEIVED) {
+            return vec![];
+        }
         let hp_low = self.player.creature.hp * 2 <= self.player.creature.max_hp;
         let mut out = vec![];
         for r in &mut self.relics {
@@ -801,9 +982,17 @@ impl Combat {
         self.relic_after_damage_received(0, ValueProp::NONE, false)
     }
 
+    const DAMAGE_ADDITIVE: IdSet = {
+        use RelicId::*;
+        set(&[StrikeDummy, FakeStrikeDummy, MiniatureCannon, MysticLighter])
+    };
+
     /// `ModifyDamageAdditive` for relics (player as dealer, card source).
     pub(crate) fn relic_damage_additive(&self, card: Option<&Card>, props: ValueProp) -> f64 {
         use RelicId::*;
+        if !self.relics.any(Self::DAMAGE_ADDITIVE) {
+            return 0.0;
+        }
         let Some(card) = card else { return 0.0 };
         if !props.is_powered() {
             return 0.0;
@@ -821,8 +1010,16 @@ impl Combat {
         add
     }
 
+    const DAMAGE_MULTIPLICATIVE: IdSet = {
+        use RelicId::*;
+        set(&[PenNib])
+    };
+
     /// `ModifyDamageMultiplicative` for relics: Pen Nib's doubled attack.
     pub(crate) fn relic_damage_multiplicative(&self, card: Option<&Card>, props: ValueProp) -> f64 {
+        if !self.relics.any(Self::DAMAGE_MULTIPLICATIVE) {
+            return 1.0;
+        }
         let Some(card) = card else { return 1.0 };
         if !props.is_powered() {
             return 1.0;
@@ -836,10 +1033,18 @@ impl Combat {
         m
     }
 
+    const BLOCK_MULTIPLICATIVE: IdSet = {
+        use RelicId::*;
+        set(&[Vambrace, PaelsLegion])
+    };
+
     /// `ModifyBlockMultiplicative` for relics: Vambrace doubles the first
     /// card's block this combat, Pael's Legion every card's block while it is
     /// awake. Both record the card that triggered them.
     pub(crate) fn relic_block_multiplicative(&mut self, card: Option<u32>, props: ValueProp) -> f64 {
+        if !self.relics.any(Self::BLOCK_MULTIPLICATIVE) {
+            return 1.0;
+        }
         let Some(uid) = card else { return 1.0 };
         if !props.has(ValueProp::MOVE) {
             return 1.0;
@@ -864,9 +1069,17 @@ impl Combat {
         m
     }
 
+    const BEFORE_SIDE_TURN_END: IdSet = {
+        use RelicId::*;
+        set(&[CloakClasp, StoneCalendar, ScreamingFlagon, RippleBasin, Orichalcum, FakeOrichalcum, DiamondDiadem, PaelsTears])
+    };
+
     /// `BeforeSideTurnEndVeryEarly` + `BeforeSideTurnEnd` for relics.
     pub(crate) fn relic_before_side_turn_end(&mut self) -> Vec<Effect> {
         use RelicId::*;
+        if !self.relics.any(Self::BEFORE_SIDE_TURN_END) {
+            return vec![];
+        }
         let turn = self.player.turn;
         let hand = self.player.hand.len() as i32;
         let block = self.player.creature.block;
@@ -924,10 +1137,18 @@ impl Combat {
         true
     }
 
+    const AFTER_SIDE_TURN_END: IdSet = {
+        use RelicId::*;
+        set(&[ParryingShield, JossPaper, ArtOfWar, Kusarigama])
+    };
+
     /// `AfterSideTurnEnd` for relics (player side).
     pub(crate) fn relic_after_side_turn_end(&mut self, side: Side) -> Vec<Effect> {
         use RelicId::*;
         if side != Side::Player {
+            return vec![];
+        }
+        if !self.relics.any(Self::AFTER_SIDE_TURN_END) {
             return vec![];
         }
         let block = self.player.creature.block;
@@ -959,9 +1180,17 @@ impl Combat {
         self.has_relic(RelicId::SturdyClamp)
     }
 
+    const AFTER_BLOCK_CLEARED: IdSet = {
+        use RelicId::*;
+        set(&[CaptainsWheel, HornCleat, SparklingRouge])
+    };
+
     /// `AfterBlockCleared` for relics on the player.
     pub(crate) fn relic_after_block_cleared(&mut self) -> Vec<Effect> {
         use RelicId::*;
+        if !self.relics.any(Self::AFTER_BLOCK_CLEARED) {
+            return vec![];
+        }
         let turn = self.player.turn;
         let mut out = vec![];
         for r in &self.relics {
@@ -987,11 +1216,19 @@ impl Combat {
         }
     }
 
+    const MODIFY_POWER_AMOUNT: IdSet = {
+        use RelicId::*;
+        set(&[RuinedHelmet, UnsettlingLamp])
+    };
+
     /// `TryModifyPowerAmountReceived` / `ModifyPowerAmountGiven` for relics.
     /// Ruined Helmet doubles the first Strength gain; Unsettling Lamp doubles
     /// every debuff from the first debuffing card.
     pub(crate) fn relic_modify_power_amount(&mut self, target: CreatureRef, id: PowerId, amount: i32, card: Option<u32>) -> i32 {
         use RelicId::*;
+        if !self.relics.any(Self::MODIFY_POWER_AMOUNT) {
+            return amount;
+        }
         let mut a = amount;
         let debuff = crate::power::is_debuff(id);
         for r in &mut self.relics {
@@ -1016,8 +1253,16 @@ impl Combat {
         a
     }
 
+    const AFTER_SHUFFLE: IdSet = {
+        use RelicId::*;
+        set(&[TheAbacus, BiiigHug])
+    };
+
     /// `AfterShuffle` for relics: The Abacus, Biiig Hug.
     pub(crate) fn relic_after_shuffle(&self) -> Vec<Effect> {
+        if !self.relics.any(Self::AFTER_SHUFFLE) {
+            return vec![];
+        }
         let mut out = vec![];
         for r in &self.relics {
             match r.id {
@@ -1039,10 +1284,18 @@ impl Combat {
         }
     }
 
+    const AFTER_POTION_USED: IdSet = {
+        use RelicId::*;
+        set(&[BeltBuckle, ReptileTrinket])
+    };
+
     /// `AfterPotionUsed`: Belt Buckle grants its Dexterity once the last
     /// potion is gone, and Reptile Trinket 3 Strength for the turn.
     pub(crate) fn relic_after_potion_used(&mut self) -> Vec<Effect> {
         use RelicId::*;
+        if !self.relics.any(Self::AFTER_POTION_USED) {
+            return vec![];
+        }
         let no_potions = self.potions.iter().all(|p| p.is_none());
         let mut out = vec![];
         for r in &mut self.relics {
@@ -1126,23 +1379,17 @@ impl Combat {
         }
     }
 
-    /// `TryModifyEnergyCostInCombat` for relics: Spiked Gauntlets taxes powers.
-    pub(crate) fn relic_cost_additive(&self, card: &Card) -> i32 {
-        i32::from(card.ty() == CardType::Power && self.has_relic(RelicId::SpikedGauntlets))
-    }
-
     /// `TryModifyEnergyCostInCombatLate` for relics: Brilliant Scarf makes the
     /// fifth card played by hand each turn free, in hand or being played.
-    pub(crate) fn relic_makes_free(&self, card: &Card) -> bool {
+    /// `scarf` is whether the Scarf is held with four cards played by hand.
+    pub(crate) fn relic_makes_free(&self, scarf: bool, card: &Card) -> bool {
         let p = &self.player;
-        self.has_relic(RelicId::BrilliantScarf)
-            && self.stats.manual_plays_this_turn == 4
-            && p.hand.iter().chain(&p.play).any(|c| c.uid == card.uid)
+        scarf && p.hand.iter().chain(&p.play).any(|c| c.uid == card.uid)
     }
 
     /// `ShouldPlay` for relics: Velvet Choker stops the seventh card a turn.
     pub(crate) fn relic_allows_play(&self) -> bool {
-        !self.relics.iter().any(|r| r.id == RelicId::VelvetChoker && r.combat_counter >= 6)
+        !(self.has_relic(RelicId::VelvetChoker) && self.relics.iter().any(|r| r.id == RelicId::VelvetChoker && r.combat_counter >= 6))
     }
 
     /// `ShouldDraw` for relics: Fiddle refuses every draw on your own turn
@@ -1285,5 +1532,158 @@ impl Combat {
 fn ghost_seed_mark(card: &mut Card) {
     if card.def().rarity == CardRarity::Basic && (card.has_tag(Tag::Strike) || card.id == crate::ids::CardId::DefendIronclad) {
         card.ethereal_added = true;
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+    use crate::gen::holdout;
+    use crate::rng::Rng;
+    use crate::types::Ascension;
+    use std::cell::Cell;
+
+    thread_local! {
+        /// Opens every hook's gate, so a hook runs its loop over relics it
+        /// has no arm for.
+        pub(crate) static UNGATED: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// Mid-fight states from every act, at several turns and HP levels.
+    pub(crate) fn sample_states() -> Vec<Combat> {
+        let mut out = vec![];
+        for (i, s) in holdout(3, 1, Ascension(10), 3).iter().enumerate().step_by(7) {
+            let mut c = s.combat(i as u64);
+            let mut rng = Rng::new(i as u64);
+            for depth in 0..12 {
+                if c.is_over() {
+                    break;
+                }
+                if depth % 4 == 0 {
+                    out.push(c.clone());
+                }
+                let acts = c.legal_actions();
+                c.step(acts[rng.next_int(acts.len())]);
+            }
+        }
+        for (k, c) in out.iter_mut().enumerate() {
+            c.player.turn = [1, 2, 3, 7][k % 4];
+            if k % 3 == 0 {
+                c.player.creature.hp = c.player.creature.max_hp / 3;
+            }
+            if k % 5 == 0 {
+                c.room = RoomKind::Elite;
+            }
+        }
+        out
+    }
+
+    type Run = fn(&mut Combat, &Card) -> String;
+
+    /// Every gated hook with its set, run over a spread of arguments.
+    fn hooks() -> Vec<(&'static str, IdSet, Run)> {
+        use crate::types::ValueProp as V;
+        vec![
+            ("before_side_turn_start", Combat::BEFORE_SIDE_TURN_START, |c, _| {
+                format!("{:?}{:?}", c.relic_before_side_turn_start(Side::Player), c.relic_before_side_turn_start(Side::Enemy))
+            }),
+            ("after_energy_reset", Combat::AFTER_ENERGY_RESET, |c, _| format!("{:?}", c.relic_after_energy_reset())),
+            ("modify_hand_draw", Combat::MODIFY_HAND_DRAW, |c, _| format!("{:?}", c.relic_modify_hand_draw(5))),
+            ("modify_max_energy", Combat::MODIFY_MAX_ENERGY, |c, _| format!("{:?}", c.relic_modify_max_energy(3))),
+            ("after_side_turn_start", Combat::AFTER_SIDE_TURN_START, |c, _| {
+                format!("{:?}{:?}", c.relic_after_side_turn_start(Side::Player), c.relic_after_side_turn_start(Side::Enemy))
+            }),
+            ("after_player_turn_start", Combat::AFTER_PLAYER_TURN_START, |c, _| format!("{:?}", c.relic_after_player_turn_start())),
+            ("before_hand_draw", Combat::BEFORE_HAND_DRAW, |c, _| format!("{:?}", c.relic_before_hand_draw())),
+            ("before_card_played", Combat::BEFORE_CARD_PLAYED, |c, k| {
+                (0..4).map(|paid| format!("{:?}", c.relic_before_card_played(k, paid))).collect()
+            }),
+            ("after_card_played", Combat::AFTER_CARD_PLAYED, |c, k| format!("{:?}", c.relic_after_card_played(k))),
+            ("after_card_exhausted", Combat::AFTER_CARD_EXHAUSTED, |c, k| {
+                format!("{:?}{:?}", c.relic_after_card_exhausted(k, false), c.relic_after_card_exhausted(k, true))
+            }),
+            ("modify_hp_lost", Combat::MODIFY_HP_LOST, |c, _| {
+                [0.0, 3.0, 30.0].iter().map(|&a| format!("{:?}", c.relic_modify_hp_lost(a))).collect()
+            }),
+            ("after_damage_received", Combat::AFTER_DAMAGE_RECEIVED, |c, _| {
+                let mut s = String::new();
+                for lost in [0, 5] {
+                    for own in [false, true] {
+                        s += &format!("{:?}", c.relic_after_damage_received(lost, V::MOVE, own));
+                    }
+                }
+                s
+            }),
+            ("damage_additive", Combat::DAMAGE_ADDITIVE, |c, k| {
+                [V::MOVE, V::UNPOWERED, V::NONE].iter().map(|&p| format!("{:?}", c.relic_damage_additive(Some(k), p))).collect()
+            }),
+            ("damage_multiplicative", Combat::DAMAGE_MULTIPLICATIVE, |c, k| {
+                [V::MOVE, V::UNPOWERED, V::NONE].iter().map(|&p| format!("{:?}", c.relic_damage_multiplicative(Some(k), p))).collect()
+            }),
+            ("block_multiplicative", Combat::BLOCK_MULTIPLICATIVE, |c, k| {
+                [V::MOVE, V::UNPOWERED, V::NONE].iter().map(|&p| format!("{:?}", c.relic_block_multiplicative(Some(k.uid), p))).collect()
+            }),
+            ("before_side_turn_end", Combat::BEFORE_SIDE_TURN_END, |c, _| format!("{:?}", c.relic_before_side_turn_end())),
+            ("after_side_turn_end", Combat::AFTER_SIDE_TURN_END, |c, _| {
+                format!("{:?}{:?}", c.relic_after_side_turn_end(Side::Player), c.relic_after_side_turn_end(Side::Enemy))
+            }),
+            ("after_block_cleared", Combat::AFTER_BLOCK_CLEARED, |c, _| format!("{:?}", c.relic_after_block_cleared())),
+            ("modify_power_amount", Combat::MODIFY_POWER_AMOUNT, |c, k| {
+                let mut s = String::new();
+                for target in [CreatureRef::Player, CreatureRef::Enemy(0)] {
+                    for id in [PowerId::Strength, PowerId::Vulnerable, PowerId::Weak] {
+                        for amount in [-1, 2] {
+                            for card in [None, Some(k.uid)] {
+                                s += &format!("{:?}", c.relic_modify_power_amount(target, id, amount, card));
+                            }
+                        }
+                    }
+                }
+                s
+            }),
+            ("after_shuffle", Combat::AFTER_SHUFFLE, |c, _| format!("{:?}", c.relic_after_shuffle())),
+            ("after_potion_used", Combat::AFTER_POTION_USED, |c, _| format!("{:?}", c.relic_after_potion_used())),
+        ]
+    }
+
+    /// A relic a hook's set leaves out must do nothing in that hook: the
+    /// hook, run over it with the gate open, returns and changes exactly
+    /// what it would with no relic at all. This is what makes skipping the
+    /// loop when no relic held is in the set safe.
+    #[test]
+    fn hook_sets_name_every_relic_that_reacts() {
+        UNGATED.set(true);
+        let states = sample_states();
+        let mut checked = 0;
+        for (name, hook_set, run) in hooks() {
+            for &id in ALL {
+                if hook_set.contains(id as usize) {
+                    continue;
+                }
+                for (k, base) in states.iter().enumerate() {
+                    let mut cards: Vec<Card> = base.player.hand.iter().take(2).cloned().collect();
+                    for (n, &cid) in [CardId::Inflame, CardId::Bash, CardId::DefendIronclad, CardId::StrikeIronclad].iter().enumerate() {
+                        cards.push(Card::new(9000 + n as u32, cid, k % 2 == 0));
+                    }
+                    let uid = cards[k % cards.len()].uid as i32;
+                    let (counter, combat_counter, scratch, used) = [(0, 0, 0, false), (4, 2, uid, true), (9, 6, uid, false), (1, 0, 0, true)][k % 4];
+                    let relic = Relic { id, counter, combat_counter, scratch, used };
+                    let mut none = base.clone();
+                    none.relics = Relics::default();
+                    let mut one = base.clone();
+                    one.relics = vec![relic.clone()].into();
+                    for card in &cards {
+                        let (a, b) = (run(&mut none, card), run(&mut one, card));
+                        assert_eq!(a, b, "{id:?} reacts in {name} but is not in its set");
+                        checked += 1;
+                    }
+                    assert_eq!(one.relics[0], relic, "{id:?} changes in {name} but is not in its set");
+                    one.relics = Relics::default();
+                    assert_eq!(format!("{none:?}"), format!("{one:?}"), "{id:?} changes the combat in {name}");
+                }
+            }
+        }
+        UNGATED.set(false);
+        assert!(checked > 10_000, "{checked}");
     }
 }
