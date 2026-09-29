@@ -44,6 +44,7 @@ from sts2ai import _sim
 from sts2ai.deckvalue import RunPotential
 from sts2ai.deckvalue import load as load_deckvalue
 from sts2ai.env import START_POINTS, End, Envs, RunFight, RunLayout
+from sts2ai.exactsearch import Hybrid
 from sts2ai.imitation import DECISIONS, Rows, batches, pretrain
 from sts2ai.model import Policy, load_policy, masked_logits
 from sts2ai.runmodel import RunArch, RunPolicy, load_run_policy, save_run_policy
@@ -79,7 +80,9 @@ class RunLoop:
     With `search` copies, fights of `search_kinds` play the pilot's turn
     search instead (`search.choose`, `groups` shuffles, the copies' dice
     drawn from `seed` and the step), all of them in one batch; the others
-    stay greedy."""
+    stay greedy. With `hybrid` (top lines, playouts, race size or 0) they
+    play the exact search's lines picked by playouts instead
+    (`exactsearch.Hybrid`)."""
 
     def __init__(
         self,
@@ -91,9 +94,11 @@ class RunLoop:
         search_kinds: frozenset[str] = frozenset({"Elite", "Boss"}),
         groups: int = 4,
         seed: int = 0,
+        hybrid: tuple[int, int, int] | None = None,
     ):
         self.combat, self.device, self.envs, self.drain = combat, device, envs, drain
         self.search, self.search_kinds, self.groups, self.seed = search, search_kinds, groups, seed
+        self.hybrid = Hybrid(envs, *hybrid, seed=seed) if hybrid else None
         self.autocast = torch.autocast(device.type, dtype=torch.bfloat16, enabled=device.type == "cuda")
         self.decisions = 0
         self.combat_steps = 0
@@ -115,9 +120,10 @@ class RunLoop:
         mask = torch.from_numpy(envs.mask).to(self.device, non_blocking=True)
         with self.autocast:
             logits, _ = self.combat(floats, ids)
-        actions = masked_logits(logits.float(), mask).argmax(dim=1).cpu().numpy()
-        if self.search:
-            self.overrule(actions)
+        masked = masked_logits(logits.float(), mask)
+        actions = masked.argmax(dim=1).cpu().numpy()
+        if self.searching:
+            self.overrule(actions, masked)
         fights = envs.step(actions)
         self.combat_steps += 1
         for e in fights:
@@ -125,18 +131,28 @@ class RunLoop:
                 on_run_end(e.env, e.run)
         return fights
 
-    def overrule(self, actions: np.ndarray) -> None:
+    @property
+    def searching(self) -> bool:
+        return bool(self.search) or self.hybrid is not None
+
+    def overrule(self, actions: np.ndarray, masked: torch.Tensor) -> None:
         """Replace the greedy `actions` by the turn search's picks in the
-        envs fighting a searched kind with more than one legal action."""
+        envs fighting a searched kind with more than one legal action;
+        `masked` holds the policy's masked logits for every env."""
         envs = self.envs
         waiting = set(envs.run_waiting())
         choice = np.flatnonzero(envs.mask.sum(axis=1) > 1)
         roots = [int(i) for i in choice if i not in waiting and envs.sim.fight(int(i))[1] in self.search_kinds]
         if not roots:
             return
+        self.searched += len(roots)
+        if self.hybrid is not None:
+            self.hybrid.choose(self.combat, self.device, roots, masked.softmax(dim=1).cpu().numpy(), actions)
+            # Its per-search stats are for exactsearch's report; a run keeps none.
+            self.hybrid.planner.searched.clear()
+            return
         seed = self.seed << 32 | self.combat_steps
         actions[roots] = choose(self.combat, self.device, envs.sim, roots, envs.mask[roots], actions[roots], self.search, self.groups, seed)
-        self.searched += len(roots)
 
 
 def policy_decide(policy: RunPolicy, device: torch.device, greedy: bool) -> Decide:
