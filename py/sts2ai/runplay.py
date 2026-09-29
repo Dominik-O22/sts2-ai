@@ -50,7 +50,9 @@ averaged over K samples, scored by the forecast of the player it leaves,
 the policy's pick on a tie. It needs the forecast's calibration. The
 report counts how often the pick differs from the policy's per decision
 kind and what a decision costs; `--show-afterstates N` prints N decisions
-with each option's text and score.
+with each option's text and score. `--afterstate-kinds` and
+`--afterstate-acts` limit it to some decision kinds or acts, the policy
+deciding the rest.
 """
 
 from __future__ import annotations
@@ -235,6 +237,7 @@ def play(
     event_table: EventTable | None = None,
     afterstate: Scorer | None = None,
     show_afterstates: int = 0,
+    afterstate_acts: frozenset[int] = frozenset(),
 ) -> tuple[list[End], list[RunFight], RunLoop, float]:
     """Plays until each env has finished `per_env` runs or `minutes` pass.
     Returns every fight that ended, every run that ended, the loop (its
@@ -297,7 +300,13 @@ def play(
             policy = options
             # Runs past each env's counted ones only fill the batch until the
             # last counted run ends: their decisions are not worth scoring.
-            counted = [k for k, env in enumerate(waiting) if seed + env + done[env] * envs.n in left]
+            # The global token's act id: 1 and 2 are act 1's two acts, then one
+            # per act (runobs.rs ACTS); `afterstate_acts` counts from 1.
+            counted = [
+                k
+                for k, env in enumerate(waiting)
+                if seed + env + done[env] * envs.n in left and (not afterstate_acts or max(int(ids[k, 2]) - 1, 1) in afterstate_acts)
+            ]
             options, score = afterstate.choose(waiting, ids, policy, counted)
             for k in np.flatnonzero(np.isfinite(score).any(1)):
                 if shown[0] >= show_afterstates or show_rng.random() >= 0.05:
@@ -442,6 +451,7 @@ def main() -> None:
     ap.add_argument("--afterstate", type=int, default=0, help="make every decision but a map step by its afterstates, K samples each (needs the forecast)")
     ap.add_argument("--afterstate-depth", type=int, default=3, help="sub-decisions an afterstate opens on the way, at most")
     ap.add_argument("--afterstate-nodes", type=int, default=256, help="branches an afterstate plays per option and sample, at most")
+    ap.add_argument("--afterstate-acts", default="", help="acts (1-3, comma separated) whose decisions are made by afterstate; empty: every act")
     ap.add_argument("--afterstate-kinds", default="", help="decision kinds made by afterstate, comma separated (Event,Rest,...); empty: all but map steps")
     ap.add_argument("--show-afterstates", type=int, default=0, help="print this many scored decisions with each option's score")
     args = ap.parse_args()
@@ -492,6 +502,7 @@ def main() -> None:
         event_table,
         afterstate,
         args.show_afterstates,
+        frozenset(int(a) for a in args.afterstate_acts.split(",") if a),
     )
     if fights_out is not None:
         fights_out.close()
