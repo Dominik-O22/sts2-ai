@@ -265,9 +265,14 @@ def play(
     # One scored decision in twenty is shown, so the ones shown are not all Neow's.
     shown, show_rng = [0], np.random.default_rng(1)
 
-    def ended(_: int, run: RunFight) -> None:
+    # Runs each env has finished: its current run's seed is
+    # `seed + env + done[env] * envs.n` (`Envs.use_runs`).
+    done = [0] * envs.n
+
+    def ended(env: int, run: RunFight) -> None:
         runs.append(run)
         left.discard(run.seed)
+        done[env] += 1
 
     @torch.no_grad()
     def decide(waiting: list[int], floats: np.ndarray, ids: np.ndarray) -> np.ndarray:
@@ -290,7 +295,10 @@ def play(
             options = event_table.choose(floats, ids, options)
         if afterstate is not None:
             policy = options
-            options, scored = afterstate.choose(waiting, ids, policy)
+            # Runs past each env's counted ones only fill the batch until the
+            # last counted run ends: their decisions are not worth scoring.
+            counted = [k for k, env in enumerate(waiting) if seed + env + done[env] * envs.n in left]
+            options, scored = afterstate.choose(waiting, ids, policy, counted)
             for k in np.flatnonzero(np.isfinite(scored.score).any(1)):
                 if shown[0] >= show_afterstates or show_rng.random() >= 0.05:
                     continue
