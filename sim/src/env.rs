@@ -5,6 +5,7 @@
 //! caller-owned buffers laid out per `encode`, so the Python side can hand
 //! over numpy arrays without copies.
 
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 
 use rayon::prelude::*;
@@ -427,6 +428,186 @@ impl Segment {
             },
         }
     }
+}
+
+/// Unwinds out of a branch at the first decision it has not answered,
+/// carrying the run there and, at a decision short of a map step, the
+/// decision encoded with its options in words.
+struct Halted(RunState, Option<(RunObs, Vec<String>)>);
+
+/// Answers from a list as `Replay` does, a segment's answers and then a
+/// branch's beyond them, and asks for the reseed right after the branch's
+/// first answer, the option under scrutiny, so that option takes effect
+/// on streams drawn from `sample` alone. Stops the run at the next
+/// decision not answered (`Halted`).
+struct Branch<'a> {
+    answers: &'a [usize],
+    /// Index in `answers` of the option under scrutiny.
+    option: usize,
+    next: usize,
+    /// Until the option's choice takes it.
+    sample: Option<u64>,
+}
+
+impl Chooser for Branch<'_> {
+    fn choose(&mut self, run: &RunState, decision: Decision<'_>) -> usize {
+        if runobs::option_count(decision) <= 1 {
+            return 0;
+        }
+        if let Some(&answer) = self.answers.get(self.next) {
+            self.next += 1;
+            return answer;
+        }
+        let at = (!matches!(decision, Decision::Path(..))).then(|| (runobs::observe(run, decision), runobs::option_names(run, decision)));
+        std::panic::resume_unwind(Box::new(Halted(run.clone(), at)))
+    }
+
+    fn reseed(&mut self) -> Option<u64> {
+        if self.next == self.option + 1 { self.sample.take() } else { None }
+    }
+}
+
+/// Where a branch stopped.
+enum Stop {
+    /// A decision it has not answered: a map step (None), where an
+    /// afterstate settles, or a sub-decision in the same room.
+    Decision(RunState, Option<(RunObs, Vec<String>)>),
+    /// It played through, to a fight or the run's end.
+    Through(RunState, Option<forward::End>),
+}
+
+/// Plays `play` under `chooser`: what it returned, or where it halted.
+/// Panics if the option was answered and nothing took the reseed, which a
+/// chooser wrapper that drops `Chooser::reseed` would cause, and with it a
+/// leak of the run's own draws.
+fn halt<T>(chooser: &mut Branch, play: impl FnOnce(&mut Branch) -> T) -> Result<T, Halted> {
+    let played = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| play(&mut *chooser)));
+    let out = match played {
+        Ok(t) => Ok(t),
+        Err(payload) => match payload.downcast::<Halted>() {
+            Ok(halted) => Err(*halted),
+            Err(other) => std::panic::resume_unwind(other),
+        },
+    };
+    assert!(chooser.next <= chooser.option || chooser.sample.is_none(), "the option's choice did not reseed");
+    out
+}
+
+/// A segment's replay from the run as it stood at its last fight, as a
+/// branch plays it.
+fn play_segment(run: &Run, fought: Option<Fought>, chooser: &mut Branch) -> Stop {
+    let mut run = run.clone();
+    match halt(chooser, |c| run.next(fought, c)) {
+        Ok(Next::Fight(_)) => Stop::Through(run.state, None),
+        Ok(Next::End(end)) => Stop::Through(run.state, Some(end)),
+        Err(Halted(state, at)) => Stop::Decision(state, at),
+    }
+}
+
+/// Caps on an option's afterstate tree (`expand`).
+#[derive(Clone, Copy, Debug)]
+pub struct Caps {
+    /// Sub-decisions opened on the way, at most.
+    pub depth: usize,
+    /// Branches played per option and sample, at most.
+    pub nodes: usize,
+}
+
+/// A leaf of an option's afterstate tree: where the run settled.
+struct Settled {
+    /// The sub-decisions' answers on the way, each an option token and
+    /// its name.
+    path: Vec<(usize, String)>,
+    state: RunState,
+    end: Option<forward::End>,
+    /// Stopped at a sub-decision the caps did not open.
+    capped: bool,
+}
+
+/// The afterstates of answering the decision a run waits at with
+/// `answer` (its index for the decision), everything random reseeded from
+/// `sample` once it is chosen: `prefix` are the segment's answers so far,
+/// and `play` plays a branch of answers (`play_segment`). Stops at the
+/// first map step, fight or end; at a sub-decision in the same room
+/// (which card to smith, an event's next page, a shop after a purchase)
+/// it opens every option, breadth first, while `caps` allow, since
+/// otherwise a smith settles as doing nothing. Returns the leaves and, by
+/// decision kind and cap, how often a sub-decision stayed shut.
+fn expand(caps: Caps, prefix: &[usize], answer: usize, sample: u64, play: impl Fn(&mut Branch) -> Stop) -> (Vec<Settled>, BTreeMap<String, usize>) {
+    let mut queue = std::collections::VecDeque::from([(vec![answer], Vec::new())]);
+    let (mut leaves, mut capped) = (Vec::new(), BTreeMap::new());
+    let mut played = 0;
+    while let Some((branch, path)) = queue.pop_front() {
+        let answers: Vec<usize> = prefix.iter().chain(&branch).copied().collect();
+        let mut chooser = Branch { answers: &answers, option: prefix.len(), next: 0, sample: Some(sample) };
+        played += 1;
+        match play(&mut chooser) {
+            Stop::Through(state, end) => leaves.push(Settled { path, state, end, capped: false }),
+            Stop::Decision(state, None) => leaves.push(Settled { path, state, end: None, capped: false }),
+            Stop::Decision(state, Some((obs, names))) => {
+                let kind = runobs::DECISIONS[obs.ids[0] as usize - 1];
+                let shut = if path.len() >= caps.depth {
+                    Some("depth")
+                } else if played + queue.len() + obs.answers.len() > caps.nodes {
+                    Some("nodes")
+                } else {
+                    None
+                };
+                match shut {
+                    Some(cap) => {
+                        *capped.entry(format!("{kind} {cap}")).or_default() += 1;
+                        leaves.push(Settled { path, state, end: None, capped: true });
+                    }
+                    None => {
+                        for (j, (&a, name)) in obs.answers.iter().zip(names).enumerate() {
+                            let (mut branch, mut path) = (branch.clone(), path.clone());
+                            branch.push(a);
+                            path.push((j, name));
+                            queue.push_back((branch, path));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    (leaves, capped)
+}
+
+/// One leaf of an option's afterstate tree (`VecEnv::afterstates`).
+#[derive(Clone, Debug)]
+pub struct Afterstate {
+    /// Index into the envs asked about.
+    pub row: usize,
+    /// The option token.
+    pub option: usize,
+    pub sample: u64,
+    /// The sub-decisions answered on the way: each an option token and
+    /// its name.
+    pub path: Vec<(usize, String)>,
+    /// The HP fraction where the run settled.
+    pub hp: f32,
+    /// How the run ended, if it did in the option.
+    pub end: Option<forward::End>,
+    /// Settled at a sub-decision the caps did not open.
+    pub capped: bool,
+    /// Index into `Afterstates::fights`.
+    pub fights: usize,
+}
+
+/// Every leaf of every option of the decisions asked about, with the
+/// forecast fights of the states they settled at, each distinct state
+/// once (none for a run that ended).
+#[derive(Debug, Default)]
+pub struct Afterstates {
+    pub leaves: Vec<Afterstate>,
+    pub fights: Vec<Vec<FightSetup>>,
+    /// Sub-decisions the caps kept shut, by decision kind and cap.
+    pub capped: BTreeMap<String, usize>,
+}
+
+/// What the forecast fights read of a settled state.
+fn settled_key(state: &RunState) -> String {
+    format!("{} {} {} {:?} {:?} {:?}", state.act, state.hp, state.max_hp, state.deck, state.relics, state.potions)
 }
 
 /// A slot's run, with the chooser making its run decisions. A slot's
@@ -873,6 +1054,54 @@ impl VecEnv {
                 obs.forecast.as_slice()
             })
             .collect()
+    }
+
+    /// For each of `envs` waiting at a decision short of a map step, every
+    /// option's afterstates under `samples` reseeds (`expand`), in `envs`
+    /// order, then option token, then sample; an env at a map step gives
+    /// none. Computed only when asked, so training pays nothing for it.
+    pub fn afterstates(&self, envs: &[usize], samples: usize, caps: Caps) -> Afterstates {
+        let path = runobs::DECISIONS.iter().position(|&d| d == "Path").expect("the map step") as i64 + 1;
+        let segment = |env: usize| {
+            let slot = self.slots[env].run.as_ref().expect("run mode");
+            match &slot.chooser {
+                Choosing::Caller(segment) if segment.waiting.is_some() => (&slot.run, segment),
+                _ => panic!("env {env}: not at a run decision"),
+            }
+        };
+        let mut jobs = Vec::new();
+        for (row, &env) in envs.iter().enumerate() {
+            let obs = segment(env).1.waiting.as_ref().expect("waiting");
+            if obs.ids[0] != path {
+                jobs.extend((0..obs.answers.len()).flat_map(|option| (0..samples as u64).map(move |sample| (row, option, sample))));
+            }
+        }
+        let expanded: Vec<_> = jobs
+            .into_par_iter()
+            .map(|(row, option, sample)| {
+                let (run, seg) = segment(envs[row]);
+                let answer = seg.waiting.as_ref().expect("waiting").answers[option];
+                let (leaves, capped) = expand(caps, &seg.answers, answer, sample, |c| play_segment(run, seg.fought, c));
+                (row, option, sample, leaves, capped)
+            })
+            .collect();
+        let mut out = Afterstates::default();
+        let mut seen: HashMap<String, usize> = HashMap::new();
+        for (row, option, sample, leaves, capped) in expanded {
+            for (k, n) in capped {
+                *out.capped.entry(k).or_default() += n;
+            }
+            for leaf in leaves {
+                let alive = leaf.end.is_none() && leaf.state.hp > 0;
+                let fights = *seen.entry(settled_key(&leaf.state)).or_insert_with(|| {
+                    out.fights.push(if alive { runobs::forecast_fights(&leaf.state) } else { Vec::new() });
+                    out.fights.len() - 1
+                });
+                let hp = leaf.state.hp.max(0) as f32 / leaf.state.max_hp.max(1) as f32;
+                out.leaves.push(Afterstate { row, option, sample, path: leaf.path, hp, end: leaf.end, capped: leaf.capped, fights });
+            }
+        }
+        out
     }
 
     /// Answer the run decision each of `envs` waits at with its option
@@ -1952,6 +2181,108 @@ pub(crate) mod tests {
             replays_forward(Run::start_at(&run_seed(run.seed), Ascension(10), at, carried), run);
         }
         assert_eq!(began, [1, 2].into(), "runs start at both entrances");
+    }
+
+    /// An afterstate plays what could follow an option, never what the
+    /// run's own draws hold. Two runs alike but for their streams and the
+    /// grab bags' order (the same relics in them) deal different relics to
+    /// Dig at a rest site (the Rewards stream and the bag) and to Trash
+    /// Heap's Dive In (the event's own stream) on their own draws; under a
+    /// reseed their afterstates are one player, forecast the same, and
+    /// move with the sample. Smith opens the deck pick under it, and every
+    /// option of a waiting env gets its leaves, a map step none.
+    #[test]
+    fn the_afterstate_reads_no_hidden_information() {
+        use crate::game_rng::{GameRng, RunRngs};
+        use std::collections::HashSet;
+        let caps = Caps { depth: 3, nodes: 256 };
+        let mut carried = Run::new("SEEDA", Ascension(10)).state.carried();
+        carried.relics.push(crate::run::RunRelic::new("SHOVEL"));
+        (carried.hp, carried.max_hp) = (40, 80);
+        let a = Run::start_at("SEEDA", Ascension(10), StartPoint::BossDoor(0), carried.clone());
+        let mut b = a.clone();
+        b.state.rngs = RunRngs::new("SEEDB");
+        let mut rng = GameRng::named(7, "another order");
+        b.state.plan.player_bag.reshuffle(&mut rng);
+        b.state.plan.shared_bag.reshuffle(&mut rng);
+        assert_ne!(a.state.rngs.seed, b.state.rngs.seed);
+        let contents = |run: &Run| {
+            let mut bag = run.state.plan.player_bag.deques.clone();
+            bag.iter_mut().for_each(|(_, d)| d.sort_by_cached_key(|r| r.game_id()));
+            bag
+        };
+        assert_eq!(contents(&a), contents(&b), "the same relics in the bags");
+        assert_ne!(a.state.plan.player_bag, b.state.plan.player_bag, "in another order");
+
+        let Stop::Decision(_, Some((obs, names))) = play_segment(&a, None, &mut Branch { answers: &[], option: 0, next: 0, sample: None }) else {
+            panic!("a rest site under the boss")
+        };
+        assert_eq!(names, ["Heal", "Smith", "Dig"]);
+        let own = |run: &Run, answer: usize| match play_segment(run, None, &mut Branch { answers: &[answer], option: 1, next: 0, sample: None }) {
+            Stop::Decision(state, None) | Stop::Through(state, None) => state.carried(),
+            _ => panic!("the boss follows the rest site"),
+        };
+        let dig = obs.answers[2];
+        assert_ne!(own(&a, dig), own(&b, dig), "the runs' own draws deal Dig different relics, or the test means nothing");
+        let after = |run: &Run, answer: usize, sample: u64| {
+            let (leaves, capped) = expand(caps, &[], answer, sample, |c| play_segment(run, None, c));
+            assert!(capped.is_empty(), "{capped:?}");
+            leaves
+                .into_iter()
+                .map(|l| (l.path, l.state.carried(), l.end, l.capped, runobs::forecast_rows(&runobs::forecast_fights(&l.state))))
+                .collect::<Vec<_>>()
+        };
+        for (j, name) in names.iter().enumerate() {
+            let (la, lb) = (after(&a, obs.answers[j], 3), after(&b, obs.answers[j], 3));
+            assert!(la == lb, "{name}: the afterstates differ");
+            assert!(la.iter().all(|l| l.2.is_none() && !l.3));
+            match name.as_str() {
+                "Heal" => assert!(la.len() == 1 && la[0].0.is_empty() && la[0].1.hp > 40, "heal settles at the boss"),
+                "Smith" => {
+                    let upgraded = |c: &Carried| c.deck.iter().filter(|c| c.upgraded).count();
+                    assert!(la.len() > 1, "smith opens the deck pick");
+                    assert!(la.iter().all(|l| l.0.len() == 1 && upgraded(&l.1) == upgraded(&carried) + 1), "each leaf upgraded its card");
+                }
+                _ => {
+                    assert!(la.len() == 1 && la[0].1.relics.len() == carried.relics.len() + 1);
+                    let dealt: HashSet<String> = (3..9).map(|s| after(&a, dig, s)[0].1.relics.last().expect("a relic").id.clone()).collect();
+                    assert!(dealt.len() > 1, "the sample deals the relic: {dealt:?}");
+                }
+            }
+        }
+
+        let dealt = |state: &RunState, answer: usize, sample: Option<u64>| {
+            let mut run = state.clone();
+            let mut chooser = Branch { answers: &[answer], option: sample.is_none() as usize, next: 0, sample };
+            assert!(halt(&mut chooser, |c| run.event("TrashHeap", c, &mut Vec::new())).is_ok(), "the page settles the event");
+            run.carried()
+        };
+        for answer in [0, 1] {
+            assert_ne!(dealt(&a.state, answer, None), dealt(&b.state, answer, None), "Trash Heap {answer}: the runs' own streams deal differently, or the test means nothing");
+            assert_eq!(dealt(&a.state, answer, Some(3)), dealt(&b.state, answer, Some(3)), "Trash Heap {answer}");
+            let samples: HashSet<String> = (3..9).map(|s| format!("{:?}", dealt(&a.state, answer, Some(s)))).collect();
+            assert!(samples.len() > 1, "Trash Heap {answer}: the sample deals it");
+        }
+
+        let n = 8;
+        let mut env = VecEnv::new(n, 5, EnvConfig::default());
+        env.set_runs(Ascension(10), 300, RunChoices::Caller);
+        let (mut floats, mut ids, mut mask) = (vec![0.0; n * N_FLOATS], vec![0; n * N_IDS], vec![false; n * N_ACTIONS]);
+        env.observe(&mut floats, &mut ids, &mut mask);
+        let waiting = env.run_waiting();
+        let options: Vec<usize> = waiting.iter().map(|&i| env.slots[i].run.as_ref().and_then(RunSlot::waiting).expect("waiting").answers.len()).collect();
+        assert!(waiting.len() == n && options.iter().all(|&o| o > 1), "every run waits at its first ancient");
+        let after = env.afterstates(&waiting, 2, caps);
+        let covered: HashSet<(usize, usize, u64)> = after.leaves.iter().map(|l| (l.row, l.option, l.sample)).collect();
+        assert_eq!(covered.len(), options.iter().sum::<usize>() * 2, "every option, every sample");
+        assert!(after.leaves.iter().all(|l| l.fights < after.fights.len() && (l.end.is_some() || !after.fights[l.fights].is_empty())));
+        let zeros = vec![0; n];
+        env.step_run(&waiting, &zeros.iter().map(|&z| z as i64).collect::<Vec<_>>(), &mut floats, &mut ids, &mut mask);
+        let waiting = env.run_waiting();
+        let at_path = |i: &usize| env.slots[*i].run.as_ref().and_then(RunSlot::waiting).is_some_and(|o| o.ids[0] == 1);
+        let path: Vec<usize> = waiting.iter().copied().filter(at_path).collect();
+        assert!(!path.is_empty(), "a map step follows the ancient's relic");
+        assert!(env.afterstates(&path, 2, caps).leaves.is_empty(), "a map step is the policy's");
     }
 
     #[test]

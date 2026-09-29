@@ -550,6 +550,50 @@ fn options(run: &RunState, decision: Decision<'_>) -> (usize, Vec<Opt>) {
     (DECISIONS.iter().position(|&d| d == kind).expect("a decision kind") + 1, opts)
 }
 
+/// Each option of `decision` in words, aligned with its option tokens
+/// (`options`, cut as `observe` cuts them): what an afterstate's path
+/// reads as.
+pub fn option_names(run: &RunState, decision: Decision<'_>) -> Vec<String> {
+    let offer = |o: &Offer| format!("{}{}", o.id, if o.upgraded { "+" } else { "" });
+    let mut names: Vec<String> = match decision {
+        Decision::Path(map, points) => points.iter().map(|&p| format!("{:?}", map[p].kind)).collect(),
+        Decision::Relic(relics) => relics.iter().cloned().chain(["leave".into()]).collect(),
+        Decision::Card(cards) => cards.iter().map(offer).chain(["skip".into()]).collect(),
+        Decision::Bundle(bundles) => bundles.iter().map(|b| b.iter().map(offer).collect::<Vec<_>>().join("+")).chain(["skip".into()]).collect(),
+        Decision::Potion(potion) => vec![format!("keep {potion}"), format!("leave {potion}")],
+        Decision::Rest(options) => options.iter().map(|o| format!("{o:?}")).collect(),
+        Decision::Ancient(relics) => relics.to_vec(),
+        Decision::Deck { action, cards, optional } => cards
+            .iter()
+            .map(|&c| format!("{action:?} {}{}", run.deck[c].id, if run.deck[c].upgraded { "+" } else { "" }))
+            .chain(optional.then(|| "stop".into()))
+            .collect(),
+        Decision::Shop(wares) => wares
+            .iter()
+            .map(|w| match &w.item {
+                Item::Card(c) => format!("{} {}g", offer(c), w.price),
+                Item::Relic(r) => format!("{r} {}g", w.price),
+                Item::Potion(p) => format!("{p} {}g", w.price),
+                Item::Removal => format!("removal {}g", w.price),
+            })
+            .chain(["leave".into()])
+            .collect(),
+        Decision::Event { options, .. } => options.iter().map(|o| [format!("{}.{}", o.page, o.key)].into_iter().chain(o.items.iter().cloned()).collect::<Vec<_>>().join(" ")).collect(),
+    };
+    cut_options(&mut names);
+    names
+}
+
+/// Cuts a decision's options to `MAX_OPTIONS`, keeping the last: a skip
+/// is the one way out of some decisions.
+fn cut_options<T>(options: &mut Vec<T>) {
+    if options.len() > MAX_OPTIONS {
+        let last = options.pop().expect("options");
+        options.truncate(MAX_OPTIONS - 1);
+        options.push(last);
+    }
+}
+
 /// How many option tokens `decision` has, before `MAX_OPTIONS` cuts it.
 pub fn option_count(decision: Decision<'_>) -> usize {
     match decision {
@@ -629,14 +673,8 @@ pub fn observe(run: &RunState, decision: Decision<'_>) -> RunObs {
         f[F_POTIONS + k * POTION_FLOATS] = 1.0;
     }
 
-    // A skip is kept when the list is cut short: it is the one way out of
-    // some decisions.
     let mut opts = opts;
-    if opts.len() > MAX_OPTIONS {
-        let last = opts.pop().expect("options");
-        opts.truncate(MAX_OPTIONS - 1);
-        opts.push(last);
-    }
+    cut_options(&mut opts);
     let answers = opts.iter().map(|o| o.answer).collect();
     for (k, o) in opts.iter().enumerate() {
         let (i, x) = (I_OPTIONS + k * OPTION_IDS, F_OPTIONS + k * OPTION_FLOATS);
