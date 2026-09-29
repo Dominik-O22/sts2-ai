@@ -69,11 +69,16 @@ def _best(items: list[tuple[tuple[int, ...], float, list[str]]]) -> tuple[float,
 
 class Scorer:
     """Scores and makes run decisions from their afterstates, and counts
-    where its picks differ from the policy's and what the caps shut."""
+    where its picks differ from the policy's and what the caps shut.
+    With `kinds` only decisions of those kinds (`DECISIONS` names) are
+    made by afterstate; the others keep the policy's pick."""
 
-    def __init__(self, envs: Envs, forecaster: Forecaster, samples: int, depth: int = 3, nodes: int = 256):
+    def __init__(
+        self, envs: Envs, forecaster: Forecaster, samples: int, depth: int = 3, nodes: int = 256, kinds: frozenset[str] = frozenset()
+    ):
         assert forecaster.calibration is not None, "afterstates need a calibration"
         self.envs, self.forecaster, self.samples, self.depth, self.nodes = envs, forecaster, samples, depth, nodes
+        self.kinds = kinds
         self.L = forecaster.L
         self.decisions: Counter[str] = Counter()
         self.differs: Counter[str] = Counter()
@@ -126,10 +131,12 @@ class Scorer:
         scored = self.score(waiting)
         options = policy.copy()
         for k in np.flatnonzero(np.isfinite(scored.score).any(1)):
+            kind = DECISIONS[ids[k, 0]]
+            if self.kinds and kind not in self.kinds:
+                continue
             best = np.nanmax(scored.score[k])
             tied = np.flatnonzero(scored.score[k] == best)
             options[k] = policy[k] if policy[k] in tied else tied[0]
-            kind = DECISIONS[ids[k, 0]]
             self.decisions[kind] += 1
             self.differs[kind] += options[k] != policy[k]
         return options, scored
