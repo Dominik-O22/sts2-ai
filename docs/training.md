@@ -41,7 +41,12 @@ maturin from `sim-py/` into the package `sts2ai._sim`.
   piles are count vectors over (card, upgraded). Enemies sit in the
   game's slot order but nothing reads the order: each slot has its
   creature fields, a one-hot over intent kinds (a vocabulary, so act 2
-  kinds append), the intent numbers, and powers. Actions: 10 hand slots x
+  kinds append), the intent numbers, and powers. An attack's numbers are
+  the ones the game's intent shows (the move's damage through
+  `Hook.ModifyDamage` against the player, so the enemy's Strength and the
+  player's Vulnerable are in it; before gen6 they were the move's base),
+  and the global scalars add the turn's incoming attack damage and what
+  of it gets past the block. Actions: 10 hand slots x
   7 targets, 4 potion slots x 7 targets, end turn, 20 choice slots, skip.
   Target 0 is "no target", then the six enemy slots, so a bigger board
   appends targets. `mask` marks the legal ones and `decode` maps an index
@@ -67,17 +72,23 @@ maturin from `sim-py/` into the package `sts2ai._sim`.
   held-out set: ten generated fights per encounter from a fixed seed
   (`gen::holdout`), or on run recordings (Real decks, below).
 - Reward (`env.rs`): the terminal reward is a win at `1 + w * hp_frac +
-  0.1 * potions_left`, a loss or a 500-step timeout at `-1 + 0.2 *
+  1.0 * max_hp_change + 0.1 * potions_left`, both fractions of the max HP
+  the fight began with, a loss or a 500-step timeout at `-1 + 0.2 *
   enemy_hp_taken` (capped at -0.8). Under a flat -1 every line of a lost
   fight paid the same, so the policy folded once its value read a fight as
   lost, and search tied every option there. `w` is 0.5,
   except after an act boss, where the next act's Ancient heals 80% of the
-  missing HP at A10 and only the other 20% counts (0.1). A potion at 0.1 is
-  about 16 HP. On top of it, potential-based shaping: each step pays the
-  change in half the enemy HP lost (a running count over the fight, as a
-  fraction of what the enemies started with) minus `w` times the player HP
-  fraction lost, plus 0.1 per potion gained (a drink counts as one lost),
-  measured from the fight's own start. Before the potion term a drink cost
+  missing HP at A10 and only the other 20% counts (0.1). Max HP counts at
+  twice HP, since every later heal restores it, and even after an act
+  boss. Against the current max, as before gen6, Paper Cuts raised the HP
+  fraction and the reward paid for each hit it landed. A potion at 0.1 is
+  about 16 HP; the run value head prices it nearer 4
+  (`runs/scratch-keep/runvalueprobe.py`), not yet tried. On top
+  of it, potential-based shaping: each step pays the change in half the
+  enemy HP lost (a running count over the fight, as a fraction of what the
+  enemies started with) minus `w` times the player HP fraction lost, plus
+  the max HP and potions gained at their prices (a drink counts as one
+  lost), measured from the fight's own start. Before the potion term a drink cost
   nothing until the fight ended, and the policy drank combat potions in
   weak fights it lost 5% HP in; with it, over 600 iterations from set-11,
   potions per fight fell by a third everywhere (weak 0.18 to 0.12, act 3
