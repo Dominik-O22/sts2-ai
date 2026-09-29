@@ -300,6 +300,18 @@ impl RunState {
         (self.gold, self.hp, self.max_hp, self.deck, self.relics, self.potions) = (gold, hp, max_hp, deck, relics, potions);
         (self.card_odds, self.potion_odds, self.shop_removals, self.events_seen) = (card_odds, potion_odds, shop_removals, events_seen);
     }
+
+    /// Everything random from here on drawn from `sample` alone: fresh
+    /// streams, and each grab bag's relics, kept, reshuffled from a
+    /// canonical order. An afterstate (`Chooser::reseed`) then plays what
+    /// could happen, never what the run's seed would deal (docs/run-env.md,
+    /// Hidden information).
+    pub fn reseed(&mut self, sample: u64) {
+        self.rngs = RunRngs::new(&format!("AFTERSTATE{sample}"));
+        let mut rng = GameRng::named(self.rngs.seed, "grab_bags");
+        self.plan.shared_bag.reshuffle(&mut rng);
+        self.plan.player_bag.reshuffle(&mut rng);
+    }
 }
 
 impl RunState {

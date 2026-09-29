@@ -200,9 +200,17 @@ pub fn ported() -> impl Iterator<Item = &'static str> {
 struct Ev<'a> {
     name: &'static str,
     rng: GameRng,
+    /// The run's seed `rng` was derived from; a reseed moves it (`follow`).
+    seed: u32,
     pages: Vec<Vec<EventOption>>,
     chooser: &'a mut dyn Chooser,
     log: &'a mut Vec<Offered>,
+}
+
+/// The event's own stream: seeded from the run's seed and the hash of its
+/// id, as the ancients' is.
+fn event_rng(seed: u32, name: &str) -> GameRng {
+    GameRng::new(seed.wrapping_add(hash(&slug(name)) as u32))
 }
 
 impl Ev<'_> {
@@ -216,7 +224,7 @@ impl Ev<'_> {
         }
         let open: Vec<usize> = (0..options.len()).filter(|&i| !options[i].locked).collect();
         let shown: Vec<EventOption> = open.iter().map(|&i| options[i].clone()).collect();
-        let i = self.chooser.choose(run, Decision::Event { event: self.name, options: &shown });
+        let i = self.choose(run, Decision::Event { event: self.name, options: &shown });
         self.pages.push(options);
         open[i.min(open.len() - 1)]
     }
@@ -227,8 +235,24 @@ impl Ev<'_> {
         self.pages.last().expect("a page")[i].key
     }
 
+    /// Every choice an event puts goes through here or `settle`, so a
+    /// reseed (`RunState::ask`) reaches the event's own stream too.
+    fn choose(&mut self, run: &mut RunState, decision: Decision<'_>) -> usize {
+        let i = run.ask(&mut self.chooser, decision);
+        self.follow(run);
+        i
+    }
+
+    fn follow(&mut self, run: &RunState) {
+        if run.rngs.seed != self.seed {
+            self.seed = run.rngs.seed;
+            self.rng = event_rng(self.seed, self.name);
+        }
+    }
+
     fn settle(&mut self, run: &mut RunState, offered: Vec<Offered>) {
         run.settle(offered, &mut self.chooser, self.log);
+        self.follow(run);
     }
 
     /// `RelicCmd.Obtain` of a given relic, its pickup and all.
@@ -246,11 +270,11 @@ impl Ev<'_> {
     /// Cards picked out of `cards` (deck indices, in the order the screen
     /// shows them) for `action`, one at a time, at least `min` of them
     /// while any are left and at most `max`. Returns them, not acted on.
-    fn pick(&mut self, run: &RunState, action: DeckAction, mut cards: Vec<usize>, min: usize, max: usize) -> Vec<usize> {
+    fn pick(&mut self, run: &mut RunState, action: DeckAction, mut cards: Vec<usize>, min: usize, max: usize) -> Vec<usize> {
         let mut chosen = Vec::new();
         while chosen.len() < max && !cards.is_empty() {
             let optional = chosen.len() >= min;
-            let i = self.chooser.choose(run, Decision::Deck { action, cards: &cards, optional });
+            let i = self.choose(run, Decision::Deck { action, cards: &cards, optional });
             if i >= cards.len() {
                 break;
             }
@@ -263,7 +287,8 @@ impl Ev<'_> {
     /// `CardCmd.Enchant` with `amount`.
     fn enchant(&mut self, run: &mut RunState, id: &'static str, amount: i32, count: usize) {
         let action = DeckAction::Enchant(id, amount);
-        let chosen = self.pick(run, action, run.pickable(action), count, count);
+        let cards = run.pickable(action);
+        let chosen = self.pick(run, action, cards, count, count);
         run.apply_pick(action, &chosen);
     }
 
@@ -298,7 +323,7 @@ impl Ev<'_> {
     fn grid(&mut self, run: &mut RunState, mut cards: Vec<Offer>, count: usize) {
         self.log.push(Offered::Cards(cards.clone()));
         for _ in 0..count.min(cards.len()) {
-            let i = self.chooser.choose(run, Decision::Card(&cards));
+            let i = self.choose(run, Decision::Card(&cards));
             let card = cards.remove(if i < cards.len() { i } else { 0 });
             run.add_card(DeckCard::from(card));
         }
@@ -345,8 +370,8 @@ impl RunState {
             self.relics_entered(Room::Event(name), true);
             return None;
         };
-        let rng = GameRng::new(self.rngs.seed.wrapping_add(hash(&slug(name)) as u32));
-        let mut ev = Ev { name, rng, pages: Vec::new(), chooser, log };
+        let seed = self.rngs.seed;
+        let mut ev = Ev { name, rng: event_rng(seed, name), seed, pages: Vec::new(), chooser, log };
         let fight = play(self, &mut ev);
         Some(Visit { pages: ev.pages, fight, draws: ev.rng.counter })
     }
@@ -1120,7 +1145,7 @@ fn fake_merchant(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> {
         let wares: Vec<Ware> = (0..shelf.len())
             .filter_map(|i| shelf[i].filter(|&(_, price)| price <= run.gold).map(|(r, price)| Ware { slot: Slot::Relic(i), item: Item::Relic(r.into()), price }))
             .collect();
-        let Some(ware) = wares.get(ev.chooser.choose(run, Decision::Shop(&wares))).cloned() else { return None };
+        let Some(ware) = wares.get(ev.choose(run, Decision::Shop(&wares))).cloned() else { return None };
         let Slot::Relic(i) = ware.slot else { unreachable!("only relics on the shelf") };
         let (relic, price) = shelf[i].take().expect("a stocked relic");
         run.lose_gold(price);

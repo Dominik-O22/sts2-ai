@@ -106,6 +106,10 @@ impl<C: Chooser> Chooser for Playable<'_, C> {
             other => self.0.choose(run, other),
         }
     }
+
+    fn reseed(&mut self) -> Option<u64> {
+        self.0.reseed()
+    }
 }
 
 /// How a run ended.
@@ -302,7 +306,7 @@ impl Run {
             return true;
         }
         let options = path_options(&self.map, self.point, &self.state);
-        let i = chooser.choose(&self.state, Decision::Path(&self.map, &options));
+        let i = self.state.ask(chooser, Decision::Path(&self.map, &options));
         let next = options[i.min(options.len() - 1)];
         if !self.map[self.point].children.contains(next) {
             self.state.relic_mut("WINGED_BOOTS").expect("Winged Boots").counter += 1;
