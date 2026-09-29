@@ -39,12 +39,17 @@ another option is open: the forecast as a rule, whatever the policy.
 `--event-table ROWS` makes every event choice from a table instead of the
 policy: of the options offered, the one winners took most often when it
 was offered to them (`EventTable`), from imitation rows.
+
+`--runs-out FILE` writes each counted run as a JSON line (seed, end, act,
+floor, deck) and the command line as the first, for `sts2ai.paired` to
+compare two arms run on the same seeds.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import sys
 import time
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -388,6 +393,7 @@ def main() -> None:
     ap.add_argument("--forecast", type=Path, default=None, help="forecast calibration for a run policy that has none")
     ap.add_argument("--elite-gate", type=float, default=0.0, help="pass up elites whose forecast win chance is under this")
     ap.add_argument("--event-table", type=Path, default=None, help="imitation rows (.npz); event choices take winners' most picked option")
+    ap.add_argument("--runs-out", type=Path, default=None, help="write each counted run here as a JSON line, for sts2ai.paired")
     args = ap.parse_args()
     # Ids the combat checkpoint never saw get fresh rows (`vocab.remap_state`),
     # drawn from here: unseeded, two plays of one seed differ.
@@ -436,7 +442,13 @@ def main() -> None:
         fights_out.close()
     if forecast_log is not None:
         forecast_log.close()
-    report(fights, runs, args.seed, args.seed + args.runs_per_env * args.envs, loop, args.envs, seconds)
+    last = args.seed + args.runs_per_env * args.envs
+    report(fights, runs, args.seed, last, loop, args.envs, seconds)
+    if args.runs_out:
+        with args.runs_out.open("w") as out:
+            out.write(json.dumps({"argv": sys.argv}) + "\n")
+            for r in sorted((r for r in runs if r.seed < last), key=lambda r: r.seed):
+                out.write(json.dumps({"seed": r.seed, "end": r.end, "act": r.act, "floor": r.floor, "deck": r.deck}) + "\n")
     if picks:
         picks.report()
     if event_table:
