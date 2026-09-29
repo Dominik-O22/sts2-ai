@@ -1206,19 +1206,19 @@ impl VecEnv {
         }
 
         let fights: Vec<Vec<FightSetup>> = states.par_iter().map(runobs::forecast_fights).collect();
-        let all: Vec<FightSetup> = fights.iter().flatten().cloned().collect();
-        let (floats, ids) = runobs::forecast_rows(&all);
         let mut rows = vec![0];
         rows.extend(fights.iter().scan(0, |n, f| {
             *n += f.len();
             Some(*n)
         }));
+        let fights: Vec<FightSetup> = fights.into_iter().flatten().collect();
+        let (floats, ids) = runobs::forecast_rows(&fights);
         let pending = Pending {
             names,
             trees,
             hp: states.iter().map(|s| s.hp.max(0) as f32 / s.max_hp.max(1) as f32).collect(),
             rows,
-            boss: all.iter().map(|f| f.encounter.kind() == Kind::Boss).collect(),
+            boss: fights.iter().map(|f| f.encounter.kind() == Kind::Boss).collect(),
             capped,
             scores: None,
         };
