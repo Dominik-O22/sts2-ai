@@ -91,6 +91,12 @@ class RunLayout:
     option_cards: int
     global_ids: int
     global_floats: int
+    # The forecast's slots in the global token (`sts2ai.forecast`), and the
+    # openings rolled per encounter.
+    f_forecast: int
+    forecast_floats: int
+    forecast_rolls: int
+    map_feats: int
     deck_ids: int
     deck_floats: int
     relic_ids: int
@@ -256,6 +262,13 @@ class Envs:
         rows of `run_floats` and `run_ids`."""
         self.sim.observe_run(envs, self.run_floats, self.run_ids)
         return self.run_floats[: len(envs)], self.run_ids[: len(envs)]
+
+    def forecast(self, envs: list[int]):
+        """The forecast fights of the decisions `envs` wait at
+        (`sts2ai.forecast.Fights`), their rows indexing `envs`."""
+        from sts2ai.forecast import Fights
+
+        return Fights.of(self.sim.forecast(envs), self.layout.n_floats, self.layout.n_ids)
 
     def step_run(self, envs: list[int], options: np.ndarray) -> list[tuple[int, RunFight]]:
         """Answer each env's decision with an option token and play on;

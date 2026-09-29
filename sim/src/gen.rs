@@ -54,7 +54,7 @@ pub fn act_floor(floor: u32) -> (u32, u32) {
 }
 
 /// An owned `Setup`: everything a combat needs from the run.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct FightSetup {
     pub deck: Vec<Card>,
     pub hp: i32,

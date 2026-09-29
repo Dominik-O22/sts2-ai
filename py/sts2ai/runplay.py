@@ -27,6 +27,18 @@ With `--win-starts SHARE` that share of the runs starts at the entrance
 of act 2 or 3 with a winner's player there (`runtrain --win-starts`), the
 train players' or with `--win-holdout` the held-out players', and the
 report adds a line per start point.
+
+A run policy trained with the forecast (`sts2ai.forecast`) keeps its
+calibration, and its map steps get the forecast filled in (`--forecast
+CAL` gives one to a policy without). With `--forecast-log FILE` every map
+step into an elite writes what the forecast read for that elite and how
+the fight went, for `forecast calibrate`. `--elite-gate P` passes up an
+elite at a map step whose elites' forecast win chance is under P, when
+another option is open: the forecast as a rule, whatever the policy.
+
+`--event-table ROWS` makes every event choice from a table instead of the
+policy: of the options offered, the one winners took most often when it
+was offered to them (`EventTable`), from imitation rows.
 """
 
 from __future__ import annotations
@@ -43,6 +55,8 @@ import torch
 
 from sts2ai import _sim
 from sts2ai.env import START_POINTS, End, Envs, RunFight, RunLayout
+from sts2ai.forecast import Calibration, Forecaster
+from sts2ai.imitation import Rows
 from sts2ai.model import Policy, load_policy
 from sts2ai.runmodel import RunPolicy, load_run_policy
 from sts2ai.runtrain import RunLoop
@@ -124,6 +138,46 @@ class Picks:
         )
 
 
+class EventTable:
+    """Winners' pick rate for each event option, keyed by (event id, option
+    key), from imitation rows. `choose` overrides the event decisions of a
+    batch with the offered option of the highest rate; options offered to
+    winners fewer than `min_offered` times never win, and an event with
+    none known keeps the policy's pick."""
+
+    def __init__(self, rows: Rows, layout: RunLayout, min_offered: int = 5):
+        self.L = L = layout
+        self.event = NAMES["decision"].index("Event")
+        offered: Counter[tuple[int, int]] = Counter()
+        picked: Counter[tuple[int, int]] = Counter()
+        for k in np.flatnonzero(rows.kind == self.event):
+            for j in self.offered(rows.floats[k]):
+                key = self.key(rows.ids[k], j)
+                offered[key] += 1
+                picked[key] += j == rows.option[k]
+        self.rate = {key: picked[key] / n for key, n in offered.items() if n >= min_offered}
+        self.decisions = self.changed = 0
+
+    def offered(self, floats: np.ndarray) -> list[int]:
+        L = self.L
+        return [j for j in range(L.max_options) if floats[L.f_options + j * L.option_floats]]
+
+    def key(self, ids: np.ndarray, j: int) -> tuple[int, int]:
+        L = self.L
+        return int(ids[5]), int(ids[L.i_options + j * L.option_ids + 5 + L.option_cards])
+
+    def choose(self, floats: np.ndarray, ids: np.ndarray, options: np.ndarray) -> np.ndarray:
+        options = options.copy()
+        for k in np.flatnonzero(ids[:, 0] == self.event):
+            rated = [(self.rate[key], j) for j in self.offered(floats[k]) if (key := self.key(ids[k], j)) in self.rate]
+            self.decisions += 1
+            if rated:
+                best = max(rated)[1]
+                self.changed += best != options[k]
+                options[k] = best
+        return options
+
+
 def as_setup(start: dict) -> dict:
     """A run fight's start record (`log_fights`) as a setup line, its
     floor in the generator's numbering and the last act's second boss
@@ -161,6 +215,10 @@ def play(
     win_runs: Path = TRACKER,
     win_holdout: bool = False,
     hybrid: tuple[int, int, int] | None = None,
+    forecast: Forecaster | None = None,
+    forecast_log: TextIO | None = None,
+    elite_gate: float = 0.0,
+    event_table: EventTable | None = None,
 ) -> tuple[list[End], list[RunFight], RunLoop, float]:
     """Plays until each env has finished `per_env` runs or `minutes` pass.
     Returns every fight that ended, every run that ended, the loop (its
@@ -172,7 +230,10 @@ def play(
     `late_from_act` on (1-based) and `run_policy` the ones before.
     `win_starts` of the runs start with winners' players (`Envs.use_winner_starts`),
     the held-out players' with `win_holdout`. `hybrid` (top lines,
-    playouts, race size or 0) searches with `exactsearch.Hybrid`."""
+    playouts, race size or 0) searches with `exactsearch.Hybrid`. With
+    `forecast`, map steps get the forecast (`RunLoop`); with
+    `forecast_log` too, each map step into an elite is written there with
+    the fight's outcome."""
     if win_starts > 0:
         held = envs.use_winner_starts(split_runs(win_runs, win_holdout), win_starts)
         print("winners' starts: " + ", ".join(f"{n} at {p}" for p, n in zip(START_POINTS, held) if n))
@@ -180,13 +241,16 @@ def play(
     left = set(range(seed, seed + per_env * envs.n))
     fights: list[End] = []
     runs: list[RunFight] = []
+    L = RunLayout.load()
+    # What the forecast read at each env's step into an elite, by encounter.
+    pending: dict[int, dict[str, tuple[float, float, float]]] = {}
 
     def ended(_: int, run: RunFight) -> None:
         runs.append(run)
         left.discard(run.seed)
 
     @torch.no_grad()
-    def decide(_: list[int], floats: np.ndarray, ids: np.ndarray) -> np.ndarray:
+    def decide(waiting: list[int], floats: np.ndarray, ids: np.ndarray) -> np.ndarray:
         f, i = torch.from_numpy(floats).to(device), torch.from_numpy(ids).to(device)
         logits, _ = run_policy(f, i)
         if late_policy is not None:
@@ -195,16 +259,47 @@ def play(
             late = i[:, 2] >= late_from_act + 1
             if late.any():
                 logits[late] = late_policy(f[late], i[late])[0]
+        if elite_gate > 0:
+            room = i[:, L.i_options + 4 + L.option_cards : L.i_options + L.max_options * L.option_ids : L.option_ids]
+            elite = (room == NAMES["room"].index("Elite")) & (i[:, :1] == NAMES["decision"].index("Path"))
+            unsure = f[:, L.f_forecast] < elite_gate
+            gate = elite & unsure[:, None] & (logits[:, : L.max_options] > -1e8).logical_and(~elite).any(1, keepdim=True)
+            logits = logits.masked_fill(gate, -1e9)
         options = logits.argmax(1).cpu().numpy()
+        if event_table is not None:
+            options = event_table.choose(floats, ids, options)
+        if forecast_log is not None and loop.read is not None:
+            read = loop.read
+            for k, env in enumerate(waiting):
+                i = L.i_options + options[k] * L.option_ids
+                if NAMES["option"][ids[k, i]] == "Path" and NAMES["room"][ids[k, i + 4 + L.option_cards]] == "Elite":
+                    here = read.row == k
+                    pending[env] = {e: (float(v), float(h), float(w)) for e, v, h, w, m in zip(read.encounter, read.value, read.hp, read.win, here) if m}
         if picks:
             picks.add(floats, ids, torch.softmax(logits, 1).cpu().numpy(), options)
         return options
 
-    loop = RunLoop(combat, device, envs, drain, search, search_kinds, groups, seed, hybrid)
+    loop = RunLoop(combat, device, envs, drain, search, search_kinds, groups, seed, hybrid, forecast)
     start = time.perf_counter()
     envs.sim.log_fights(fights_out is not None)
     while left and time.perf_counter() - start < minutes * 60:
-        fights += loop.step(decide, ended)
+        ended_now = loop.step(decide, ended)
+        fights += ended_now
+        for e in ended_now:
+            at = pending.pop(e.env, None)
+            if forecast_log is not None and at and e.kind == "Elite" and e.encounter in at and e.run and e.run.seed < seed + per_env * envs.n:
+                value, hp, win = at[e.encounter]
+                record = {
+                    "act": e.run.act,
+                    "encounter": e.encounter,
+                    "value": value,
+                    "hp": hp,
+                    "win": win,
+                    "pool_win": float(np.mean([v[2] for name, v in at.items() if name.endswith("Elite")])),
+                    "won": e.won,
+                    "kept": e.hp_frac,
+                }
+                forecast_log.write(json.dumps(record) + "\n")
         if fights_out is not None:
             for record in envs.sim.take_fights():
                 fights_out.write(json.dumps(as_setup(json.loads(record))) + "\n")
@@ -289,16 +384,28 @@ def main() -> None:
     ap.add_argument("--win-starts", type=float, default=0.0, help="share of runs started from winners' act 2 and 3 entrances")
     ap.add_argument("--win-runs", type=Path, default=TRACKER, help="winners' history files; the train players' are used")
     ap.add_argument("--win-holdout", action="store_true", help="start with the held-out players' winners instead")
+    ap.add_argument("--forecast-log", type=Path, default=None, help="write each map step into an elite with its forecast and outcome here")
+    ap.add_argument("--forecast", type=Path, default=None, help="forecast calibration for a run policy that has none")
+    ap.add_argument("--elite-gate", type=float, default=0.0, help="pass up elites whose forecast win chance is under this")
+    ap.add_argument("--event-table", type=Path, default=None, help="imitation rows (.npz); event choices take winners' most picked option")
     args = ap.parse_args()
     # Ids the combat checkpoint never saw get fresh rows (`vocab.remap_state`),
     # drawn from here: unseeded, two plays of one seed differ.
     torch.manual_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     combat = load_policy(args.checkpoint, device, args.old_vocab).eval()
-    run_policy = load_run_policy(args.run_policy, device)[0].eval() if args.run_policy else None
+    run_policy, run_ck = load_run_policy(args.run_policy, device) if args.run_policy else (None, {})
+    if run_policy is not None:
+        run_policy.eval()
+    calibration = Calibration.load(args.forecast) if args.forecast else Calibration(**run_ck["forecast"]) if run_ck.get("forecast") else None
+    if args.elite_gate > 0 and calibration is None:
+        ap.error("--elite-gate needs the forecast: a run policy trained with it, or --forecast")
+    forecast = Forecaster(combat, device, calibration) if calibration or args.forecast_log else None
+    forecast_log = args.forecast_log.open("w") if args.forecast_log else None
     envs = Envs(args.envs, seed=args.seed)
     picks = Picks(RunLayout.load(), args.show) if run_policy else None
     fights_out = args.fights_out.open("w") if args.fights_out else None
+    event_table = EventTable(Rows.load(args.event_table), RunLayout.load()) if args.event_table else None
     fights, runs, loop, seconds = play(
         combat,
         device,
@@ -320,12 +427,20 @@ def main() -> None:
         args.win_runs,
         args.win_holdout,
         None if args.search_mode == "copies" else (args.top, args.playouts, args.race if args.search_mode == "race" else 0),
+        forecast,
+        forecast_log,
+        args.elite_gate,
+        event_table,
     )
     if fights_out is not None:
         fights_out.close()
+    if forecast_log is not None:
+        forecast_log.close()
     report(fights, runs, args.seed, args.seed + args.runs_per_env * args.envs, loop, args.envs, seconds)
     if picks:
         picks.report()
+    if event_table:
+        print(f"event table: {event_table.changed} of {event_table.decisions} event decisions differ from the policy's pick")
 
 
 if __name__ == "__main__":
