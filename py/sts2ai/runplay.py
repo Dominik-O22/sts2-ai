@@ -79,6 +79,8 @@ from sts2ai.runtrain import RunLoop
 from sts2ai.setups import TRACKER, sim_floor, split_runs
 
 NAMES = _sim.run_names()
+# Seconds between progress lines, the first after as long.
+NOTE_SECONDS = 300
 CARDS = ["-"] + _sim.game_ids()["card"]
 POTIONS = ["-"] + _sim.game_ids()["potion"]
 
@@ -333,8 +335,7 @@ def play(
 
     loop = RunLoop(combat, device, envs, drain, search, search_kinds, groups, seed, hybrid, forecast)
     start = time.perf_counter()
-    # A progress line every five minutes, the first after five.
-    next_note = start + 300
+    next_note = start + NOTE_SECONDS
     envs.sim.log_fights(fights_out is not None)
     while left and time.perf_counter() - start < minutes * 60:
         ended_now = loop.step(decide, ended)
@@ -358,10 +359,11 @@ def play(
             for record in envs.sim.take_fights():
                 fights_out.write(json.dumps(as_setup(json.loads(record))) + "\n")
         if (now := time.perf_counter()) >= next_note:
-            next_note = now + 300
-            done, total = per_env * envs.n - len(left), per_env * envs.n
-            eta = (now - start) / max(done, 1) * (total - done)
-            print(f"{(now - start) / 60:.0f} min: {done} of {total} runs finished, about {eta / 60:.0f} min to go", flush=True)
+            next_note = now + NOTE_SECONDS
+            total = per_env * envs.n
+            finished = total - len(left)
+            eta = (now - start) / max(finished, 1) * (total - finished)
+            print(f"{(now - start) / 60:.0f} min: {finished} of {total} runs finished, about {eta / 60:.0f} min to go", flush=True)
     return fights, runs, loop, time.perf_counter() - start
 
 
