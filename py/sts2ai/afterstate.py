@@ -7,21 +7,21 @@ The sim expands each option of the decisions a batch waits at
 with the option, everything random reseeded from a sample index the
 moment the option is chosen, settled at the first map step, fight or end,
 with sub-decisions in the same room (which card to smith, an event's next
-page, a shop after a purchase) opened under caps. Each leaf carries an
-index into the settled states' forecast fights, which the combat value
-head reads in one batch (`Forecaster.read`), and a calibration turns into
-a win chance. A leaf's score is the act's elites' mean win chance plus
-the boss's (1 for a run won in the option, 0 for one that died or is
-stuck), a sub-decision takes its best option, a random outcome is the
-mean over its samples, and the decision takes the best option, the
-policy's pick on a tie.
+page, a shop after a purchase) opened under caps. It keeps the trees and
+hands back the distinct settled states' forecast fights, which the combat
+value head reads in as few batches as it takes (`Forecaster.values`); the
+sim scores the trees from those values (`Envs.afterstate_scores`): a
+settled state's score is the act's elites' mean calibrated win chance
+plus the boss's (1 for a run won in the option, 0 for one that died or
+is stuck), a sub-decision takes its best option, a random outcome is the
+mean over its samples. The decision takes the best option, the policy's
+pick on a tie.
 """
 
 from __future__ import annotations
 
 import time
-from collections import Counter, defaultdict
-from typing import NamedTuple
+from collections import Counter
 
 import numpy as np
 
@@ -30,41 +30,6 @@ from sts2ai.env import Envs
 from sts2ai.forecast import Forecaster
 
 DECISIONS = _sim.run_names()["decision"]
-
-
-class Leaf(NamedTuple):
-    """One leaf of an option's afterstate tree (`sim::env::Afterstate`)."""
-
-    row: int
-    option: int
-    sample: int
-    path: list[tuple[int, str]]
-    hp: float
-    end: str | None
-    capped: bool
-    fights: int
-
-
-class Scored(NamedTuple):
-    """A batch's decisions scored: `score[k, j]` of row `k`'s option token
-    `j` (NaN where there is none), each row's options in words, and the
-    sub-decisions' names on the best path under each option, as (row,
-    option) to names."""
-
-    score: np.ndarray
-    names: list[list[str]]
-    via: dict[tuple[int, int], list[str]]
-
-
-def _best(items: list[tuple[tuple[int, ...], float, list[str]]]) -> tuple[float, list[str]]:
-    """The value of a tree of leaves given as (path, score, names): a
-    sub-decision on the path takes its best option."""
-    if len(items[0][0]) == 0:
-        return items[0][1], items[0][2]
-    groups: dict[int, list[tuple[tuple[int, ...], float, list[str]]]] = defaultdict(list)
-    for path, score, names in items:
-        groups[path[0]].append((path[1:], score, names))
-    return max((_best(g) for g in groups.values()), key=lambda v: v[0])
 
 
 class Scorer:
@@ -85,72 +50,56 @@ class Scorer:
         self.capped: Counter[str] = Counter()
         self.leaves = self.states = self.rows = 0
         self.sim_seconds = self.head_seconds = self.all_seconds = 0.0
+        self.scored: dict[int, int] = {}
 
-    def score(self, waiting: list[int]) -> Scored:
-        """Every option of the decisions `waiting` wait at."""
+    def score(self, waiting: list[int]) -> np.ndarray:
+        """Every option of the decisions `waiting` wait at: `score[k, j]` of
+        row `k`'s option token `j`, NaN where there is none."""
         t = time.perf_counter()
-        leaves, fights, names, capped = self.envs.afterstates(waiting, self.samples, self.depth, self.nodes)
+        floats, ids, leaves, states = self.envs.afterstates(waiting, self.samples, self.depth, self.nodes)
+        self.sim_seconds += time.perf_counter() - t
+        t = time.perf_counter()
+        values = self.forecaster.values(floats, ids)
+        self.head_seconds += time.perf_counter() - t
+        t = time.perf_counter()
+        score, capped = self.envs.afterstate_scores(values, self.forecaster.calibration.win)
         self.sim_seconds += time.perf_counter() - t
         self.capped.update(capped)
-        score = np.full((len(waiting), self.L.max_options), np.nan, dtype=np.float32)
-        if not leaves:
-            return Scored(score, names, {})
-        states = max(l.fights for l in leaves) + 1
-        hp = np.zeros((states, 1), dtype=np.float32)
-        for l in leaves:
-            hp[l.fights, 0] = l.hp
-        t = time.perf_counter()
-        read = self.forecaster.read(hp, fights)
-        self.head_seconds += time.perf_counter() - t
-        self.leaves += len(leaves)
+        self.leaves += leaves
         self.states += states
-        self.rows += len(fights.row)
-        # A state the forecast could not build (a fight the sim cannot
-        # play) scores as a dead end.
-        value = np.zeros(states, dtype=np.float32)
-        boss = np.array([e.endswith("Boss") for e in read.encounter], dtype=bool)
-        for part in (~boss, boss):
-            count = np.bincount(read.row[part], minlength=states)
-            value += np.bincount(read.row[part], read.win[part], states) / np.maximum(count, 1)
-        trees: dict[tuple[int, int, int], list[tuple[tuple[int, ...], float, list[str]]]] = defaultdict(list)
-        for l in leaves:
-            s = 1.0 if l.end == "won" else 0.0 if l.end else float(value[l.fights])
-            trees[(l.row, l.option, l.sample)].append((tuple(j for j, _ in l.path), s, [name for _, name in l.path]))
-        by_option: dict[tuple[int, int], list[tuple[float, list[str]]]] = defaultdict(list)
-        for (row, option, _), items in trees.items():
-            by_option[(row, option)].append(_best(items))
-        via = {}
-        for (row, option), samples in by_option.items():
-            score[row, option] = np.mean([s for s, _ in samples])
-            via[(row, option)] = max(samples, key=lambda v: v[0])[1]
-        return Scored(score, names, via)
+        self.rows += len(floats)
+        return score
 
-    def choose(self, waiting: list[int], ids: np.ndarray, policy: np.ndarray, rows: list[int] | None = None) -> tuple[np.ndarray, Scored]:
+    def choose(self, waiting: list[int], ids: np.ndarray, policy: np.ndarray, rows: list[int] | None = None) -> tuple[np.ndarray, np.ndarray]:
         """`policy`'s picks with every scored decision's replaced by its
-        best option, the policy's pick on an exact tie. Only `rows` (all
-        by default) of `kinds` are scored; the sim builds no afterstates
-        for the others, whose picks stay the policy's."""
+        best option, the policy's pick on an exact tie, and the scores by
+        `waiting` row (NaN for a decision not scored). Only `rows` (all by
+        default) of `kinds` are scored; the sim builds no afterstates for
+        the others, whose picks stay the policy's."""
         t = time.perf_counter()
         path = DECISIONS.index("Path")
         rows = [
             k for k in (range(len(waiting)) if rows is None else rows) if ids[k, 0] != path and (not self.kinds or DECISIONS[ids[k, 0]] in self.kinds)
         ]
-        part = self.score([waiting[k] for k in rows])
-        scored = Scored(np.full((len(waiting), self.L.max_options), np.nan, dtype=np.float32), [[] for _ in waiting], {})
-        for i, k in enumerate(rows):
-            scored.score[k] = part.score[i]
-            scored.names[k] = part.names[i]
-        scored.via.update({(rows[i], j): v for (i, j), v in part.via.items()})
+        # Row `k` of `waiting` is row `scored[k]` of the batch the sim scored.
+        self.scored = {k: i for i, k in enumerate(rows)}
+        score = np.full((len(waiting), self.L.max_options), np.nan, dtype=np.float32)
+        score[rows] = self.score([waiting[k] for k in rows])
         options = policy.copy()
-        for k in np.flatnonzero(np.isfinite(scored.score).any(1)):
+        for k in np.flatnonzero(np.isfinite(score).any(1)):
             kind = DECISIONS[ids[k, 0]]
-            best = np.nanmax(scored.score[k])
-            tied = np.flatnonzero(scored.score[k] == best)
+            best = np.nanmax(score[k])
+            tied = np.flatnonzero(score[k] == best)
             options[k] = policy[k] if policy[k] in tied else tied[0]
             self.decisions[kind] += 1
             self.differs[kind] += options[k] != policy[k]
         self.all_seconds += time.perf_counter() - t
-        return options, scored
+        return options, score
+
+    def option(self, k: int, j: int) -> tuple[str, list[str]]:
+        """Option `j` of row `k` of the batch `choose` scored last, in
+        words, and the sub-decisions' options on its best path."""
+        return self.envs.sim.afterstate_option(self.scored[k], j)
 
     def report(self) -> None:
         n = max(sum(self.decisions.values()), 1)

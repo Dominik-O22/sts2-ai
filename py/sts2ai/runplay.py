@@ -298,19 +298,19 @@ def play(
             # Runs past each env's counted ones only fill the batch until the
             # last counted run ends: their decisions are not worth scoring.
             counted = [k for k, env in enumerate(waiting) if seed + env + done[env] * envs.n in left]
-            options, scored = afterstate.choose(waiting, ids, policy, counted)
-            for k in np.flatnonzero(np.isfinite(scored.score).any(1)):
+            options, score = afterstate.choose(waiting, ids, policy, counted)
+            for k in np.flatnonzero(np.isfinite(score).any(1)):
                 if shown[0] >= show_afterstates or show_rng.random() >= 0.05:
                     continue
                 shown[0] += 1
                 print(row_text(L, floats[k], ids[k]))
-                for j in np.flatnonzero(np.isfinite(scored.score[k])):
+                for j in np.flatnonzero(np.isfinite(score[k])):
                     mark = ("*" if j == options[k] else " ") + ("p" if j == policy[k] else " ")
-                    via = " > ".join(scored.via[(k, j)])
+                    name, via = afterstate.option(k, j)
                     text = option_text(L, floats[k], ids[k], j)
                     if ids[k, 0] == NAMES["decision"].index("Event"):
-                        text = f"Event {scored.names[k][j]}"
-                    print(f"  {mark} {scored.score[k, j]:5.2f}  {text}" + (f"  via {via}" if via else ""))
+                        text = f"Event {name}"
+                    print(f"  {mark} {score[k, j]:5.2f}  {text}" + (f"  via {' > '.join(via)}" if via else ""))
         if forecast_log is not None and loop.read is not None:
             read = loop.read
             for k, env in enumerate(waiting):

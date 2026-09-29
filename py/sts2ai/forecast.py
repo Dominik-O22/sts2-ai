@@ -100,18 +100,22 @@ class Forecaster:
         self.autocast = torch.autocast(device.type, dtype=torch.bfloat16, enabled=device.type == "cuda")
 
     @torch.no_grad()
-    def read(self, floats: np.ndarray, fights: Fights, batch: int = 2048) -> Read:
+    def values(self, floats: np.ndarray, ids: np.ndarray, batch: int = 2048) -> np.ndarray:
+        """The value head's read of combat rows, one value each."""
+        values = [np.zeros(0, dtype=np.float32)]
+        for s in range(0, len(floats), batch):
+            f = torch.from_numpy(np.ascontiguousarray(floats[s : s + batch])).to(self.device)
+            i = torch.from_numpy(np.ascontiguousarray(ids[s : s + batch])).to(self.device)
+            with self.autocast:
+                values.append(self.combat(f, i)[1].float().cpu().numpy())
+        return np.concatenate(values)
+
+    def read(self, floats: np.ndarray, fights: Fights) -> Read:
         """Values per run row and encounter, the openings averaged."""
         if not len(fights.row):
             e = np.zeros(0)
             return Read(np.zeros(0, dtype=np.int64), [], e, e, e, e)
-        values = []
-        for s in range(0, len(fights.row), batch):
-            f = torch.from_numpy(np.ascontiguousarray(fights.floats[s : s + batch])).to(self.device)
-            i = torch.from_numpy(np.ascontiguousarray(fights.ids[s : s + batch])).to(self.device)
-            with self.autocast:
-                values.append(self.combat(f, i)[1].float().cpu().numpy())
-        value = np.concatenate(values)
+        value = self.values(fights.floats, fights.ids)
         # Openings come in runs of `forecast_rolls` per (row, encounter).
         R = self.L.forecast_rolls
         row = fights.row[::R]
