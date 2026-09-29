@@ -548,43 +548,55 @@ struct Settled {
 /// it opens every option, breadth first, while `caps` allow, since
 /// otherwise a smith settles as doing nothing. Returns the tree and the
 /// caps that kept a sub-decision shut, as "kind cap".
-fn expand(caps: Caps, prefix: &[usize], answer: usize, sample: u64, play: impl Fn(&mut Branch) -> Stop) -> (Vec<Node<Settled>>, BTreeSet<String>) {
+fn expand(caps: Caps, prefix: &[usize], answer: usize, sample: u64, play: impl Fn(&mut Branch) -> Stop + Sync) -> (Vec<Node<Settled>>, BTreeSet<String>) {
     let settle = |state: RunState, end, capped| Node::Settled(Settled { key: settled_key(&state), state, end, capped });
-    let mut queue = std::collections::VecDeque::from([vec![answer]]);
     let (mut tree, mut capped) = (Vec::new(), BTreeSet::new());
-    // Nodes are played in the order they are queued, so the next child
-    // queued is node `queued`.
-    let mut queued = 1;
-    while let Some(branch) = queue.pop_front() {
-        let answers: Vec<usize> = prefix.iter().chain(&branch).copied().collect();
-        let mut chooser = Branch { answers: &answers, option: prefix.len(), next: 0, sample: Some(sample) };
-        let node = match play(&mut chooser) {
-            Stop::Through(state, end) => settle(state, end, false),
-            Stop::Decision(state, None) => settle(state, None, false),
-            Stop::Decision(state, Some(obs)) => {
-                let kind = runobs::DECISIONS[obs.ids[0] as usize - 1];
-                let shut = if branch.len() > caps.depth {
-                    Some("depth")
-                } else if tree.len() + 1 + queue.len() + obs.answers.len() > caps.nodes {
-                    Some("nodes")
-                } else {
-                    None
-                };
-                match shut {
-                    Some(cap) => {
-                        capped.insert(format!("{kind} {cap}"));
-                        settle(state, None, true)
-                    }
-                    None => {
-                        queue.extend(obs.answers.iter().map(|&a| branch.iter().copied().chain([a]).collect()));
-                        let children = queued..queued + obs.answers.len();
-                        queued = children.end;
-                        Node::Opened { names: obs.names, children }
+    // Breadth first, a level at a time: a level's branches play in
+    // parallel, then open in order as a queue would open them, which is
+    // what the node cap counts by.
+    let mut level: Vec<Vec<usize>> = vec![vec![answer]];
+    while !level.is_empty() {
+        let stops: Vec<Stop> = level
+            .par_iter()
+            .map(|branch| {
+                let answers: Vec<usize> = prefix.iter().chain(branch).copied().collect();
+                play(&mut Branch { answers: &answers, option: prefix.len(), next: 0, sample: Some(sample) })
+            })
+            .collect();
+        // The next level's first node.
+        let first = tree.len() + level.len();
+        let mut next: Vec<Vec<usize>> = Vec::new();
+        for (k, (branch, stop)) in level.iter().zip(stops).enumerate() {
+            let node = match stop {
+                Stop::Through(state, end) => settle(state, end, false),
+                Stop::Decision(state, None) => settle(state, None, false),
+                Stop::Decision(state, Some(obs)) => {
+                    let kind = runobs::DECISIONS[obs.ids[0] as usize - 1];
+                    // Played so far, this one included, and still queued.
+                    let (played, queued) = (tree.len() + 1, level.len() - k - 1 + next.len());
+                    let shut = if branch.len() > caps.depth {
+                        Some("depth")
+                    } else if played + queued + obs.answers.len() > caps.nodes {
+                        Some("nodes")
+                    } else {
+                        None
+                    };
+                    match shut {
+                        Some(cap) => {
+                            capped.insert(format!("{kind} {cap}"));
+                            settle(state, None, true)
+                        }
+                        None => {
+                            let children = first + next.len()..first + next.len() + obs.answers.len();
+                            next.extend(obs.answers.iter().map(|&a| branch.iter().copied().chain([a]).collect()));
+                            Node::Opened { names: obs.names, children }
+                        }
                     }
                 }
-            }
-        };
-        tree.push(node);
+            };
+            tree.push(node);
+        }
+        level = next;
     }
     (tree, capped)
 }
