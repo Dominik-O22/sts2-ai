@@ -33,6 +33,10 @@ step into an elite writes what the forecast read for that elite and how
 the fight went, for `forecast calibrate`. `--elite-gate P` passes up an
 elite at a map step whose elites' forecast win chance is under P, when
 another option is open: the forecast as a rule, whatever the policy.
+
+`--event-table ROWS` makes every event choice from a table instead of the
+policy: of the options offered, the one winners took most often when it
+was offered to them (`EventTable`), from imitation rows.
 """
 
 from __future__ import annotations
@@ -50,6 +54,7 @@ import torch
 from sts2ai import _sim
 from sts2ai.env import START_POINTS, End, Envs, RunFight, RunLayout
 from sts2ai.forecast import Calibration, Forecaster
+from sts2ai.imitation import Rows
 from sts2ai.model import Policy, load_policy
 from sts2ai.runmodel import RunPolicy, load_run_policy
 from sts2ai.runtrain import RunLoop
@@ -131,6 +136,46 @@ class Picks:
         )
 
 
+class EventTable:
+    """Winners' pick rate for each event option, keyed by (event id, option
+    key), from imitation rows. `choose` overrides the event decisions of a
+    batch with the offered option of the highest rate; options offered to
+    winners fewer than `min_offered` times never win, and an event with
+    none known keeps the policy's pick."""
+
+    def __init__(self, rows: Rows, layout: RunLayout, min_offered: int = 5):
+        self.L = L = layout
+        self.event = NAMES["decision"].index("Event")
+        offered: Counter[tuple[int, int]] = Counter()
+        picked: Counter[tuple[int, int]] = Counter()
+        for k in np.flatnonzero(rows.kind == self.event):
+            for j in self.offered(rows.floats[k]):
+                key = self.key(rows.ids[k], j)
+                offered[key] += 1
+                picked[key] += j == rows.option[k]
+        self.rate = {key: picked[key] / n for key, n in offered.items() if n >= min_offered}
+        self.decisions = self.changed = 0
+
+    def offered(self, floats: np.ndarray) -> list[int]:
+        L = self.L
+        return [j for j in range(L.max_options) if floats[L.f_options + j * L.option_floats]]
+
+    def key(self, ids: np.ndarray, j: int) -> tuple[int, int]:
+        L = self.L
+        return int(ids[5]), int(ids[L.i_options + j * L.option_ids + 5 + L.option_cards])
+
+    def choose(self, floats: np.ndarray, ids: np.ndarray, options: np.ndarray) -> np.ndarray:
+        options = options.copy()
+        for k in np.flatnonzero(ids[:, 0] == self.event):
+            rated = [(self.rate[key], j) for j in self.offered(floats[k]) if (key := self.key(ids[k], j)) in self.rate]
+            self.decisions += 1
+            if rated:
+                best = max(rated)[1]
+                self.changed += best != options[k]
+                options[k] = best
+        return options
+
+
 def as_setup(start: dict) -> dict:
     """A run fight's start record (`log_fights`) as a setup line, its
     floor in the generator's numbering and the last act's second boss
@@ -170,6 +215,7 @@ def play(
     forecast: Forecaster | None = None,
     forecast_log: TextIO | None = None,
     elite_gate: float = 0.0,
+    event_table: EventTable | None = None,
 ) -> tuple[list[End], list[RunFight], RunLoop, float]:
     """Plays until each env has finished `per_env` runs or `minutes` pass.
     Returns every fight that ended, every run that ended, the loop (its
@@ -215,6 +261,8 @@ def play(
             gate = elite & unsure[:, None] & (logits[:, : L.max_options] > -1e8).logical_and(~elite).any(1, keepdim=True)
             logits = logits.masked_fill(gate, -1e9)
         options = logits.argmax(1).cpu().numpy()
+        if event_table is not None:
+            options = event_table.choose(floats, ids, options)
         if forecast_log is not None and loop.read is not None:
             read = loop.read
             for k, env in enumerate(waiting):
@@ -323,6 +371,7 @@ def main() -> None:
     ap.add_argument("--forecast-log", type=Path, default=None, help="write each map step into an elite with its forecast and outcome here")
     ap.add_argument("--forecast", type=Path, default=None, help="forecast calibration for a run policy that has none")
     ap.add_argument("--elite-gate", type=float, default=0.0, help="pass up elites whose forecast win chance is under this")
+    ap.add_argument("--event-table", type=Path, default=None, help="imitation rows (.npz); event choices take winners' most picked option")
     args = ap.parse_args()
     # Ids the combat checkpoint never saw get fresh rows (`vocab.remap_state`),
     # drawn from here: unseeded, two plays of one seed differ.
@@ -340,6 +389,7 @@ def main() -> None:
     envs = Envs(args.envs, seed=args.seed)
     picks = Picks(RunLayout.load(), args.show) if run_policy else None
     fights_out = args.fights_out.open("w") if args.fights_out else None
+    event_table = EventTable(Rows.load(args.event_table), RunLayout.load()) if args.event_table else None
     fights, runs, loop, seconds = play(
         combat,
         device,
@@ -363,6 +413,7 @@ def main() -> None:
         forecast,
         forecast_log,
         args.elite_gate,
+        event_table,
     )
     if fights_out is not None:
         fights_out.close()
@@ -371,6 +422,8 @@ def main() -> None:
     report(fights, runs, args.seed, args.seed + args.runs_per_env * args.envs, loop, args.envs, seconds)
     if picks:
         picks.report()
+    if event_table:
+        print(f"event table: {event_table.changed} of {event_table.decisions} event decisions differ from the policy's pick")
 
 
 if __name__ == "__main__":
