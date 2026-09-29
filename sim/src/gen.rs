@@ -128,7 +128,7 @@ impl FightSetup {
         let hp_of = |key: &str| {
             start[key].as_i64().or_else(|| first_snap.and_then(|s| s[key].as_i64())).unwrap_or(1) as i32
         };
-        let RunParts { deck, relics, mut potions, gold, max_energy, asc } = RunParts::of(start, ids)?;
+        let RunParts { deck, relics, mut potions, gold, max_energy, asc, .. } = RunParts::of(start, ids)?;
         // The belt is logged after Petrified Toad added its rock, which the
         // sim adds again. Taking out the first rock and letting the Toad fill
         // the first free slot gives back the logged belt, whichever rock was
@@ -179,10 +179,16 @@ impl FightSetup {
     /// The run in `start` (a recorder `start` record, or the same fields
     /// sent at a card reward) against `encounter` on `floor`, at `hp` of
     /// `max_hp`: the deck, relics, potions and gold are the run's, the
-    /// enemies are rolled with `rng` as the generator would.
+    /// enemies are rolled with `rng` as the generator would. A relic whose
+    /// carried state `start` does not record (sts2.fun and ststracker runs
+    /// record none) gets one rolled after the enemies, so the same seed
+    /// still faces the same enemies whatever the relics.
     pub fn run_against(start: &Value, ids: &Ids, hp: i32, max_hp: i32, encounter: Encounter, floor: u32, rng: &mut Rng) -> Result<Self, String> {
-        let run = RunParts::of(start, ids)?;
+        let mut run = RunParts::of(start, ids)?;
         let rolled = generate_against(rng, floor, run.asc, encounter);
+        for r in run.relics.iter_mut().filter(|r| !run.recorded.contains(&r.id)) {
+            roll_carried_state(r, rng);
+        }
         Ok(Self {
             deck: run.deck,
             hp,
@@ -214,9 +220,10 @@ impl FightSetup {
         }
     }
 
-    /// This fight in the recorder's `start` format (deck, relics, potions,
-    /// HP, the encounter and room), so tools that read recordings read
-    /// generated fights too (`examples/gendump.rs`, the deck-value labels).
+    /// This fight in the recorder's `start` format (deck, relics and their
+    /// carried state, potions, HP, the encounter and room), so tools that
+    /// read recordings read generated fights too (`examples/gendump.rs`,
+    /// the deck-value labels).
     pub fn run_json(&self) -> Value {
         let slug = |name: String| crate::replay::slug(&name);
         let deck: Vec<Value> = self
@@ -240,6 +247,12 @@ impl FightSetup {
             "gold": self.gold,
             "deck": deck,
             "relics": self.relics.iter().map(|r| slug(format!("{:?}", r.id))).collect::<Vec<_>>(),
+            "relic_state": self
+                .relics
+                .iter()
+                .filter(|r| carried_states(r.id).is_some())
+                .map(|r| (slug(format!("{:?}", r.id)), Value::from(r.counter)))
+                .collect::<serde_json::Map<_, _>>(),
             "potions": self.potions.iter().map(|p| p.map(|id| slug(format!("{id:?}")))).collect::<Vec<_>>(),
             "hp": self.hp,
             "max_hp": self.max_hp,
@@ -312,6 +325,8 @@ pub fn transform_options(name: &str, ids: &Ids) -> Result<Option<(&'static str, 
 struct RunParts {
     deck: Vec<Card>,
     relics: Vec<Relic>,
+    /// Relics whose carried state `relic_state` records.
+    recorded: Vec<RelicId>,
     potions: Vec<Option<PotionId>>,
     gold: i32,
     max_energy: i32,
@@ -336,6 +351,7 @@ impl RunParts {
         if let Some((id, why)) = UNSUPPORTED_CARDS.iter().find(|(id, _)| deck.iter().any(|k| k.id == *id)) {
             return Err(format!("unsupported card {id:?}: {why}"));
         }
+        let mut recorded = vec![];
         let relics: Vec<Relic> = start["relics"]
             .as_array()
             .map(|a| {
@@ -346,10 +362,8 @@ impl RunParts {
                         let &id = ids.relics.get(name).ok_or_else(|| format!("unknown relic {name}"))?;
                         let mut r = Relic::new(id);
                         if let Some(n) = start["relic_state"][name].as_i64() {
-                            match id {
-                                RelicId::LizardTail | RelicId::VenerableTeaSet => r.flag = n != 0,
-                                _ => r.counter = relic_counter(id, n as i32),
-                            }
+                            r.counter = relic_counter(id, n as i32);
+                            recorded.push(id);
                         }
                         Ok(r)
                     })
@@ -372,6 +386,7 @@ impl RunParts {
         Ok(Self {
             deck,
             relics,
+            recorded,
             potions,
             gold: start["gold"].as_i64().unwrap_or(0) as i32,
             max_energy: start["max_energy"].as_i64().unwrap_or(3) as i32,
@@ -381,8 +396,8 @@ impl RunParts {
 }
 
 /// A relic's `counter` from the value the recorder logs for it at combat
-/// setup (`Recorder.RelicState`), which is the game's own field. Lizard
-/// Tail and the Venerable Tea Set log a bool that goes into `flag`.
+/// setup (`Recorder.RelicState`), which is the game's own field, or 1 and
+/// 0 for a bool (Lizard Tail spent, a Venerable Tea Set primed).
 pub(crate) fn relic_counter(id: RelicId, game: i32) -> i32 {
     match id {
         // Counts that only matter modulo the play or turn they fire on,
@@ -392,6 +407,62 @@ pub(crate) fn relic_counter(id: RelicId, game: i32) -> i32 {
         RelicId::HappyFlower | RelicId::Pendulum => game % 3,
         _ => game,
     }
+}
+
+/// Sets a fresh relic to a state a run could have left it in between
+/// fights, uniform over what the game can carry into one: a count anywhere
+/// in its cycle, charges from full to spent, a flag either way. Only
+/// relics whose `[SavedProperty]` changes what happens in a fight draw
+/// from `rng` (the set `Recorder.RelicState` logs, less Fur Coat); the
+/// rest are left as they are. `Models/Relics/<Name>.cs`:
+///
+/// | Relic                 | Saved property                         | At fight start | `counter`       |
+/// |-----------------------|----------------------------------------|----------------|-----------------|
+/// | PenNib                | AttacksPlayed (setter keeps % 10)      | 0..=9          | same            |
+/// | Nunchaku              | AttacksPlayed (fires on % 10)          | any            | 0..=9, mod 10   |
+/// | TuningFork            | SkillsPlayed (-10 when it fires)       | 0..=9          | same            |
+/// | IronClub              | CardsPlayed (fires on % 4)             | any            | 0..=3, mod 4    |
+/// | HappyFlower           | TurnsSeen (% 3)                        | 0..=2          | same            |
+/// | FakeHappyFlower       | TurnsSeen (% 5)                        | 0..=4          | same            |
+/// | Pendulum              | TurnsSeen (% 3)                        | 0..=2          | same            |
+/// | PollinousCore         | TurnsSeen (0 after the draw at 4)      | 0..=3          | same            |
+/// | JossPaper             | CardsExhausted (% 5 after each draw)   | 0..=4          | same            |
+/// | Girya                 | TimesLifted (lifts while < 3)          | 0..=3          | same            |
+/// | EmberTea              | CombatsLeft (5, -1 a combat)           | 0..=5          | same            |
+/// | PumpkinCandle         | KindleCount (+5 a kindle, -1 a combat) | 0..=5 [1]      | same            |
+/// | BoneTea               | CombatsLeft (1)                        | 0..=1          | same            |
+/// | TeaOfDiscourtesy      | CombatsLeft (1)                        | 0..=1          | same            |
+/// | VenerableTeaSet       | GainEnergyInNextCombat                 | bool           | 1 primed        |
+/// | FakeVenerableTeaSet   | GainEnergyInNextCombat                 | bool           | 1 primed        |
+/// | LizardTail            | WasUsed                                | bool           | 1 spent         |
+///
+/// [1] Kindling before it burns out stacks past 5; the fight only asks
+/// whether any is left.
+///
+/// Not rolled: Fur Coat saves the rooms it marked, and a marked fight
+/// starts every enemy at 1 HP, a room property rather than a state to play
+/// around. Book of Five Rings, Lasting Candy, Lava Lamp (cleared on
+/// entering a room) and the rest act outside the fight or are not in the
+/// sim.
+fn roll_carried_state(r: &mut Relic, rng: &mut Rng) {
+    if let Some(n) = carried_states(r.id) {
+        r.counter = rng.next_int(n) as i32;
+    }
+}
+
+/// How many carried states `roll_carried_state` draws from, for the
+/// relics it rolls.
+fn carried_states(id: RelicId) -> Option<usize> {
+    use RelicId::*;
+    Some(match id {
+        PenNib | Nunchaku | TuningFork => 10,
+        FakeHappyFlower | JossPaper => 5,
+        IronClub | PollinousCore | Girya => 4,
+        HappyFlower | Pendulum => 3,
+        EmberTea | PumpkinCandle => 6,
+        BoneTea | TeaOfDiscourtesy | VenerableTeaSet | FakeVenerableTeaSet | LizardTail => 2,
+        _ => return None,
+    })
 }
 
 pub(crate) fn card_ref(ids: &Ids, v: &Value) -> Result<(CardId, bool), String> {
@@ -654,6 +725,9 @@ pub fn generate_against(rng: &mut Rng, floor: u32, asc: Ascension, encounter: En
         let i = rng.next_int(ancients.len());
         relics.push(Relic::new(ancients.swap_remove(i)));
     }
+    for r in &mut relics {
+        roll_carried_state(r, rng);
+    }
     let slots = if relics.iter().any(|r| r.id == RelicId::PotionBelt) { 4 } else { 2 };
     // Under Double Boss half the last act's boss fights are the second of
     // the two, fought with what the first left.
@@ -766,6 +840,47 @@ mod tests {
         assert!(fractions.iter().all(|f| (0.39..=0.86).contains(f)), "a boss start outside 40-85%");
         let mean = fractions.iter().sum::<f32>() / fractions.len() as f32;
         assert!((0.58..=0.67).contains(&mean), "mean boss start {mean}");
+    }
+
+    /// Relics that carry a count between fights start anywhere in it.
+    #[test]
+    fn generated_fights_carry_varied_relic_states() {
+        let mut rng = Rng::new(3);
+        let mut nib = std::collections::BTreeSet::new();
+        let mut tail = std::collections::BTreeSet::new();
+        for _ in 0..2000 {
+            for r in generate(&mut rng, 40, Ascension(10)).relics {
+                match r.id {
+                    RelicId::PenNib => nib.insert(r.counter),
+                    RelicId::LizardTail => tail.insert(r.counter),
+                    _ => false,
+                };
+            }
+        }
+        assert_eq!(nib, (0..10).collect(), "Pen Nib counters");
+        assert_eq!(tail, [0, 1].into(), "Lizard Tail fresh and spent");
+    }
+
+    /// A played run's fight keeps the state its start records and rolls
+    /// the rest; a generated fight's `run_json` records all of it.
+    #[test]
+    fn recorded_relic_state_is_kept() {
+        let ids = Ids::new();
+        let start = serde_json::json!({
+            "ascension": 10, "deck": [{"id": "BASH"}], "potions": [null, null],
+            "relics": ["PEN_NIB", "LIZARD_TAIL", "NUNCHAKU"],
+            "relic_state": {"PEN_NIB": 17, "LIZARD_TAIL": 1},
+        });
+        let fights = run_fights(&start, &ids, 50, 80, &[("QUEEN_BOSS".into(), 48)], 40, 1).unwrap();
+        let counter = |s: &FightSetup, id| s.relics.iter().find(|r| r.id == id).unwrap().counter;
+        assert!(fights.iter().all(|s| counter(s, RelicId::PenNib) == 7 && counter(s, RelicId::LizardTail) == 1));
+        let nunchaku: std::collections::BTreeSet<i32> = fights.iter().map(|s| counter(s, RelicId::Nunchaku)).collect();
+        assert!(nunchaku.len() > 5, "unrecorded Nunchaku rolled: {nunchaku:?}");
+
+        let mut rng = Rng::new(8);
+        let s = generate(&mut rng, 40, Ascension(10));
+        let back = FightSetup::run_against(&s.run_json(), &ids, s.hp, s.max_hp, s.encounter, s.floor, &mut rng).unwrap();
+        assert_eq!(back.relics, s.relics);
     }
 
     #[test]
