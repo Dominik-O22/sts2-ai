@@ -228,6 +228,15 @@ impl RelicBag {
         Self { deques, refill: refresh.then_some(relics) }
     }
 
+    /// Each deque's relics shuffled on `rng` from their id order, so the
+    /// order they come out in says nothing of the order they were in.
+    pub fn reshuffle(&mut self, rng: &mut GameRng) {
+        for (_, deque) in &mut self.deques {
+            deque.sort_by_cached_key(|r| r.game_id());
+            rng.shuffle(deque);
+        }
+    }
+
     fn deque(&mut self, rarity: RelicRarity) -> Option<&mut Vec<BagRelic>> {
         self.deques.iter_mut().find(|(r, _)| *r == rarity).map(|(_, d)| d)
     }

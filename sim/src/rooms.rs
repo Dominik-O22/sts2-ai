@@ -51,11 +51,35 @@ pub enum Decision<'a> {
 /// Makes the run's decisions: an index into what the decision lists.
 pub trait Chooser {
     fn choose(&mut self, run: &RunState, decision: Decision<'_>) -> usize;
+
+    /// Asked right after each choice (`RunState::ask`): a sample index to
+    /// reseed everything random from (`RunState::reseed`), so what follows
+    /// is a draw the player could expect, not the run's own. Only an
+    /// afterstate (`env::Branch`) answers; a wrapper must pass it through.
+    fn reseed(&mut self) -> Option<u64> {
+        None
+    }
 }
 
 impl<C: Chooser + ?Sized> Chooser for &mut C {
     fn choose(&mut self, run: &RunState, decision: Decision<'_>) -> usize {
         (**self).choose(run, decision)
+    }
+
+    fn reseed(&mut self) -> Option<u64> {
+        (**self).reseed()
+    }
+}
+
+impl RunState {
+    /// Puts `decision` to `chooser`, the one place every choice passes, so
+    /// a reseed the chooser asks for lands before the option takes effect.
+    pub fn ask(&mut self, chooser: &mut impl Chooser, decision: Decision<'_>) -> usize {
+        let i = chooser.choose(self, decision);
+        if let Some(sample) = chooser.reseed() {
+            self.reseed(sample);
+        }
+        i
     }
 }
 
@@ -103,19 +127,19 @@ impl RunState {
             log.push(offer.clone());
             match offer {
                 Offered::Cards(cards) => {
-                    if let Some(card) = cards.get(chooser.choose(self, Decision::Card(&cards))) {
+                    if let Some(card) = cards.get(self.ask(chooser, Decision::Card(&cards))) {
                         self.add_card(DeckCard::from(*card));
                     }
                 }
                 Offered::Bundles(bundles) => {
-                    if let Some(bundle) = bundles.get(chooser.choose(self, Decision::Bundle(&bundles))) {
+                    if let Some(bundle) = bundles.get(self.ask(chooser, Decision::Bundle(&bundles))) {
                         bundle.iter().for_each(|&card| self.add_card(DeckCard::from(card)));
                     }
                 }
                 Offered::Relics(relics) => self.take_relics(relics, chooser, log),
                 Offered::Potions(potions) => {
                     for potion in potions {
-                        if chooser.choose(self, Decision::Potion(&potion)) == 0 {
+                        if self.ask(chooser, Decision::Potion(&potion)) == 0 {
                             self.add_potion(&potion);
                         }
                     }
@@ -130,7 +154,7 @@ impl RunState {
     /// them, each picked up before the next.
     fn take_relics(&mut self, mut relics: Vec<String>, chooser: &mut impl Chooser, log: &mut Vec<Offered>) {
         while !relics.is_empty() {
-            let i = chooser.choose(self, Decision::Relic(&relics));
+            let i = self.ask(chooser, Decision::Relic(&relics));
             if i >= relics.len() {
                 break;
             }
@@ -146,7 +170,7 @@ impl RunState {
         let mut chosen = Vec::new();
         while chosen.len() < pick.max && !left.is_empty() {
             let optional = chosen.len() >= pick.min;
-            let i = chooser.choose(self, Decision::Deck { action: pick.action, cards: &left, optional });
+            let i = self.ask(chooser, Decision::Deck { action: pick.action, cards: &left, optional });
             if i >= left.len() {
                 break;
             }
@@ -197,7 +221,7 @@ impl RunState {
     pub fn rest_site(&mut self, chooser: &mut impl Chooser, log: &mut Vec<Offered>) {
         let mut options = self.rest_options();
         while !options.is_empty() {
-            let i = chooser.choose(self, Decision::Rest(&options));
+            let i = self.ask(chooser, Decision::Rest(&options));
             if i >= options.len() {
                 break;
             }
@@ -228,11 +252,11 @@ impl RunState {
         loop {
             let mut wares = self.wares(&shop);
             wares.retain(|w| !(removal_declined && w.item == Item::Removal));
-            let Some(ware) = wares.get(chooser.choose(self, Decision::Shop(&wares))) else { break };
+            let Some(ware) = wares.get(self.ask(chooser, Decision::Shop(&wares))) else { break };
             if ware.item == Item::Removal {
                 let cards = self.pickable(DeckAction::Remove);
                 let pick = Decision::Deck { action: DeckAction::Remove, cards: &cards, optional: true };
-                match cards.get(chooser.choose(self, pick)) {
+                match cards.get(self.ask(chooser, pick)) {
                     Some(&card) => self.remove_for(&mut shop, card, ware.price),
                     None => removal_declined = true,
                 }
@@ -298,7 +322,7 @@ impl RunState {
     /// it laid out.
     pub fn ancient(&mut self, name: &str, chooser: &mut impl Chooser, log: &mut Vec<Offered>) -> AncientOffer {
         let offer = self.ancient_offer(name);
-        if let Some(relic) = offer.relics.get(chooser.choose(self, Decision::Ancient(&offer.relics))) {
+        if let Some(relic) = offer.relics.get(self.ask(chooser, Decision::Ancient(&offer.relics))) {
             let pickup = self.take_ancient(&offer, relic);
             self.settle(pickup, chooser, log);
         }
