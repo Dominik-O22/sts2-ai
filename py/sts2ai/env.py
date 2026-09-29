@@ -270,6 +270,17 @@ class Envs:
 
         return Fights.of(self.sim.forecast(envs), self.layout.n_floats, self.layout.n_ids)
 
+    def afterstates(self, envs: list[int], samples: int, depth: int, nodes: int):
+        """The afterstates of every option of the decisions `envs` wait at
+        (`sts2ai.afterstate`): the leaves, the settled states' forecast
+        fights (their rows indexing the states), each decision's options
+        in words and the decisions where a cap kept a sub-decision shut."""
+        from sts2ai.afterstate import Leaf
+        from sts2ai.forecast import Fights
+
+        leaves, fights, names, capped = self.sim.afterstates(envs, samples, depth, nodes)
+        return [Leaf(*l) for l in leaves], Fights.of(fights, self.layout.n_floats, self.layout.n_ids), names, capped
+
     def step_run(self, envs: list[int], options: np.ndarray) -> list[tuple[int, RunFight]]:
         """Answer each env's decision with an option token and play on;
         the fights that start fill their combat rows. Returns the runs

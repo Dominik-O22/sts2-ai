@@ -43,6 +43,14 @@ was offered to them (`EventTable`), from imitation rows.
 `--runs-out FILE` writes each counted run as a JSON line (seed, end, act,
 floor, deck) and the command line as the first, for `sts2ai.paired` to
 compare two arms run on the same seeds.
+
+`--afterstate K` makes every decision but a map step by its afterstates
+(`sts2ai.afterstate`): each option applied in the sim, random outcomes
+averaged over K samples, scored by the forecast of the player it leaves,
+the policy's pick on a tie. It needs the forecast's calibration. The
+report counts how often the pick differs from the policy's per decision
+kind and what a decision costs; `--show-afterstates N` prints N decisions
+with each option's text and score.
 """
 
 from __future__ import annotations
@@ -59,6 +67,7 @@ import numpy as np
 import torch
 
 from sts2ai import _sim
+from sts2ai.afterstate import Scorer
 from sts2ai.env import START_POINTS, End, Envs, RunFight, RunLayout
 from sts2ai.forecast import Calibration, Forecaster
 from sts2ai.imitation import Rows
@@ -224,6 +233,8 @@ def play(
     forecast_log: TextIO | None = None,
     elite_gate: float = 0.0,
     event_table: EventTable | None = None,
+    afterstate: Scorer | None = None,
+    show_afterstates: int = 0,
 ) -> tuple[list[End], list[RunFight], RunLoop, float]:
     """Plays until each env has finished `per_env` runs or `minutes` pass.
     Returns every fight that ended, every run that ended, the loop (its
@@ -238,7 +249,9 @@ def play(
     playouts, race size or 0) searches with `exactsearch.Hybrid`. With
     `forecast`, map steps get the forecast (`RunLoop`); with
     `forecast_log` too, each map step into an elite is written there with
-    the fight's outcome."""
+    the fight's outcome. With `afterstate`, it makes every decision but a
+    map step (`Scorer.choose`), and `show_afterstates` decisions are
+    printed with each option's score."""
     if win_starts > 0:
         held = envs.use_winner_starts(split_runs(win_runs, win_holdout), win_starts)
         print("winners' starts: " + ", ".join(f"{n} at {p}" for p, n in zip(START_POINTS, held) if n))
@@ -249,6 +262,8 @@ def play(
     L = RunLayout.load()
     # What the forecast read at each env's step into an elite, by encounter.
     pending: dict[int, dict[str, tuple[float, float, float]]] = {}
+    # One scored decision in twenty is shown, so the ones shown are not all Neow's.
+    shown, show_rng = [0], np.random.default_rng(1)
 
     def ended(_: int, run: RunFight) -> None:
         runs.append(run)
@@ -273,6 +288,21 @@ def play(
         options = logits.argmax(1).cpu().numpy()
         if event_table is not None:
             options = event_table.choose(floats, ids, options)
+        if afterstate is not None:
+            policy = options
+            options, scored = afterstate.choose(waiting, ids, policy)
+            for k in np.flatnonzero(np.isfinite(scored.score).any(1)):
+                if shown[0] >= show_afterstates or show_rng.random() >= 0.05:
+                    continue
+                shown[0] += 1
+                print(row_text(L, floats[k], ids[k]))
+                for j in np.flatnonzero(np.isfinite(scored.score[k])):
+                    mark = ("*" if j == options[k] else " ") + ("p" if j == policy[k] else " ")
+                    via = " > ".join(scored.via[(k, j)])
+                    text = option_text(L, floats[k], ids[k], j)
+                    if ids[k, 0] == NAMES["decision"].index("Event"):
+                        text = f"Event {scored.names[k][j]}"
+                    print(f"  {mark} {scored.score[k, j]:5.2f}  {text}" + (f"  via {via}" if via else ""))
         if forecast_log is not None and loop.read is not None:
             read = loop.read
             for k, env in enumerate(waiting):
@@ -394,6 +424,10 @@ def main() -> None:
     ap.add_argument("--elite-gate", type=float, default=0.0, help="pass up elites whose forecast win chance is under this")
     ap.add_argument("--event-table", type=Path, default=None, help="imitation rows (.npz); event choices take winners' most picked option")
     ap.add_argument("--runs-out", type=Path, default=None, help="write each counted run here as a JSON line, for sts2ai.paired")
+    ap.add_argument("--afterstate", type=int, default=0, help="make every decision but a map step by its afterstates, K samples each (needs the forecast)")
+    ap.add_argument("--afterstate-depth", type=int, default=3, help="sub-decisions an afterstate opens on the way, at most")
+    ap.add_argument("--afterstate-nodes", type=int, default=256, help="branches an afterstate plays per option and sample, at most")
+    ap.add_argument("--show-afterstates", type=int, default=0, help="print this many scored decisions with each option's score")
     args = ap.parse_args()
     # Ids the combat checkpoint never saw get fresh rows (`vocab.remap_state`),
     # drawn from here: unseeded, two plays of one seed differ.
@@ -404,14 +438,17 @@ def main() -> None:
     if run_policy is not None:
         run_policy.eval()
     calibration = Calibration.load(args.forecast) if args.forecast else Calibration(**run_ck["forecast"]) if run_ck.get("forecast") else None
-    if args.elite_gate > 0 and calibration is None:
-        ap.error("--elite-gate needs the forecast: a run policy trained with it, or --forecast")
+    if (args.elite_gate > 0 or args.afterstate > 0) and calibration is None:
+        ap.error("--elite-gate and --afterstate need the forecast: a run policy trained with it, or --forecast")
+    if args.afterstate > 0 and run_policy is None:
+        ap.error("--afterstate needs --run-policy for the map steps")
     forecast = Forecaster(combat, device, calibration) if calibration or args.forecast_log else None
     forecast_log = args.forecast_log.open("w") if args.forecast_log else None
     envs = Envs(args.envs, seed=args.seed)
     picks = Picks(RunLayout.load(), args.show) if run_policy else None
     fights_out = args.fights_out.open("w") if args.fights_out else None
     event_table = EventTable(Rows.load(args.event_table), RunLayout.load()) if args.event_table else None
+    afterstate = Scorer(envs, forecast, args.afterstate, args.afterstate_depth, args.afterstate_nodes) if args.afterstate > 0 else None
     fights, runs, loop, seconds = play(
         combat,
         device,
@@ -437,6 +474,8 @@ def main() -> None:
         forecast_log,
         args.elite_gate,
         event_table,
+        afterstate,
+        args.show_afterstates,
     )
     if fights_out is not None:
         fights_out.close()
@@ -453,6 +492,8 @@ def main() -> None:
         picks.report()
     if event_table:
         print(f"event table: {event_table.changed} of {event_table.decisions} event decisions differ from the policy's pick")
+    if afterstate:
+        afterstate.report()
 
 
 if __name__ == "__main__":

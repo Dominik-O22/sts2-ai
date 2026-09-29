@@ -222,6 +222,8 @@ pub struct RunObs {
     pub floats: Vec<f32>,
     pub ids: Vec<i64>,
     pub answers: Vec<usize>,
+    /// Each option in words (`option_names`).
+    pub names: Vec<String>,
     /// At a map step, the fights the forecast values (`forecast`).
     pub forecast: Vec<FightSetup>,
 }
@@ -698,7 +700,7 @@ pub fn observe(run: &RunState, decision: Decision<'_>) -> RunObs {
         map_ahead(map, points, &mut ids[I_MAP..]);
         forecast = forecast_fights(run);
     }
-    RunObs { floats: f, ids, answers, forecast }
+    RunObs { floats: f, ids, answers, names: option_names(run, decision), forecast }
 }
 
 /// Openings the forecast rolls per encounter.
