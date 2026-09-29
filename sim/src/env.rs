@@ -621,6 +621,146 @@ fn settled_key(state: &RunState) -> String {
     format!("{} {} {} {:?} {:?} {:?}", state.act, state.hp, state.max_hp, state.deck, state.relics, state.potions)
 }
 
+/// A node of an option's afterstate tree (`expand_tree`), the root first
+/// and the rest breadth first: where a branch settled, or a sub-decision
+/// it opened, whose options in token order are the nodes `children`.
+#[derive(Clone, Debug)]
+enum Node<L> {
+    Settled(L),
+    Opened { names: Vec<String>, children: std::ops::Range<usize> },
+}
+
+/// Where a branch settled, as `expand_tree` leaves it.
+struct Settle {
+    state: RunState,
+    end: Option<forward::End>,
+    /// Stopped at a sub-decision the caps did not open.
+    capped: bool,
+    /// What the forecast fights read of the state (`settled_key`).
+    key: String,
+}
+
+/// `expand` as a tree (`Node`).
+fn expand_tree(caps: Caps, prefix: &[usize], answer: usize, sample: u64, play: impl Fn(&mut Branch) -> Stop) -> (Vec<Node<Settle>>, BTreeSet<String>) {
+    let settle = |state: RunState, end, capped| Node::Settled(Settle { key: settled_key(&state), state, end, capped });
+    let mut queue = std::collections::VecDeque::from([vec![answer]]);
+    let (mut tree, mut capped) = (Vec::new(), BTreeSet::new());
+    // Nodes are played in the order they are queued, so the next child
+    // queued is node `queued`.
+    let mut queued = 1;
+    while let Some(branch) = queue.pop_front() {
+        let answers: Vec<usize> = prefix.iter().chain(&branch).copied().collect();
+        let mut chooser = Branch { answers: &answers, option: prefix.len(), next: 0, sample: Some(sample) };
+        let node = match play(&mut chooser) {
+            Stop::Through(state, end) => settle(state, end, false),
+            Stop::Decision(state, None) => settle(state, None, false),
+            Stop::Decision(state, Some(obs)) => {
+                let kind = runobs::DECISIONS[obs.ids[0] as usize - 1];
+                let shut = if branch.len() > caps.depth {
+                    Some("depth")
+                } else if tree.len() + 1 + queue.len() + obs.answers.len() > caps.nodes {
+                    Some("nodes")
+                } else {
+                    None
+                };
+                match shut {
+                    Some(cap) => {
+                        capped.insert(format!("{kind} {cap}"));
+                        settle(state, None, true)
+                    }
+                    None => {
+                        queue.extend(obs.answers.iter().map(|&a| branch.iter().copied().chain([a]).collect()));
+                        let children = queued..queued + obs.answers.len();
+                        queued = children.end;
+                        Node::Opened { names: obs.names, children }
+                    }
+                }
+            }
+        };
+        tree.push(node);
+    }
+    (tree, capped)
+}
+
+/// What a tree settled as, to tell a random option (its samples settle
+/// differently) from one whose further samples would only repeat: each
+/// node's settled state, or its option count.
+fn tree_signature(tree: &[Node<Settle>]) -> Vec<(usize, Option<(&str, &Option<forward::End>, bool)>)> {
+    tree.iter()
+        .map(|n| match n {
+            Node::Settled(s) => (0, Some((s.key.as_str(), &s.end, s.capped))),
+            Node::Opened { children, .. } => (children.len(), None),
+        })
+        .collect()
+}
+
+/// A settled node as the score reads it.
+#[derive(Clone, Copy, Debug)]
+enum Leaf {
+    /// The run ended in the option or has no HP left: 1 if won, else 0.
+    Ended { won: bool },
+    /// Alive, at `Pending`'s distinct state of this index.
+    State(usize),
+}
+
+/// One option's tree under one sample.
+struct Tree {
+    row: usize,
+    option: usize,
+    sample: u64,
+    nodes: Vec<Node<Leaf>>,
+}
+
+impl Tree {
+    /// The value of node `i`: a sub-decision takes its best option.
+    fn value(&self, i: usize, states: &[f64]) -> f64 {
+        match &self.nodes[i] {
+            Node::Settled(Leaf::Ended { won }) => *won as u8 as f64,
+            Node::Settled(Leaf::State(s)) => states[*s],
+            Node::Opened { children, .. } => children.clone().map(|c| self.value(c, states)).fold(f64::NEG_INFINITY, f64::max),
+        }
+    }
+}
+
+/// The afterstates `VecEnv::afterstates` built last, kept for
+/// `afterstate_scores` and `afterstate_option`.
+struct Pending {
+    /// Each decision's options in words, by row.
+    names: Vec<Vec<String>>,
+    /// Every option's trees, by row, option token and sample.
+    trees: Vec<Tree>,
+    /// Each distinct state's HP fraction.
+    hp: Vec<f32>,
+    /// Each distinct state's first forecast row, and the row count last.
+    rows: Vec<usize>,
+    /// Whether each forecast row is a boss fight.
+    boss: Vec<bool>,
+    /// Decisions where a cap kept a sub-decision shut, by decision kind
+    /// and cap ("Shop nodes").
+    capped: BTreeMap<String, usize>,
+    /// Each distinct state's score, once `afterstate_scores` has run.
+    scores: Option<Vec<f64>>,
+}
+
+/// What the value head reads for `VecEnv::afterstates`: every distinct
+/// settled state's forecast fights at their openings
+/// (`runobs::forecast_rows`), `floats [n * N_FLOATS]` and `ids [n *
+/// N_IDS]`, and how many leaves and distinct states the trees hold.
+pub struct AfterstateRows {
+    pub floats: Vec<f32>,
+    pub ids: Vec<i64>,
+    pub leaves: usize,
+    pub states: usize,
+}
+
+/// A decision's scores, `score [rows * MAX_OPTIONS]` (NaN where a row has
+/// no such option), and the decisions where a cap kept a sub-decision
+/// shut, by decision kind and cap.
+pub struct AfterstateScores {
+    pub score: Vec<f32>,
+    pub capped: BTreeMap<String, usize>,
+}
+
 /// A slot's run, with the chooser making its run decisions. A slot's
 /// `k`-th run is seed index `base + slot + k * n`, so a base seed and a
 /// batch size name every run the batch plays.
@@ -926,6 +1066,8 @@ pub struct VecEnv {
     fixed: Vec<FightSetup>,
     hard: Vec<(Encounter, f32)>,
     real: Vec<(Vec<FightSetup>, f32)>,
+    /// The afterstates built last (`afterstates`).
+    pending: Option<Pending>,
 }
 
 impl VecEnv {
@@ -941,7 +1083,7 @@ impl VecEnv {
         for (i, s) in slots.iter_mut().enumerate() {
             s.reset(i, n, &cfg, Pools { fixed: &[], hard: &[], real: &[] });
         }
-        Self { slots, cfg, fixed: vec![], hard: vec![], real: vec![], starts: Default::default() }
+        Self { slots, cfg, fixed: vec![], hard: vec![], real: vec![], starts: Default::default(), pending: None }
     }
 
     pub fn len(&self) -> usize {
@@ -1073,7 +1215,7 @@ impl VecEnv {
     /// none. An option whose first two samples settle the same is taken as
     /// deterministic and gets no more. Computed only when asked, so
     /// training pays nothing for it.
-    pub fn afterstates(&self, envs: &[usize], samples: usize, caps: Caps) -> Afterstates {
+    pub fn afterstate_leaves(&self, envs: &[usize], samples: usize, caps: Caps) -> Afterstates {
         let path = runobs::DECISIONS.iter().position(|&d| d == "Path").expect("the map step") as i64 + 1;
         let segment = |env: usize| {
             let slot = self.slots[env].run.as_ref().expect("run mode");
@@ -1107,7 +1249,8 @@ impl VecEnv {
             for (row, option, _, leaves, _) in &expanded {
                 first.entry((*row, *option)).or_default().push(signature(leaves));
             }
-            let random: Vec<(usize, usize)> = first.into_iter().filter(|(_, sigs)| sigs[0] != sigs[1]).map(|(k, _)| k).collect();
+            let mut random: Vec<(usize, usize)> = first.into_iter().filter(|(_, sigs)| sigs[0] != sigs[1]).map(|(k, _)| k).collect();
+            random.sort();
             expanded.extend(run_jobs(random.into_iter().flat_map(|(row, option)| (2..samples as u64).map(move |s| (row, option, s))).collect()));
         }
         let mut seen: HashMap<String, usize> = HashMap::new();
@@ -1128,6 +1271,160 @@ impl VecEnv {
             *out.capped.entry(k).or_default() += 1;
         }
         out
+    }
+
+    /// For each of `envs` waiting at a decision short of a map step, every
+    /// option's afterstate trees under `samples` reseeds (`expand_tree`),
+    /// kept until the next call: `afterstate_scores` scores them from the
+    /// values of the rows returned, the distinct settled states' forecast
+    /// fights. An env at a map step gets none. An option whose first two
+    /// samples settle the same is taken as deterministic and gets no more.
+    /// Computed only when asked, so training pays nothing for it.
+    pub fn afterstates(&mut self, envs: &[usize], samples: usize, caps: Caps) -> AfterstateRows {
+        let path = runobs::DECISIONS.iter().position(|&d| d == "Path").expect("the map step") as i64 + 1;
+        let segment = |env: usize| {
+            let slot = self.slots[env].run.as_ref().expect("run mode");
+            match &slot.chooser {
+                Choosing::Caller(segment) if segment.waiting.is_some() => (&slot.run, segment),
+                _ => panic!("env {env}: not at a run decision"),
+            }
+        };
+        let run_jobs = |jobs: Vec<(usize, usize, u64)>| {
+            jobs.into_par_iter()
+                .map(|(row, option, sample)| {
+                    let (run, seg) = segment(envs[row]);
+                    let answer = seg.waiting.as_ref().expect("waiting").answers[option];
+                    let (tree, capped) = expand_tree(caps, &seg.answers, answer, sample, |c| play_segment(run, seg.fought, c));
+                    (row, option, sample, tree, capped)
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut names = Vec::with_capacity(envs.len());
+        let mut jobs = Vec::new();
+        for (row, &env) in envs.iter().enumerate() {
+            let obs = segment(env).1.waiting.as_ref().expect("waiting");
+            names.push(obs.names.clone());
+            if obs.ids[0] != path {
+                jobs.extend((0..obs.answers.len()).flat_map(|option| (0..samples.min(2) as u64).map(move |sample| (row, option, sample))));
+            }
+        }
+        let mut expanded = run_jobs(jobs);
+        if samples > 2 {
+            let mut first: HashMap<(usize, usize), Vec<_>> = HashMap::new();
+            for (row, option, _, tree, _) in &expanded {
+                first.entry((*row, *option)).or_default().push(tree_signature(tree));
+            }
+            let mut random: Vec<(usize, usize)> = first.into_iter().filter(|(_, sigs)| sigs[0] != sigs[1]).map(|(k, _)| k).collect();
+            random.sort();
+            expanded.extend(run_jobs(random.into_iter().flat_map(|(row, option)| (2..samples as u64).map(move |s| (row, option, s))).collect()));
+        }
+        let mut seen: HashMap<String, usize> = HashMap::new();
+        let mut states: Vec<RunState> = Vec::new();
+        let mut shut: BTreeSet<(usize, String)> = BTreeSet::new();
+        let mut leaves = 0;
+        let mut trees = Vec::with_capacity(expanded.len());
+        for (row, option, sample, tree, capped) in expanded {
+            shut.extend(capped.into_iter().map(|k| (row, k)));
+            let mut leaf = |s: Settle| {
+                leaves += 1;
+                if s.end.is_some() || s.state.hp <= 0 {
+                    return Leaf::Ended { won: matches!(s.end, Some(forward::End::Won)) };
+                }
+                Leaf::State(*seen.entry(s.key).or_insert_with(|| {
+                    states.push(s.state);
+                    states.len() - 1
+                }))
+            };
+            let nodes = tree
+                .into_iter()
+                .map(|n| match n {
+                    Node::Settled(s) => Node::Settled(leaf(s)),
+                    Node::Opened { names, children } => Node::Opened { names, children },
+                })
+                .collect();
+            trees.push(Tree { row, option, sample, nodes });
+        }
+        trees.sort_by_key(|t| (t.row, t.option, t.sample));
+        let mut capped = BTreeMap::new();
+        for (_, k) in shut {
+            *capped.entry(k).or_default() += 1;
+        }
+
+        let fights: Vec<Vec<FightSetup>> = states.par_iter().map(runobs::forecast_fights).collect();
+        let all: Vec<FightSetup> = fights.iter().flatten().cloned().collect();
+        let (floats, ids) = runobs::forecast_rows(&all);
+        let mut rows = vec![0];
+        rows.extend(fights.iter().scan(0, |n, f| {
+            *n += f.len();
+            Some(*n)
+        }));
+        let pending = Pending {
+            names,
+            trees,
+            hp: states.iter().map(|s| s.hp.max(0) as f32 / s.max_hp.max(1) as f32).collect(),
+            rows,
+            boss: all.iter().map(|f| f.encounter.kind() == Kind::Boss).collect(),
+            capped,
+            scores: None,
+        };
+        self.pending = Some(pending);
+        AfterstateRows { floats, ids, leaves, states: states.len() }
+    }
+
+    /// Scores every option of the decisions `afterstates` built last from
+    /// `values`, the value head's read of its rows: a settled state's
+    /// score is the calibrated win chance (`win . [V, hp, 1]` through a
+    /// sigmoid, `sts2ai.forecast.Calibration`) of the act's elites, pooled,
+    /// plus the boss's, each from the value `V` averaged over its
+    /// openings and the state's HP fraction; a run won in the option
+    /// scores 1, one that died or is stuck 0. A sub-decision takes its
+    /// best option and an option the mean over its samples.
+    pub fn afterstate_scores(&mut self, values: &[f32], win: [f64; 3]) -> AfterstateScores {
+        let p = self.pending.as_mut().expect("afterstates to score");
+        assert_eq!(values.len(), *p.rows.last().expect("rows"), "a value per forecast row");
+        const R: usize = runobs::FORECAST_ROLLS;
+        let scores: Vec<f64> = (0..p.hp.len())
+            .map(|s| {
+                let (mut sum, mut count) = ([0f64; 2], [0usize; 2]);
+                for g in (p.rows[s]..p.rows[s + 1]).step_by(R) {
+                    let v = values[g..g + R].iter().sum::<f32>() / R as f32;
+                    let x = win[0] * v as f64 + win[1] * p.hp[s] as f64 + win[2];
+                    let boss = p.boss[g] as usize;
+                    sum[boss] += 1.0 / (1.0 + (-x).exp());
+                    count[boss] += 1;
+                }
+                sum[0] / count[0].max(1) as f64 + sum[1] / count[1].max(1) as f64
+            })
+            .collect();
+        let mut score = vec![f32::NAN; p.names.len() * runobs::MAX_OPTIONS];
+        for trees in p.trees.chunk_by(|a, b| (a.row, a.option) == (b.row, b.option)) {
+            let mean = trees.iter().map(|t| t.value(0, &scores)).sum::<f64>() / trees.len() as f64;
+            score[trees[0].row * runobs::MAX_OPTIONS + trees[0].option] = mean as f32;
+        }
+        p.scores = Some(scores);
+        AfterstateScores { score, capped: p.capped.clone() }
+    }
+
+    /// Option `option` of row `row` of the decisions `afterstate_scores`
+    /// scored last, in words, and the sub-decisions' options on its best
+    /// path under its best sample, the first on a tie.
+    pub fn afterstate_option(&self, row: usize, option: usize) -> (String, Vec<String>) {
+        let p = self.pending.as_ref().expect("afterstates");
+        let scores = p.scores.as_deref().expect("afterstates scored");
+        let first_best = |values: &mut dyn Iterator<Item = f64>| {
+            values.enumerate().fold((0, f64::NEG_INFINITY), |best, (k, v)| if v > best.1 { (k, v) } else { best }).0
+        };
+        let trees: Vec<&Tree> = p.trees.iter().filter(|t| (t.row, t.option) == (row, option)).collect();
+        let mut via = Vec::new();
+        if let Some(tree) = trees.get(first_best(&mut trees.iter().map(|t| t.value(0, scores)))) {
+            let mut i = 0;
+            while let Node::Opened { names, children } = &tree.nodes[i] {
+                let j = first_best(&mut children.clone().map(|c| tree.value(c, scores)));
+                via.push(names[j].clone());
+                i = children.start + j;
+            }
+        }
+        (p.names[row][option].clone(), via)
     }
 
     /// Answer the run decision each of `envs` waits at with its option
@@ -2299,17 +2596,23 @@ pub(crate) mod tests {
         let waiting = env.run_waiting();
         let options: Vec<usize> = waiting.iter().map(|&i| env.slots[i].run.as_ref().and_then(RunSlot::waiting).expect("waiting").answers.len()).collect();
         assert!(waiting.len() == n && options.iter().all(|&o| o > 1), "every run waits at its first ancient");
-        let after = env.afterstates(&waiting, 2, caps);
-        let covered: HashSet<(usize, usize, u64)> = after.leaves.iter().map(|l| (l.row, l.option, l.sample)).collect();
+        let rows = env.afterstates(&waiting, 2, caps);
+        let p = env.pending.as_ref().expect("afterstates");
+        let covered: HashSet<(usize, usize, u64)> = p.trees.iter().map(|t| (t.row, t.option, t.sample)).collect();
         assert_eq!(covered.len(), options.iter().sum::<usize>() * 2, "every option, every sample");
-        assert!(after.leaves.iter().all(|l| l.fights < after.fights.len() && (l.end.is_some() || !after.fights[l.fights].is_empty())));
+        let live = |n: &Node<Leaf>| match n {
+            Node::Settled(Leaf::State(s)) => Some(*s),
+            _ => None,
+        };
+        assert!(p.trees.iter().flat_map(|t| t.nodes.iter().filter_map(live)).all(|s| p.rows[s + 1] > p.rows[s]), "a live state has its forecast fights");
+        assert_eq!(rows.floats.len(), p.rows.last().expect("rows") * N_FLOATS);
         let zeros = vec![0; n];
         env.step_run(&waiting, &zeros.iter().map(|&z| z as i64).collect::<Vec<_>>(), &mut floats, &mut ids, &mut mask);
         let waiting = env.run_waiting();
         let at_path = |i: &usize| env.slots[*i].run.as_ref().and_then(RunSlot::waiting).is_some_and(|o| o.ids[0] == 1);
         let path: Vec<usize> = waiting.iter().copied().filter(at_path).collect();
         assert!(!path.is_empty(), "a map step follows the ancient's relic");
-        assert!(env.afterstates(&path, 2, caps).leaves.is_empty(), "a map step is the policy's");
+        assert_eq!(env.afterstates(&path, 2, caps).leaves, 0, "a map step is the policy's");
     }
 
     #[test]

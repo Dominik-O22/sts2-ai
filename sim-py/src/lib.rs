@@ -261,9 +261,9 @@ impl VecEnv {
     /// (their row is the fights index), each row's options in words, and
     /// the decisions where a cap kept a sub-decision shut, by decision
     /// kind and cap.
-    fn afterstates<'py>(&self, py: Python<'py>, envs: Vec<usize>, samples: usize, depth: usize, nodes: usize) -> Afterstates<'py> {
+    fn afterstate_leaves<'py>(&self, py: Python<'py>, envs: Vec<usize>, samples: usize, depth: usize, nodes: usize) -> Afterstates<'py> {
         let caps = sim::env::Caps { depth, nodes };
-        let after = py.detach(|| self.inner.afterstates(&envs, samples, caps));
+        let after = py.detach(|| self.inner.afterstate_leaves(&envs, samples, caps));
         let leaves = after
             .leaves
             .into_iter()
@@ -271,6 +271,39 @@ impl VecEnv {
             .collect();
         let fights: Vec<&[sim::gen::FightSetup]> = after.fights.iter().map(Vec::as_slice).collect();
         (leaves, forecast_rows(py, &fights), after.names, after.capped)
+    }
+
+    /// Builds the afterstates of every option of the decisions `envs` wait
+    /// at (`sim::env::VecEnv::afterstates`, none at a map step) and returns
+    /// what the value head reads for them: the distinct settled states'
+    /// forecast fights as combat rows `floats [n * N_FLOATS]` and `ids [n *
+    /// N_IDS]`, and how many leaves and distinct states the trees hold.
+    fn afterstates<'py>(&mut self, py: Python<'py>, envs: Vec<usize>, samples: usize, depth: usize, nodes: usize) -> AfterstateRows<'py> {
+        let caps = sim::env::Caps { depth, nodes };
+        let rows = py.detach(|| self.inner.afterstates(&envs, samples, caps));
+        (rows.floats.into_pyarray(py), rows.ids.into_pyarray(py), rows.leaves, rows.states)
+    }
+
+    /// Scores the afterstates built last from the value head's `values` of
+    /// their rows and the calibration's win coefficients
+    /// (`sim::env::VecEnv::afterstate_scores`): `score [rows *
+    /// MAX_OPTIONS]`, NaN where a row has no such option, and the decisions
+    /// where a cap kept a sub-decision shut, by decision kind and cap.
+    fn afterstate_scores<'py>(
+        &mut self,
+        py: Python<'py>,
+        values: PyReadonlyArray1<f32>,
+        win: (f64, f64, f64),
+    ) -> PyResult<(Bound<'py, PyArray1<f32>>, std::collections::BTreeMap<String, usize>)> {
+        let v = values.as_slice()?;
+        let scored = py.detach(|| self.inner.afterstate_scores(v, [win.0, win.1, win.2]));
+        Ok((scored.score.into_pyarray(py), scored.capped))
+    }
+
+    /// Option `option` of row `row` of the afterstates scored last, in
+    /// words, and the sub-decisions' options on its best path.
+    fn afterstate_option(&self, row: usize, option: usize) -> (String, Vec<String>) {
+        self.inner.afterstate_option(row, option)
     }
 
     /// Answer each of `envs`' run decision with its option token
@@ -1006,6 +1039,9 @@ type Imitation<'py> =
 /// counts (`afterstates`).
 type Afterstates<'py> =
     (Vec<(usize, usize, u64, Vec<(usize, String)>, f32, Option<String>, bool, usize)>, Forecast<'py>, Vec<Vec<String>>, std::collections::BTreeMap<String, usize>);
+
+/// Afterstates' combat rows, leaves and distinct states (`afterstates`).
+type AfterstateRows<'py> = (Bound<'py, PyArray1<f32>>, Bound<'py, PyArray1<i64>>, usize, usize);
 
 /// Forecast fights at their openings (`sim::runobs::forecast_rows`):
 /// combat rows `floats [n * N_FLOATS]` and `ids [n * N_IDS]`, the run row
