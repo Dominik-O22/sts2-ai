@@ -66,12 +66,17 @@ forces versus checks, and the dev console commands.
 A new worktree gets `decompiled/` copied in (`.worktreeinclude`). It does
 not get `runs/`: read checkpoints from the main tree by absolute path. Its
 `.venv` and `target/` are its own, so the first build there takes a while.
+The Python extension builds into `py/sts2ai/_sim*.so`, untracked, so run
+`uv sync --reinstall-package sts2ai` in a new worktree before any Python.
+Copying the main tree's `.venv` (`cp --reflink`) saves the download, but its
+`sts2ai.pth` still points at the main tree's `py/` until that sync.
 
 ## Commands
 
 ```
-cd sim && cargo test --release              # 53 tests
+cd sim && cargo test --release              # check its exit code, not a pipe's
 cd sim && cargo run --release --bin replay  # every recording against the sim
+cd sim && cargo run --release --example runcheck -- --effects ~/.local/share/SlayTheSpire2/steam/*/modded/profile1/saves/history/*.run   # real runs against the run layer
 uv sync --reinstall-package sts2ai          # rebuild the Python extension
 uv run python -m sts2ai.vocab               # checkpoint remap self-check
 ./scripts/build-mod.sh                      # recorder mod + bridge, needs a game restart
@@ -82,3 +87,18 @@ uv run python -m sts2ai.train --iters 500
 Run the replay suite after any change to the sim. It is the regression suite
 that matters; the unit tests only cover mechanics a replay diff would not
 pin down.
+
+## Judging a change to run decisions
+
+`scripts/ab.sh NAME "ARGS A" "ARGS B"` plays both arms side by side on the
+same 2,048 seeds with the standard settings (gen8 fights, turn search in
+elites and bosses) and prints `sts2ai.paired`: each difference with a 95%
+interval. Use it for every run-policy change, and change one thing per arm.
+A single arm against a number from an older log is not a result: seeds,
+combat checkpoint and search settings drift, and at a 4% win rate 2,048 runs
+only separate differences of about a point. An interval that spans zero is
+noise; say so rather than reading a trend into it.
+
+Work on a branch off current master and land it before starting the next
+thing on top. Evals run from long-lived side branches missed the sim
+speedup and the newest combat model for days.
