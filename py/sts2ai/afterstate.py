@@ -84,7 +84,7 @@ class Scorer:
         self.differs: Counter[str] = Counter()
         self.capped: Counter[str] = Counter()
         self.leaves = self.states = self.rows = 0
-        self.sim_seconds = self.head_seconds = 0.0
+        self.sim_seconds = self.head_seconds = self.all_seconds = 0.0
 
     def score(self, waiting: list[int]) -> Scored:
         """Every option of the decisions `waiting` wait at."""
@@ -130,6 +130,7 @@ class Scorer:
         best option, the policy's pick on an exact tie. Only `rows` (all
         by default) of `kinds` are scored; the sim builds no afterstates
         for the others, whose picks stay the policy's."""
+        t = time.perf_counter()
         path = DECISIONS.index("Path")
         rows = [
             k for k in (range(len(waiting)) if rows is None else rows) if ids[k, 0] != path and (not self.kinds or DECISIONS[ids[k, 0]] in self.kinds)
@@ -148,6 +149,7 @@ class Scorer:
             options[k] = policy[k] if policy[k] in tied else tied[0]
             self.decisions[kind] += 1
             self.differs[kind] += options[k] != policy[k]
+        self.all_seconds += time.perf_counter() - t
         return options, scored
 
     def report(self) -> None:
@@ -157,7 +159,8 @@ class Scorer:
             print(f"  {kind:8s} {d:6d}: differs {self.differs[kind] / d:.0%}")
         print(
             f"  cost per decision: {self.leaves / n:.0f} leaves, {self.states / n:.0f} states, {self.rows / n:.0f} combat rows,"
-            f" {self.sim_seconds / n * 1000:.1f} ms sim, {self.head_seconds / n * 1000:.1f} ms value head"
+            f" {self.sim_seconds / n * 1000:.1f} ms sim, {self.head_seconds / n * 1000:.1f} ms value head,"
+            f" {(self.all_seconds - self.sim_seconds - self.head_seconds) / n * 1000:.1f} ms the rest"
         )
         if self.capped:
             print("  decisions with a sub-decision shut by a cap: " + ", ".join(f"{k} {v}" for k, v in self.capped.most_common()))
