@@ -19,6 +19,14 @@ next decision is searched again rather than played as the policy would.
 That needs a few copies per second play: 2048 is a good N. The best plan
 is printed as the whole line of plays. Draw piles are reshuffled per group of
 copies, since the plan must not know what you will draw.
+
+That is `--search-mode copies`. The default, `hybrid`, searches with
+`exactsearch.Hybrid` instead, and N only turns it on: every distinct line
+to the end of the turn, the best `--top` of them each played out
+`--playouts` times to the fight's end on shared dice, and the line picked
+is followed until chance or the turn's end takes the fight off it.
+`race` plays the lines out `--race` at a time and drops the ones that
+fall behind.
 """
 
 from __future__ import annotations
@@ -34,7 +42,8 @@ import numpy as np
 import torch
 
 from sts2ai import _sim
-from sts2ai.env import DEFAULT_RECORDINGS, Layout
+from sts2ai.env import DEFAULT_RECORDINGS, Envs, Layout
+from sts2ai.exactsearch import Hybrid
 from sts2ai.model import Policy, load_policy, masked_logits
 from sts2ai.search import PLAN_MARGIN, openings, rollout, spread
 
@@ -45,11 +54,12 @@ class Session:
     """One recording followed line by line: the sim kept in sync, and the
     policy's pick printed once per decision point."""
 
-    def __init__(self, policy: Policy, device: torch.device, search: int = 0, groups: int = 4):
+    def __init__(self, policy: Policy, device: torch.device, search: int = 0, groups: int = 4, hybrid: Hybrid | None = None):
         self.policy = policy
         self.device = device
         self.search = search
         self.groups = groups
+        self.hybrid = hybrid
         # Pick by sampling the policy instead of taking its favourite, so
         # repeated recordings of one fight take different branches.
         self.sample = False
@@ -135,7 +145,9 @@ class Session:
             return None
         # With search on, the plan is the advice; the policy's own pick only
         # breaks ties inside it.
-        if self.search:
+        if (hybrid := self.hybrid) is not None:
+            pick = self.hybrid_pick(hybrid, probs, banned)
+        elif self.search:
             pick = self.plan(ranked[0][0], banned)
         else:
             for rank, (action, p) in enumerate(ranked[: 1 + ALTERNATIVES]):
@@ -150,6 +162,28 @@ class Session:
                 legal = np.flatnonzero(self.mask[0])
                 pick = int(np.random.choice(legal, p=probs[legal] / probs[legal].sum()))
         print()
+        return pick
+
+    def hybrid_pick(self, hybrid: Hybrid, probs: np.ndarray, banned: set[int]) -> int:
+        """The hybrid search's pick for this decision, the fight searched as
+        the hybrid's one env. `probs` is the policy's over the legal actions
+        the game has not refused; the policy's favourite stands when it is
+        the only one, or when the line picked opens with a refused action."""
+        own = int(probs.argmax())
+        if np.count_nonzero(self.mask[0]) == 1:
+            print(f"  => {self.sim.describe(own)}")
+            return own
+        hybrid.envs.sim.load_combat(0, self.sim)
+        actions = np.array([own])
+        followed, t0 = hybrid.followed, time.perf_counter()
+        hybrid.choose(self.policy, self.device, [0], probs[None], actions)
+        # Search stats are for exactsearch's report; a session keeps none.
+        hybrid.planner.searched.clear()
+        ms = (time.perf_counter() - t0) * 1000
+        pick = own if int(actions[0]) in banned else int(actions[0])
+        how = "following the line" if hybrid.followed > followed else f"searched in {ms:.0f} ms"
+        note = "" if pick == own else f", over the policy's {self.sim.describe(own)}"
+        print(f"  => {self.sim.describe(pick)}  ({how}{note})")
         return pick
 
     @torch.no_grad()
@@ -230,6 +264,23 @@ def replay_lines(path: Path, delay: float) -> Iterator[str | None]:
         time.sleep(delay)
 
 
+def add_search_args(ap: argparse.ArgumentParser) -> None:
+    ap.add_argument("--search", type=int, default=0, help="turn search at every decision (0: policy only); copies mode: this many sim copies")
+    ap.add_argument("--search-mode", choices=("copies", "hybrid", "race"), default="hybrid", help="copies: --search N copies; hybrid, race: exactsearch.Hybrid")
+    ap.add_argument("--groups", type=int, default=4, help="draw-pile shuffles the search copies are split over")
+    ap.add_argument("--top", type=int, default=10, help="lines the hybrid plays out")
+    ap.add_argument("--playouts", type=int, default=32, help="playouts per line in the hybrid")
+    ap.add_argument("--race", type=int, default=8, help="playouts per round with --search-mode race")
+    ap.add_argument("--seed", type=int, default=0, help="the hybrid's dice")
+
+
+def hybrid_of(args: argparse.Namespace) -> Hybrid | None:
+    """The hybrid `add_search_args` asked for, None for no search or copies."""
+    if not args.search or args.search_mode == "copies":
+        return None
+    return Hybrid(Envs(1), args.top, args.playouts, args.race if args.search_mode == "race" else 0, args.seed)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("checkpoint", type=Path)
@@ -237,8 +288,7 @@ def main() -> None:
     ap.add_argument("--replay", type=Path, help="feed this recording instead of following the game")
     ap.add_argument("--delay", type=float, default=0.2, help="seconds between records when replaying")
     ap.add_argument("--poll", type=float, default=0.1, help="seconds between checks of the recordings folder")
-    ap.add_argument("--search", type=int, default=0, help="turn search with this many sim copies (0: policy only)")
-    ap.add_argument("--groups", type=int, default=4, help="draw-pile shuffles the search copies are split over")
+    add_search_args(ap)
     args = ap.parse_args()
     # Advice is worth nothing late: keep it flowing when stdout is a pipe.
     sys.stdout.reconfigure(line_buffering=True)
@@ -247,7 +297,7 @@ def main() -> None:
     policy = load_policy(args.checkpoint, device)
     policy.eval()
 
-    session = Session(policy, device, args.search, args.groups)
+    session = Session(policy, device, args.search, args.groups, hybrid_of(args))
     lines = replay_lines(args.replay, args.delay) if args.replay else live_lines(args.dir, args.poll)
     for line in lines:
         if line is None:
