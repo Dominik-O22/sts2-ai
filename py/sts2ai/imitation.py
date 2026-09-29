@@ -4,10 +4,15 @@ where the walk is faithful to it (`sim::history::imitate`), as the policy
 would see it, with the option the player took.
 
     uv run python -m sts2ai.imitation build          # tracker/*.run -> tracker/imitation/{train,holdout}.npz
+    uv run python -m sts2ai.imitation build --combat COMBAT --forecast CALIBRATION.json --out DIR
     uv run python -m sts2ai.imitation agree CKPT...  # holdout top-1 agreement by decision kind
     uv run python -m sts2ai.runtrain COMBAT --run-dir runs/imitate-1 --imitate ~/.local/share/SlayTheSpire2/sts2ai/tracker/imitation/train.npz --minutes 0
 
 Runs are split by player (`setups.holdout_player`), as the fights are.
+
+With `--combat` and `--forecast`, map steps carry the forecast
+(`sts2ai.forecast`): the winners' states as our combat model reads them,
+filled in as runtrain and runplay fill theirs. Without, its slots stay 0.
 """
 
 from __future__ import annotations
@@ -22,7 +27,9 @@ import numpy as np
 import torch
 
 from sts2ai import _sim
-from sts2ai.env import RunLayout
+from sts2ai.env import Layout, RunLayout
+from sts2ai.forecast import Calibration, Fights, Forecaster
+from sts2ai.model import load_policy
 from sts2ai.runmodel import RunArch, RunPolicy, load_run_policy
 from sts2ai.setups import TRACKER, holdout_player
 
@@ -66,8 +73,8 @@ class Rows:
             return cls(**{f: z[f] for f in cls.__dataclass_fields__})
 
 
-def build(runs_dir: Path, out: Path, share: float) -> None:
-    L = RunLayout.load()
+def build(runs_dir: Path, out: Path, share: float, forecast: Forecaster | None = None) -> None:
+    L, C = RunLayout.load(), Layout.load()
     parts: dict[str, list[tuple]] = {"train": [], "holdout": []}
     names: dict[str, list[str]] = {"train": [], "holdout": []}
     players: dict[str, set[str]] = {"train": set(), "holdout": set()}
@@ -78,15 +85,18 @@ def build(runs_dir: Path, out: Path, share: float) -> None:
         if got is None:
             continue
         walked += 1
-        floats, ids, option, floor, streamed, dropped = got
+        floats, ids, option, floor, streamed, dropped, fights = got
         left_out.update(dropped)
         if not option:
             continue
+        n = len(option)
+        floats = floats.reshape(n, L.run_floats)
+        if forecast is not None:
+            forecast.fill(floats, Fights.of(fights, C.n_floats, C.n_ids))
         player = path.name.rsplit("-", 1)[0]
         split = "holdout" if holdout_player(player, share) else "train"
-        n = len(option)
         run = np.full(n, len(names[split]), dtype=np.int32)
-        parts[split].append((floats.reshape(n, L.run_floats).astype(np.float16), ids.reshape(n, L.run_ids).astype(np.int16), option, floor, streamed, run))
+        parts[split].append((floats.astype(np.float16), ids.reshape(n, L.run_ids).astype(np.int16), option, floor, streamed, run))
         names[split].append(path.stem)
         players[split].add(player)
     out.mkdir(parents=True, exist_ok=True)
@@ -189,13 +199,19 @@ def main() -> None:
     b.add_argument("--runs", type=Path, default=TRACKER)
     b.add_argument("--out", type=Path, default=OUT)
     b.add_argument("--holdout", type=float, default=0.15, help="share of players held out")
+    b.add_argument("--combat", type=Path, default=None, help="combat checkpoint whose value head the forecast reads")
+    b.add_argument("--forecast", type=Path, default=None, help="its calibration (forecast calibrate --out)")
     a = sub.add_parser("agree", help="holdout top-1 agreement by decision kind")
     a.add_argument("checkpoints", type=Path, nargs="*")
     a.add_argument("--holdout", type=Path, default=OUT / "holdout.npz")
     a.add_argument("--no-untrained", dest="untrained", action="store_false")
     args = ap.parse_args()
     if args.cmd == "build":
-        build(args.runs, args.out, args.holdout)
+        forecast = None
+        if args.combat and args.forecast:
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            forecast = Forecaster(load_policy(args.combat, device).eval(), device, Calibration.load(args.forecast))
+        build(args.runs, args.out, args.holdout, forecast)
     else:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         agree(args.checkpoints, Rows.load(args.holdout), device, args.untrained)

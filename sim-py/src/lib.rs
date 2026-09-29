@@ -236,6 +236,11 @@ impl VecEnv {
         Ok(())
     }
 
+    /// The forecast fights of the decisions `envs` wait at (`forecast_rows`).
+    fn forecast<'py>(&self, py: Python<'py>, envs: Vec<usize>) -> Forecast<'py> {
+        forecast_rows(py, &self.inner.forecast(&envs))
+    }
+
     /// Answer each of `envs`' run decision with its option token
     /// `options[k]` and play on, writing the combat rows of the fights that
     /// start. Returns the runs that ended: (env, run).
@@ -865,6 +870,10 @@ fn run_layout(py: Python<'_>) -> PyResult<Bound<'_, PyDict>> {
         ("option_cards", OPTION_CARDS),
         ("global_ids", GLOBAL_IDS),
         ("global_floats", GLOBAL_FLOATS),
+        ("f_forecast", F_FORECAST),
+        ("forecast_floats", FORECAST_FLOATS),
+        ("forecast_rolls", FORECAST_ROLLS),
+        ("map_feats", MAP_FEATS),
         ("deck_ids", DECK_IDS),
         ("deck_floats", DECK_FLOATS),
         ("relic_ids", RELIC_IDS),
@@ -956,8 +965,24 @@ fn generate_run(seed: u64, floor: u32) -> String {
     sim::gen::generate(&mut sim::rng::Rng::new(seed), floor, sim::types::Ascension(10)).run_json().to_string()
 }
 
-/// Rows, options taken, floors, streamed flags and what was left out (`imitation`).
-type Imitation<'py> = (Bound<'py, PyArray1<f32>>, Bound<'py, PyArray1<i64>>, Vec<usize>, Vec<usize>, Vec<bool>, std::collections::BTreeMap<String, usize>);
+/// Rows, options taken, floors, streamed flags, what was left out and the
+/// rows' forecast fights (`imitation`).
+type Imitation<'py> =
+    (Bound<'py, PyArray1<f32>>, Bound<'py, PyArray1<i64>>, Vec<usize>, Vec<usize>, Vec<bool>, std::collections::BTreeMap<String, usize>, Forecast<'py>);
+
+/// Forecast fights at their openings (`sim::runobs::forecast_rows`):
+/// combat rows `floats [n * N_FLOATS]` and `ids [n * N_IDS]`, the run row
+/// each belongs to, and its encounter.
+type Forecast<'py> = (Bound<'py, PyArray1<f32>>, Bound<'py, PyArray1<i64>>, Vec<usize>, Vec<String>);
+
+/// The forecast fights of run rows, `fights[k]` those of row `k`.
+fn forecast_rows<'py>(py: Python<'py>, fights: &[&[sim::gen::FightSetup]]) -> Forecast<'py> {
+    let owner = fights.iter().enumerate().flat_map(|(k, f)| std::iter::repeat_n(k, f.len())).collect();
+    let all: Vec<sim::gen::FightSetup> = fights.iter().flat_map(|f| f.iter().cloned()).collect();
+    let encounters = all.iter().map(|f| format!("{:?}", f.encounter)).collect();
+    let (floats, ids) = py.detach(|| runobs::forecast_rows(&all));
+    (floats.into_pyarray(py), ids.into_pyarray(py), owner, encounters)
+}
 
 /// A run history's decisions as the run policy would see them, where the
 /// walk is faithful to the record (`sim::history::imitate`), or None for a
@@ -976,7 +1001,9 @@ fn imitation<'py>(py: Python<'py>, run: &str) -> PyResult<Option<Imitation<'py>>
     let option = im.rows.iter().map(|r| r.option).collect();
     let floor = im.rows.iter().map(|r| r.floor).collect();
     let streamed = im.rows.iter().map(|r| r.streamed).collect();
-    Ok(Some((floats.into_pyarray(py), ids.into_pyarray(py), option, floor, streamed, im.left_out)))
+    let fights: Vec<&[sim::gen::FightSetup]> = im.rows.iter().map(|r| r.obs.forecast.as_slice()).collect();
+    let forecast = forecast_rows(py, &fights);
+    Ok(Some((floats.into_pyarray(py), ids.into_pyarray(py), option, floor, streamed, im.left_out, forecast)))
 }
 
 /// Game ids of the cards the sim refuses to play (`card::UNSUPPORTED_CARDS`).

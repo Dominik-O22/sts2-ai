@@ -502,6 +502,19 @@ uv run python -m sts2ai.imitation agree runs/run-4/latest.pt runs/imitate-1/imit
 uv run python -m sts2ai.runtrain runs/set-14/it40000.pt --run-dir runs/run-6 --imitate $I/train.npz --minutes 60   # then PPO
 ```
 
+With the forecast (docs/run-env.md, The forecast), calibrate it for the
+combat checkpoint on a played log first, then build the rows with the
+same checkpoint and calibration; the clone and every PPO run from it keep
+the calibration:
+
+```
+C=runs/gen7/latest.pt
+uv run python -m sts2ai.runplay $C --run-policy runs/imitate-paths/imitated.pt --envs 256 --runs-per-env 8 --search 256 --search-kinds Weak,Normal,Elite,Boss --forecast-log runs/forecast/log.jsonl
+uv run python -m sts2ai.forecast calibrate runs/forecast/log.jsonl --acts 0,1,2 --combat $C --out runs/forecast/gen7-calibration.json
+uv run python -m sts2ai.imitation build --combat $C --forecast runs/forecast/gen7-calibration.json --out ${I}-forecast
+uv run python -m sts2ai.runtrain $C --run-dir runs/imitate-forecast --imitate ${I}-forecast/train.npz --forecast runs/forecast/gen7-calibration.json --minutes 0
+```
+
 `--imitate` trains on cross-entropy over the chosen option, with the
 policy's own option masking, `--imitate-epochs` (8) passes of batches of
 256 at lr 1e-3. It leaves the value head alone, so PPO starts with an
