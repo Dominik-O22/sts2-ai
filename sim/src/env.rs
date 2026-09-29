@@ -515,9 +515,14 @@ pub struct Caps {
     pub nodes: usize,
 }
 
-/// What the forecast fights read of a settled state.
+/// What the forecast fights read of a settled state: the act's elites and
+/// bosses, which differ between runs, and the player.
 fn settled_key(state: &RunState) -> String {
-    format!("{} {} {} {:?} {:?} {:?}", state.act, state.hp, state.max_hp, state.deck, state.relics, state.potions)
+    let plan = &state.plan.acts[state.act];
+    format!(
+        "{} {:?} {:?} {:?} {} {} {:?} {:?} {:?}",
+        state.act, plan.act, plan.boss, plan.second_boss, state.hp, state.max_hp, state.deck, state.relics, state.potions
+    )
 }
 
 /// A node of an option's afterstate tree (`expand`), the root first
@@ -2367,8 +2372,9 @@ pub(crate) mod tests {
     /// Dig at a rest site (the Rewards stream and the bag) and to Trash
     /// Heap's Dive In (the event's own stream) on their own draws; under a
     /// reseed their afterstates are one player, forecast the same, and
-    /// move with the sample. Smith opens the deck pick under it, and every
-    /// option of a waiting env gets its leaves, a map step none.
+    /// move with the sample. Smith opens the deck pick under it, every
+    /// option of a waiting env gets its trees, a map step none, and runs
+    /// whose acts differ share no settled state.
     #[test]
     fn the_afterstate_reads_no_hidden_information() {
         use crate::game_rng::{GameRng, RunRngs};
@@ -2465,6 +2471,21 @@ pub(crate) mod tests {
         };
         assert!(p.trees.iter().flat_map(|t| t.nodes.iter().filter_map(live)).all(|s| p.rows[s + 1] > p.rows[s]), "a live state has its forecast fights");
         assert_eq!(rows.floats.len(), p.rows.last().expect("rows") * N_FLOATS);
+        // The runs' acts hold different elites and bosses, so a state is
+        // shared only by runs whose act is planned alike.
+        let plan = |row: usize| {
+            let state = &env.slots[waiting[row]].run.as_ref().expect("run mode").run.state;
+            let act = &state.plan.acts[state.act];
+            format!("{:?} {:?} {:?}", act.act, act.boss, act.second_boss)
+        };
+        let mut planned: HashMap<usize, HashSet<_>> = HashMap::new();
+        for t in &p.trees {
+            for s in t.nodes.iter().filter_map(live) {
+                planned.entry(s).or_default().insert(plan(t.row));
+            }
+        }
+        assert!(HashSet::<_>::from_iter((0..n).map(plan)).len() > 1, "the runs' acts differ, or the test means nothing");
+        assert!(planned.values().all(|plans| plans.len() == 1), "a state shared by runs whose acts differ");
         let zeros = vec![0; n];
         env.step_run(&waiting, &zeros.iter().map(|&z| z as i64).collect::<Vec<_>>(), &mut floats, &mut ids, &mut mask);
         let waiting = env.run_waiting();
