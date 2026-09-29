@@ -125,15 +125,24 @@ class Scorer:
             via[(row, option)] = max(samples, key=lambda v: v[0])[1]
         return Scored(score, names, via)
 
-    def choose(self, waiting: list[int], ids: np.ndarray, policy: np.ndarray) -> tuple[np.ndarray, Scored]:
+    def choose(self, waiting: list[int], ids: np.ndarray, policy: np.ndarray, rows: list[int] | None = None) -> tuple[np.ndarray, Scored]:
         """`policy`'s picks with every scored decision's replaced by its
-        best option, the policy's pick on an exact tie."""
-        scored = self.score(waiting)
+        best option, the policy's pick on an exact tie. Only `rows` (all
+        by default) of `kinds` are scored; the sim builds no afterstates
+        for the others, whose picks stay the policy's."""
+        path = DECISIONS.index("Path")
+        rows = [
+            k for k in (range(len(waiting)) if rows is None else rows) if ids[k, 0] != path and (not self.kinds or DECISIONS[ids[k, 0]] in self.kinds)
+        ]
+        part = self.score([waiting[k] for k in rows])
+        scored = Scored(np.full((len(waiting), self.L.max_options), np.nan, dtype=np.float32), [[] for _ in waiting], {})
+        for i, k in enumerate(rows):
+            scored.score[k] = part.score[i]
+            scored.names[k] = part.names[i]
+        scored.via.update({(rows[i], j): v for (i, j), v in part.via.items()})
         options = policy.copy()
         for k in np.flatnonzero(np.isfinite(scored.score).any(1)):
             kind = DECISIONS[ids[k, 0]]
-            if self.kinds and kind not in self.kinds:
-                continue
             best = np.nanmax(scored.score[k])
             tied = np.flatnonzero(scored.score[k] == best)
             options[k] = policy[k] if policy[k] in tied else tied[0]
