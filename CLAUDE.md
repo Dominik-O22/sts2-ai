@@ -99,6 +99,14 @@ combat checkpoint and search settings drift, and at a 4% win rate 2,048 runs
 only separate differences of about a point. An interval that spans zero is
 noise; say so rather than reading a trend into it.
 
+Long jobs (evals, training) run as their own systemd units, never as plain
+children of the session: `ab.sh` puts each arm in a capped scope, and a
+job that must outlive the session starts with `systemd-run --user
+--unit=NAME --same-dir ...`. On 2026-09-29 two eval arms outgrew the
+memory left beside the desktop and systemd-oomd killed the whole terminal
+scope, the session and both arms with it. An `--afterstate` arm needs about
+8 GB, a plain one about 4.3 GB, and the desktop holds about 14 of the 30.
+
 Work on a branch off current master and land it before starting the next
 thing on top. Evals run from long-lived side branches missed the sim
 speedup and the newest combat model for days.
