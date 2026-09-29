@@ -515,15 +515,28 @@ pub struct Caps {
     pub nodes: usize,
 }
 
-/// A leaf of an option's afterstate tree: where the run settled.
+/// What the forecast fights read of a settled state.
+fn settled_key(state: &RunState) -> String {
+    format!("{} {} {} {:?} {:?} {:?}", state.act, state.hp, state.max_hp, state.deck, state.relics, state.potions)
+}
+
+/// A node of an option's afterstate tree (`expand`), the root first
+/// and the rest breadth first: where a branch settled, or a sub-decision
+/// it opened, whose options in token order are the nodes `children`.
+#[derive(Clone, Debug, PartialEq)]
+enum Node<L> {
+    Settled(L),
+    Opened { names: Vec<String>, children: std::ops::Range<usize> },
+}
+
+/// Where a branch settled.
 struct Settled {
-    /// The sub-decisions' answers on the way, each an option token and
-    /// its name.
-    path: Vec<(usize, String)>,
     state: RunState,
     end: Option<forward::End>,
     /// Stopped at a sub-decision the caps did not open.
     capped: bool,
+    /// What the forecast fights read of the state (`settled_key`).
+    key: String,
 }
 
 /// The afterstates of answering the decision a run waits at with
@@ -533,116 +546,10 @@ struct Settled {
 /// first map step, fight or end; at a sub-decision in the same room
 /// (which card to smith, an event's next page, a shop after a purchase)
 /// it opens every option, breadth first, while `caps` allow, since
-/// otherwise a smith settles as doing nothing. Returns the leaves and the
+/// otherwise a smith settles as doing nothing. Returns the tree and the
 /// caps that kept a sub-decision shut, as "kind cap".
-fn expand(caps: Caps, prefix: &[usize], answer: usize, sample: u64, play: impl Fn(&mut Branch) -> Stop) -> (Vec<Settled>, BTreeSet<String>) {
-    let mut queue = std::collections::VecDeque::from([(vec![answer], Vec::new())]);
-    let (mut leaves, mut capped) = (Vec::new(), BTreeSet::new());
-    let mut played = 0;
-    while let Some((branch, path)) = queue.pop_front() {
-        let answers: Vec<usize> = prefix.iter().chain(&branch).copied().collect();
-        let mut chooser = Branch { answers: &answers, option: prefix.len(), next: 0, sample: Some(sample) };
-        played += 1;
-        match play(&mut chooser) {
-            Stop::Through(state, end) => leaves.push(Settled { path, state, end, capped: false }),
-            Stop::Decision(state, None) => leaves.push(Settled { path, state, end: None, capped: false }),
-            Stop::Decision(state, Some(obs)) => {
-                let kind = runobs::DECISIONS[obs.ids[0] as usize - 1];
-                let shut = if path.len() >= caps.depth {
-                    Some("depth")
-                } else if played + queue.len() + obs.answers.len() > caps.nodes {
-                    Some("nodes")
-                } else {
-                    None
-                };
-                match shut {
-                    Some(cap) => {
-                        capped.insert(format!("{kind} {cap}"));
-                        leaves.push(Settled { path, state, end: None, capped: true });
-                    }
-                    None => {
-                        for (j, (&a, name)) in obs.answers.iter().zip(obs.names).enumerate() {
-                            let (mut branch, mut path) = (branch.clone(), path.clone());
-                            branch.push(a);
-                            path.push((j, name));
-                            queue.push_back((branch, path));
-                        }
-                    }
-                }
-            }
-        }
-    }
-    (leaves, capped)
-}
-
-/// One leaf of an option's afterstate tree (`VecEnv::afterstates`).
-#[derive(Clone, Debug)]
-pub struct Afterstate {
-    /// Index into the envs asked about.
-    pub row: usize,
-    /// The option token.
-    pub option: usize,
-    pub sample: u64,
-    /// The sub-decisions answered on the way: each an option token and
-    /// its name.
-    pub path: Vec<(usize, String)>,
-    /// The HP fraction where the run settled.
-    pub hp: f32,
-    /// How the run ended, if it did in the option.
-    pub end: Option<forward::End>,
-    /// Settled at a sub-decision the caps did not open.
-    pub capped: bool,
-    /// Index into `Afterstates::fights`.
-    pub fights: usize,
-}
-
-/// Every leaf of every option of the decisions asked about, with the
-/// forecast fights of the states they settled at, each distinct state
-/// once (none for a run that ended).
-#[derive(Debug, Default)]
-pub struct Afterstates {
-    pub leaves: Vec<Afterstate>,
-    pub fights: Vec<Vec<FightSetup>>,
-    /// Each decision's options in words, by row.
-    pub names: Vec<Vec<String>>,
-    /// Decisions where a cap kept a sub-decision shut, by decision kind
-    /// and cap ("Shop nodes").
-    pub capped: BTreeMap<String, usize>,
-}
-
-/// What a job's leaves settled as, to tell a random option (its samples
-/// settle differently) from one whose further samples would only repeat.
-fn signature(leaves: &[Settled]) -> Vec<(Vec<usize>, String, Option<forward::End>, bool)> {
-    leaves.iter().map(|l| (l.path.iter().map(|(j, _)| *j).collect(), settled_key(&l.state), l.end.clone(), l.capped)).collect()
-}
-
-/// What the forecast fights read of a settled state.
-fn settled_key(state: &RunState) -> String {
-    format!("{} {} {} {:?} {:?} {:?}", state.act, state.hp, state.max_hp, state.deck, state.relics, state.potions)
-}
-
-/// A node of an option's afterstate tree (`expand_tree`), the root first
-/// and the rest breadth first: where a branch settled, or a sub-decision
-/// it opened, whose options in token order are the nodes `children`.
-#[derive(Clone, Debug)]
-enum Node<L> {
-    Settled(L),
-    Opened { names: Vec<String>, children: std::ops::Range<usize> },
-}
-
-/// Where a branch settled, as `expand_tree` leaves it.
-struct Settle {
-    state: RunState,
-    end: Option<forward::End>,
-    /// Stopped at a sub-decision the caps did not open.
-    capped: bool,
-    /// What the forecast fights read of the state (`settled_key`).
-    key: String,
-}
-
-/// `expand` as a tree (`Node`).
-fn expand_tree(caps: Caps, prefix: &[usize], answer: usize, sample: u64, play: impl Fn(&mut Branch) -> Stop) -> (Vec<Node<Settle>>, BTreeSet<String>) {
-    let settle = |state: RunState, end, capped| Node::Settled(Settle { key: settled_key(&state), state, end, capped });
+fn expand(caps: Caps, prefix: &[usize], answer: usize, sample: u64, play: impl Fn(&mut Branch) -> Stop) -> (Vec<Node<Settled>>, BTreeSet<String>) {
+    let settle = |state: RunState, end, capped| Node::Settled(Settled { key: settled_key(&state), state, end, capped });
     let mut queue = std::collections::VecDeque::from([vec![answer]]);
     let (mut tree, mut capped) = (Vec::new(), BTreeSet::new());
     // Nodes are played in the order they are queued, so the next child
@@ -685,7 +592,7 @@ fn expand_tree(caps: Caps, prefix: &[usize], answer: usize, sample: u64, play: i
 /// What a tree settled as, to tell a random option (its samples settle
 /// differently) from one whose further samples would only repeat: each
 /// node's settled state, or its option count.
-fn tree_signature(tree: &[Node<Settle>]) -> Vec<(usize, Option<(&str, &Option<forward::End>, bool)>)> {
+fn signature(tree: &[Node<Settled>]) -> Vec<(usize, Option<(&str, &Option<forward::End>, bool)>)> {
     tree.iter()
         .map(|n| match n {
             Node::Settled(s) => (0, Some((s.key.as_str(), &s.end, s.capped))),
@@ -1210,71 +1117,7 @@ impl VecEnv {
     }
 
     /// For each of `envs` waiting at a decision short of a map step, every
-    /// option's afterstates under `samples` reseeds (`expand`), in `envs`
-    /// order, then option token, then sample; an env at a map step gives
-    /// none. An option whose first two samples settle the same is taken as
-    /// deterministic and gets no more. Computed only when asked, so
-    /// training pays nothing for it.
-    pub fn afterstate_leaves(&self, envs: &[usize], samples: usize, caps: Caps) -> Afterstates {
-        let path = runobs::DECISIONS.iter().position(|&d| d == "Path").expect("the map step") as i64 + 1;
-        let segment = |env: usize| {
-            let slot = self.slots[env].run.as_ref().expect("run mode");
-            match &slot.chooser {
-                Choosing::Caller(segment) if segment.waiting.is_some() => (&slot.run, segment),
-                _ => panic!("env {env}: not at a run decision"),
-            }
-        };
-        let run_jobs = |jobs: Vec<(usize, usize, u64)>| {
-            jobs.into_par_iter()
-                .map(|(row, option, sample)| {
-                    let (run, seg) = segment(envs[row]);
-                    let answer = seg.waiting.as_ref().expect("waiting").answers[option];
-                    let (leaves, capped) = expand(caps, &seg.answers, answer, sample, |c| play_segment(run, seg.fought, c));
-                    (row, option, sample, leaves, capped)
-                })
-                .collect::<Vec<_>>()
-        };
-        let mut out = Afterstates::default();
-        let mut jobs = Vec::new();
-        for (row, &env) in envs.iter().enumerate() {
-            let obs = segment(env).1.waiting.as_ref().expect("waiting");
-            out.names.push(obs.names.clone());
-            if obs.ids[0] != path {
-                jobs.extend((0..obs.answers.len()).flat_map(|option| (0..samples.min(2) as u64).map(move |sample| (row, option, sample))));
-            }
-        }
-        let mut expanded = run_jobs(jobs);
-        if samples > 2 {
-            let mut first: HashMap<(usize, usize), Vec<_>> = HashMap::new();
-            for (row, option, _, leaves, _) in &expanded {
-                first.entry((*row, *option)).or_default().push(signature(leaves));
-            }
-            let mut random: Vec<(usize, usize)> = first.into_iter().filter(|(_, sigs)| sigs[0] != sigs[1]).map(|(k, _)| k).collect();
-            random.sort();
-            expanded.extend(run_jobs(random.into_iter().flat_map(|(row, option)| (2..samples as u64).map(move |s| (row, option, s))).collect()));
-        }
-        let mut seen: HashMap<String, usize> = HashMap::new();
-        let mut shut: BTreeSet<(usize, String)> = BTreeSet::new();
-        for (row, option, sample, leaves, capped) in expanded {
-            shut.extend(capped.into_iter().map(|k| (row, k)));
-            for leaf in leaves {
-                let alive = leaf.end.is_none() && leaf.state.hp > 0;
-                let fights = *seen.entry(settled_key(&leaf.state)).or_insert_with(|| {
-                    out.fights.push(if alive { runobs::forecast_fights(&leaf.state) } else { Vec::new() });
-                    out.fights.len() - 1
-                });
-                let hp = leaf.state.hp.max(0) as f32 / leaf.state.max_hp.max(1) as f32;
-                out.leaves.push(Afterstate { row, option, sample, path: leaf.path, hp, end: leaf.end, capped: leaf.capped, fights });
-            }
-        }
-        for (_, k) in shut {
-            *out.capped.entry(k).or_default() += 1;
-        }
-        out
-    }
-
-    /// For each of `envs` waiting at a decision short of a map step, every
-    /// option's afterstate trees under `samples` reseeds (`expand_tree`),
+    /// option's afterstate trees under `samples` reseeds (`expand`),
     /// kept until the next call: `afterstate_scores` scores them from the
     /// values of the rows returned, the distinct settled states' forecast
     /// fights. An env at a map step gets none. An option whose first two
@@ -1294,7 +1137,7 @@ impl VecEnv {
                 .map(|(row, option, sample)| {
                     let (run, seg) = segment(envs[row]);
                     let answer = seg.waiting.as_ref().expect("waiting").answers[option];
-                    let (tree, capped) = expand_tree(caps, &seg.answers, answer, sample, |c| play_segment(run, seg.fought, c));
+                    let (tree, capped) = expand(caps, &seg.answers, answer, sample, |c| play_segment(run, seg.fought, c));
                     (row, option, sample, tree, capped)
                 })
                 .collect::<Vec<_>>()
@@ -1312,7 +1155,7 @@ impl VecEnv {
         if samples > 2 {
             let mut first: HashMap<(usize, usize), Vec<_>> = HashMap::new();
             for (row, option, _, tree, _) in &expanded {
-                first.entry((*row, *option)).or_default().push(tree_signature(tree));
+                first.entry((*row, *option)).or_default().push(signature(tree));
             }
             let mut random: Vec<(usize, usize)> = first.into_iter().filter(|(_, sigs)| sigs[0] != sigs[1]).map(|(k, _)| k).collect();
             random.sort();
@@ -1325,7 +1168,7 @@ impl VecEnv {
         let mut trees = Vec::with_capacity(expanded.len());
         for (row, option, sample, tree, capped) in expanded {
             shut.extend(capped.into_iter().map(|k| (row, k)));
-            let mut leaf = |s: Settle| {
+            let mut leaf = |s: Settled| {
                 leaves += 1;
                 if s.end.is_some() || s.state.hp <= 0 {
                     return Leaf::Ended { won: matches!(s.end, Some(forward::End::Won)) };
@@ -2549,27 +2392,31 @@ pub(crate) mod tests {
         let dig = obs.answers[2];
         assert_ne!(own(&a, dig), own(&b, dig), "the runs' own draws deal Dig different relics, or the test means nothing");
         let after = |run: &Run, answer: usize, sample: u64| {
-            let (leaves, capped) = expand(caps, &[], answer, sample, |c| play_segment(run, None, c));
+            let (tree, capped) = expand(caps, &[], answer, sample, |c| play_segment(run, None, c));
             assert!(capped.is_empty(), "{capped:?}");
-            leaves
-                .into_iter()
-                .map(|l| (l.path, l.state.carried(), l.end, l.capped, runobs::forecast_rows(&runobs::forecast_fights(&l.state))))
+            tree.into_iter()
+                .map(|n| match n {
+                    Node::Settled(l) => Node::Settled((l.state.carried(), l.end, l.capped, runobs::forecast_rows(&runobs::forecast_fights(&l.state)))),
+                    Node::Opened { names, children } => Node::Opened { names, children },
+                })
                 .collect::<Vec<_>>()
         };
+        let settled = |tree: &[Node<_>]| tree.iter().filter_map(|n| if let Node::Settled(l) = n { Some(l) } else { None }).cloned().collect::<Vec<(Carried, _, _, _)>>();
         for (j, name) in names.iter().enumerate() {
-            let (la, lb) = (after(&a, obs.answers[j], 3), after(&b, obs.answers[j], 3));
-            assert!(la == lb, "{name}: the afterstates differ");
-            assert!(la.iter().all(|l| l.2.is_none() && !l.3));
+            let (ta, tb) = (after(&a, obs.answers[j], 3), after(&b, obs.answers[j], 3));
+            assert!(ta == tb, "{name}: the afterstates differ");
+            let la = settled(&ta);
+            assert!(la.iter().all(|l| l.1.is_none() && !l.2));
             match name.as_str() {
-                "Heal" => assert!(la.len() == 1 && la[0].0.is_empty() && la[0].1.hp > 40, "heal settles at the map step"),
+                "Heal" => assert!(ta.len() == 1 && la[0].0.hp > 40, "heal settles at the map step"),
                 "Smith" => {
                     let upgraded = |c: &Carried| c.deck.iter().filter(|c| c.upgraded).count();
-                    assert!(la.len() > 1, "smith opens the deck pick");
-                    assert!(la.iter().all(|l| l.0.len() == 1 && upgraded(&l.1) == upgraded(&carried) + 1), "each leaf upgraded its card");
+                    assert!(matches!(ta[0], Node::Opened { .. }) && la.len() == ta.len() - 1, "smith opens the deck pick, and each pick settles");
+                    assert!(la.iter().all(|l| upgraded(&l.0) == upgraded(&carried) + 1), "each leaf upgraded its card");
                 }
                 _ => {
-                    assert!(la.len() == 1 && la[0].1.relics.len() == carried.relics.len() + 1);
-                    let dealt: HashSet<String> = (3..9).map(|s| after(&a, dig, s)[0].1.relics.last().expect("a relic").id.clone()).collect();
+                    assert!(ta.len() == 1 && la[0].0.relics.len() == carried.relics.len() + 1);
+                    let dealt: HashSet<String> = (3..9).map(|s| settled(&after(&a, dig, s))[0].0.relics.last().expect("a relic").id.clone()).collect();
                     assert!(dealt.len() > 1, "the sample deals the relic: {dealt:?}");
                 }
             }
@@ -2613,6 +2460,47 @@ pub(crate) mod tests {
         let path: Vec<usize> = waiting.iter().copied().filter(at_path).collect();
         assert!(!path.is_empty(), "a map step follows the ancient's relic");
         assert_eq!(env.afterstates(&path, 2, caps).leaves, 0, "a map step is the policy's");
+    }
+
+    /// A settled state scores its elites' mean calibrated win chance plus
+    /// its bosses', a run won in the option 1 and one lost 0; a
+    /// sub-decision takes its best option and an option the mean over its
+    /// samples, and its best path names the sub-decision's pick.
+    #[test]
+    fn afterstate_scores_reduce_the_trees() {
+        let mut env = VecEnv::new(1, 0, EnvConfig::default());
+        let tree = |option, sample, nodes| Tree { row: 0, option, sample, nodes };
+        env.pending = Some(Pending {
+            names: vec![vec!["smith".into(), "fight".into(), "leave".into()]],
+            trees: vec![
+                tree(
+                    0,
+                    0,
+                    vec![
+                        Node::Opened { names: vec!["strike".into(), "bash".into()], children: 1..3 },
+                        Node::Settled(Leaf::Ended { won: true }),
+                        Node::Settled(Leaf::State(0)),
+                    ],
+                ),
+                tree(0, 1, vec![Node::Settled(Leaf::State(1))]),
+                tree(1, 0, vec![Node::Settled(Leaf::Ended { won: false })]),
+            ],
+            hp: vec![0.5, 1.0],
+            rows: vec![0, 8, 12],
+            boss: [[false; 4], [true; 4], [true; 4]].concat(),
+            capped: BTreeMap::new(),
+            scores: None,
+        });
+        // With win = sigmoid(V): state 0's elite reads 0.5 and its boss 0.75
+        // (V = ln 3 on average), state 1 has only a boss, at 0.5.
+        let l3 = 3f32.ln();
+        let values = [[0.0, 0.0, 1.0, -1.0], [l3, l3 - 0.5, l3 + 0.5, l3], [0.0; 4]].concat();
+        let scored = env.afterstate_scores(&values, [1.0, 0.0, 0.0]);
+        let score = &scored.score[..3];
+        assert!((score[0] - (1.25 + 0.5) / 2.0).abs() < 1e-6, "{score:?}");
+        assert_eq!(score[1], 0.0);
+        assert!(score[2].is_nan());
+        assert_eq!(env.afterstate_option(0, 0), ("smith".into(), vec!["bash".into()]));
     }
 
     #[test]

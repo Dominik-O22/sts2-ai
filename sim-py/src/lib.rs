@@ -253,26 +253,6 @@ impl VecEnv {
         forecast_rows(py, &self.inner.forecast(&envs))
     }
 
-    /// The afterstates of every option of the decisions `envs` wait at
-    /// (`sim::env::VecEnv::afterstates`, none at a map step): a leaf per
-    /// (row, option token, sample, path) as (row, option, sample, path of
-    /// (option token, name), HP fraction, end, capped, fights index), the
-    /// settled states' forecast fights as `forecast_rows` lays them out
-    /// (their row is the fights index), each row's options in words, and
-    /// the decisions where a cap kept a sub-decision shut, by decision
-    /// kind and cap.
-    fn afterstate_leaves<'py>(&self, py: Python<'py>, envs: Vec<usize>, samples: usize, depth: usize, nodes: usize) -> Afterstates<'py> {
-        let caps = sim::env::Caps { depth, nodes };
-        let after = py.detach(|| self.inner.afterstate_leaves(&envs, samples, caps));
-        let leaves = after
-            .leaves
-            .into_iter()
-            .map(|l| (l.row, l.option, l.sample, l.path, l.hp, l.end.map(end_text), l.capped, l.fights))
-            .collect();
-        let fights: Vec<&[sim::gen::FightSetup]> = after.fights.iter().map(Vec::as_slice).collect();
-        (leaves, forecast_rows(py, &fights), after.names, after.capped)
-    }
-
     /// Builds the afterstates of every option of the decisions `envs` wait
     /// at (`sim::env::VecEnv::afterstates`, none at a map step) and returns
     /// what the value head reads for them: the distinct settled states'
@@ -1034,11 +1014,6 @@ fn generate_run(seed: u64, floor: u32) -> String {
 /// rows' forecast fights (`imitation`).
 type Imitation<'py> =
     (Bound<'py, PyArray1<f32>>, Bound<'py, PyArray1<i64>>, Vec<usize>, Vec<usize>, Vec<bool>, std::collections::BTreeMap<String, usize>, Forecast<'py>);
-
-/// Afterstate leaves, the settled states' forecast fights and the caps'
-/// counts (`afterstates`).
-type Afterstates<'py> =
-    (Vec<(usize, usize, u64, Vec<(usize, String)>, f32, Option<String>, bool, usize)>, Forecast<'py>, Vec<Vec<String>>, std::collections::BTreeMap<String, usize>);
 
 /// Afterstates' combat rows, leaves and distinct states (`afterstates`).
 type AfterstateRows<'py> = (Bound<'py, PyArray1<f32>>, Bound<'py, PyArray1<i64>>, usize, usize);
