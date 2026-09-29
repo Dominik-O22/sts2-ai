@@ -10,11 +10,13 @@
 //! From the first of them that draws on the Rewards stream the run no
 //! longer rolls what the game would (docs/run-env.md, Exactness).
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use crate::card::UNSUPPORTED_CARDS;
 use crate::effects::Offered;
-use crate::encounter::Encounter;
+use crate::encounter::{Act, Encounter};
 use crate::events::EventFight;
 use crate::gen::FightSetup;
 use crate::map::{ActMap, PointId};
@@ -165,13 +167,36 @@ impl StartPoint {
     }
 }
 
+/// `ActMap::generate`, remembered per thread. Making a map costs more than
+/// the rest of a segment's replay, and every replay that crosses into the
+/// next act (each run decision there, each afterstate branch) makes the
+/// same one again.
+fn act_map(seed: u32, act: Act, ascension: Ascension) -> Arc<ActMap> {
+    const KEEP: usize = 16;
+    thread_local! {
+        static MAPS: RefCell<Vec<((u32, Act, Ascension), Arc<ActMap>)>> = const { RefCell::new(Vec::new()) };
+    }
+    MAPS.with_borrow_mut(|maps| {
+        let key = (seed, act, ascension);
+        if let Some((_, map)) = maps.iter().find(|(k, _)| *k == key) {
+            return map.clone();
+        }
+        let map = Arc::new(ActMap::generate(seed, act, ascension));
+        if maps.len() == KEEP {
+            maps.remove(0);
+        }
+        maps.push((key, map.clone()));
+        map
+    })
+}
+
 /// A run in progress, stopped between rooms. `next` plays it to its next
 /// fight and hands the fight out, so whoever plays fights (`play` with a
 /// `Fights`, or a `VecEnv` slot over many steps) owns the loop.
 #[derive(Clone, Debug)]
 pub struct Run {
     pub state: RunState,
-    map: ActMap,
+    map: Arc<ActMap>,
     /// The map point to enter next, or, while `fighting`, the fight's.
     point: PointId,
     fighting: Option<Fighting>,
@@ -199,7 +224,7 @@ impl Run {
         let acts = select_acts(crate::game_rng::RunRngs::new(seed).seed, &unlocks);
         let mut state = RunState::new(seed, acts, ascension, &unlocks);
         state.enter_act(act);
-        let map = ActMap::generate(state.rngs.seed, acts[act], ascension);
+        let map = act_map(state.rngs.seed, acts[act], ascension);
         let point = map.start;
         Self { state, map, point, fighting: None, fights: 0, unported: BTreeMap::new(), passed: Vec::new() }
     }
@@ -299,7 +324,7 @@ impl Run {
         if self.map[self.point].children.is_empty() {
             let act = self.state.act + 1;
             let Some(plan) = self.state.plan.acts.get(act) else { return false };
-            self.map = ActMap::generate(self.state.rngs.seed, plan.act, self.state.ascension);
+            self.map = act_map(self.state.rngs.seed, plan.act, self.state.ascension);
             self.state.enter_act(act);
             self.point = self.map.start;
             self.passed.push((StartPoint::Entrance(act), self.state.carried()));
