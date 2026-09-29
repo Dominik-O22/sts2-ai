@@ -747,18 +747,19 @@ pub fn forecast_fights(run: &RunState) -> Vec<FightSetup> {
     out
 }
 
-/// `fights` (`forecast_fights`) encoded at their openings as the combat
-/// model reads them, a row each: `floats [n * N_FLOATS]`, `ids [n *
-/// N_IDS]`. Roll `k` of an encounter opens with combat seed `k`.
+/// `fights` (`forecast_fights`, one or more runs' back to back) encoded
+/// at their openings as the combat model reads them, a row each, in
+/// parallel: `floats [n * N_FLOATS]`, `ids [n * N_IDS]`. Roll `k` of an
+/// encounter opens with combat seed `k`.
 pub fn forecast_rows(fights: &[FightSetup]) -> (Vec<f32>, Vec<i64>) {
     use crate::encode::{encode, N_ACTIONS, N_FLOATS, N_IDS};
+    use rayon::prelude::*;
     let mut floats = vec![0f32; fights.len() * N_FLOATS];
     let mut ids = vec![0i64; fights.len() * N_IDS];
-    let mut mask = [false; N_ACTIONS];
-    for (k, setup) in fights.iter().enumerate() {
-        let combat = setup.combat((k % FORECAST_ROLLS) as u64);
-        encode(&combat, &mut floats[k * N_FLOATS..(k + 1) * N_FLOATS], &mut ids[k * N_IDS..(k + 1) * N_IDS], &mut mask);
-    }
+    floats.par_chunks_mut(N_FLOATS).zip(ids.par_chunks_mut(N_IDS)).zip(fights.par_iter().enumerate()).for_each_init(
+        || [false; N_ACTIONS],
+        |mask, ((f, i), (k, setup))| encode(&setup.combat((k % FORECAST_ROLLS) as u64), f, i, mask),
+    );
     (floats, ids)
 }
 
