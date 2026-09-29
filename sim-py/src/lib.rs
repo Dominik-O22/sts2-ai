@@ -38,14 +38,18 @@ type End = (usize, bool, f32, f32, u32, u32, u32, String, String, f32, Option<Ru
 /// winner's run, "" for floor 1).
 type RunFight = (u64, u32, u32, u32, Option<String>, Option<usize>, &'static str);
 
-fn run_fight(r: sim::env::RunFight) -> RunFight {
-    use sim::env::Began;
+fn end_text(end: sim::forward::End) -> String {
     use sim::forward::End;
-    let end = r.end.map(|end| match end {
+    match end {
         End::Won => "won".into(),
         End::Died => "died".into(),
         End::Stuck(why) => format!("stuck: {why}"),
-    });
+    }
+}
+
+fn run_fight(r: sim::env::RunFight) -> RunFight {
+    use sim::env::Began;
+    let end = r.end.map(end_text);
     let (start, source) = match r.began {
         Began::Floor1 => (None, ""),
         Began::Generated(at) => (Some(at.index()), "gen"),
@@ -247,6 +251,26 @@ impl VecEnv {
     /// The forecast fights of the decisions `envs` wait at (`forecast_rows`).
     fn forecast<'py>(&self, py: Python<'py>, envs: Vec<usize>) -> Forecast<'py> {
         forecast_rows(py, &self.inner.forecast(&envs))
+    }
+
+    /// The afterstates of every option of the decisions `envs` wait at
+    /// (`sim::env::VecEnv::afterstates`, none at a map step): a leaf per
+    /// (row, option token, sample, path) as (row, option, sample, path of
+    /// (option token, name), HP fraction, end, capped, fights index), the
+    /// settled states' forecast fights as `forecast_rows` lays them out
+    /// (their row is the fights index), each row's options in words, and
+    /// the decisions where a cap kept a sub-decision shut, by decision
+    /// kind and cap.
+    fn afterstates<'py>(&self, py: Python<'py>, envs: Vec<usize>, samples: usize, depth: usize, nodes: usize) -> Afterstates<'py> {
+        let caps = sim::env::Caps { depth, nodes };
+        let after = py.detach(|| self.inner.afterstates(&envs, samples, caps));
+        let leaves = after
+            .leaves
+            .into_iter()
+            .map(|l| (l.row, l.option, l.sample, l.path, l.hp, l.end.map(end_text), l.capped, l.fights))
+            .collect();
+        let fights: Vec<&[sim::gen::FightSetup]> = after.fights.iter().map(Vec::as_slice).collect();
+        (leaves, forecast_rows(py, &fights), after.names, after.capped)
     }
 
     /// Answer each of `envs`' run decision with its option token
@@ -977,6 +1001,11 @@ fn generate_run(seed: u64, floor: u32) -> String {
 /// rows' forecast fights (`imitation`).
 type Imitation<'py> =
     (Bound<'py, PyArray1<f32>>, Bound<'py, PyArray1<i64>>, Vec<usize>, Vec<usize>, Vec<bool>, std::collections::BTreeMap<String, usize>, Forecast<'py>);
+
+/// Afterstate leaves, the settled states' forecast fights and the caps'
+/// counts (`afterstates`).
+type Afterstates<'py> =
+    (Vec<(usize, usize, u64, Vec<(usize, String)>, f32, Option<String>, bool, usize)>, Forecast<'py>, Vec<Vec<String>>, std::collections::BTreeMap<String, usize>);
 
 /// Forecast fights at their openings (`sim::runobs::forecast_rows`):
 /// combat rows `floats [n * N_FLOATS]` and `ids [n * N_IDS]`, the run row
