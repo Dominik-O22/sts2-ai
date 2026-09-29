@@ -729,8 +729,9 @@ kind and the cost per decision, and `--show-afterstates N` prints N
 decisions with each option's score and the sub-decisions on its best
 path. gen8 playing the fights, `imitate-noforecast` the map steps, 32
 envs, one run each (2026-09-29): a decision costs 176 branches, 40
-distinct states, 658 combat rows, 7 ms of sim and 4 ms of value head;
-the pick differs from the clone's on 54% of decisions (card rewards 63%,
+distinct states and 658 combat rows (at 64 envs, after the reduction
+moved into the sim: 2.0 ms of sim, 4.2 ms of value head, 0.1 ms of
+Python); the pick differs from the clone's on 54% of decisions (card rewards 63%,
 shops 73%, deck picks 74%, rest sites 50%, events 46%).
 
 What the forecast misses, and so the score:
