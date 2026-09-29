@@ -427,6 +427,7 @@ def main() -> None:
     ap.add_argument("--afterstate", type=int, default=0, help="make every decision but a map step by its afterstates, K samples each (needs the forecast)")
     ap.add_argument("--afterstate-depth", type=int, default=3, help="sub-decisions an afterstate opens on the way, at most")
     ap.add_argument("--afterstate-nodes", type=int, default=256, help="branches an afterstate plays per option and sample, at most")
+    ap.add_argument("--afterstate-kinds", default="", help="decision kinds made by afterstate, comma separated (Event,Rest,...); empty: all but map steps")
     ap.add_argument("--show-afterstates", type=int, default=0, help="print this many scored decisions with each option's score")
     args = ap.parse_args()
     # Ids the combat checkpoint never saw get fresh rows (`vocab.remap_state`),
@@ -448,7 +449,7 @@ def main() -> None:
     picks = Picks(RunLayout.load(), args.show) if run_policy else None
     fights_out = args.fights_out.open("w") if args.fights_out else None
     event_table = EventTable(Rows.load(args.event_table), RunLayout.load()) if args.event_table else None
-    afterstate = Scorer(envs, forecast, args.afterstate, args.afterstate_depth, args.afterstate_nodes) if args.afterstate > 0 else None
+    afterstate = Scorer(envs, forecast, args.afterstate, args.afterstate_depth, args.afterstate_nodes, frozenset(filter(None, args.afterstate_kinds.split(",")))) if args.afterstate > 0 else None
     fights, runs, loop, seconds = play(
         combat,
         device,
