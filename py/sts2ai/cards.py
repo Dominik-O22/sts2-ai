@@ -33,17 +33,19 @@ marked a tie: that is how far a run with another seed moves it.
 from __future__ import annotations
 
 import argparse
+import itertools
 import json
 import time
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Literal, NamedTuple
 
 import numpy as np
 import torch
 
 from sts2ai import _sim
-from sts2ai.env import DEFAULT_RECORDINGS, End, Envs
+from sts2ai.env import DEFAULT_RECORDINGS, End, Envs, pinned
 from sts2ai.model import Policy, load_policy, masked_logits
 
 RUN_STATE = DEFAULT_RECORDINGS.parent / "run.json"
@@ -127,27 +129,93 @@ def horizon(act: str, bosses: list[str] | None, hp: int, max_hp: int, next_act: 
     return fights
 
 
+class FightJob(NamedTuple):
+    """A run in `start` to fight `encounters` (game name, floor, starting
+    HP) from, at `max_hp`, its enemies rolled from `seed`."""
+
+    start: dict
+    max_hp: int
+    encounters: list[tuple[str, int, int]]
+    seed: int
+
+
 @torch.no_grad()
+def fights_stream(
+    policy: Policy, device: torch.device, jobs: Iterable[FightJob], repeats: int, pool: int = 16384, chunk: int = 16
+) -> Iterator[tuple[int, list[End]]]:
+    """`repeats` greedy fights of each job against each of its encounters,
+    yielded as (job index, its fights) once its last fight ends. `pool` envs
+    play them continuously: the step an env's fight ends, it starts the
+    next queued one, so every step reads a full batch while fights remain.
+    Jobs are queued `chunk` at a time (`queue_fight_jobs`), and a fight
+    plays the same shuffles in whichever env it lands. A step gathers the
+    busy envs into pinned buffers for one bf16 forward pass; idle envs sit
+    out (a negative action)."""
+    numbered = enumerate(jobs)
+    envs = Envs(pool)
+    buffers = [torch.from_numpy(a) for a in (envs.floats, envs.ids, envs.mask)]
+    staged = [torch.from_numpy(pinned(b.shape, b.dtype)) for b in buffers]
+    autocast = torch.autocast(device.type, dtype=torch.bfloat16, enabled=device.type == "cuda")
+    job_of_env = np.full(pool, -1)
+    left: dict[int, int] = {}
+    ends: dict[int, list[End]] = {}
+    queued = np.empty(0, np.int64)  # the job of each queued fight
+    cursor = 0
+
+    def load() -> bool:
+        nonlocal queued, cursor
+        batch = list(itertools.islice(numbered, chunk))
+        if batch:
+            envs.sim.queue_fight_jobs([(json.dumps(job.start), job.max_hp, job.encounters, job.seed) for _, job in batch], repeats)
+            sizes = [len(job.encounters) * repeats for _, job in batch]
+            queued, cursor = np.repeat([j for j, _ in batch], sizes), 0
+            left.update((j, size) for (j, _), size in zip(batch, sizes))
+            ends.update((j, []) for j, _ in batch)
+        return bool(batch)
+
+    more = load()
+    while True:
+        free = np.flatnonzero(job_of_env < 0)
+        while more and len(free):
+            k = min(len(free), len(queued) - cursor)
+            envs.sim.start_fights(free[:k].tolist(), list(range(cursor, cursor + k)), envs.floats, envs.ids, envs.mask)
+            job_of_env[free[:k]] = queued[cursor : cursor + k]
+            cursor, free = cursor + k, free[k:]
+            if cursor == len(queued):
+                more = load()
+        rows = np.flatnonzero(job_of_env >= 0)
+        if not len(rows):
+            return
+        picked = torch.from_numpy(rows)
+        for src, dst in zip(buffers, staged):
+            torch.index_select(src, 0, picked, out=dst[: len(rows)])
+        floats, ids, mask = (s[: len(rows)].to(device, non_blocking=True) for s in staged)
+        with autocast:
+            logits, _ = policy(floats, ids)
+        actions = np.full(pool, -1)
+        actions[rows] = masked_logits(logits.float(), mask).argmax(1).cpu().numpy()
+        for e in envs.step(actions):
+            j = job_of_env[e.env]
+            job_of_env[e.env] = -1
+            ends[j].append(e)
+            left[j] -= 1
+            if not left[j]:
+                del left[j]
+                yield j, ends.pop(j)
+
+
+def fights_many(policy: Policy, device: torch.device, jobs: list[FightJob], repeats: int) -> list[list[End]]:
+    """`fights_stream` for a list of jobs, in their order."""
+    out: list[list[End]] = [[] for _ in jobs]
+    total = sum(len(job.encounters) for job in jobs) * repeats
+    for j, ends in fights_stream(policy, device, jobs, repeats, pool=min(16384, total)):
+        out[j] = ends
+    return out
+
+
 def fights(policy: Policy, device: torch.device, start: dict, max_hp: int, encounters: list[tuple[str, int, int]], repeats: int, seed: int) -> list[End]:
-    """`repeats` greedy fights of the run in `start` against each of
-    `encounters` (game name, floor, starting HP), every env's first fight
-    only."""
-    ends: list[End] = []
-    for fight_hp in sorted({h for _, _, h in encounters}):
-        group = [(name, floor) for name, floor, h in encounters if h == fight_hp]
-        n = len(group) * repeats
-        envs = Envs(n, seed=seed)
-        envs.sim.use_run(json.dumps(start), fight_hp, max_hp, group, repeats, seed)
-        envs.sim.observe(envs.floats, envs.ids, envs.mask)
-        done = np.zeros(n, bool)
-        while not done.all():
-            logits, _ = policy(torch.from_numpy(envs.floats).to(device), torch.from_numpy(envs.ids).to(device))
-            actions = masked_logits(logits.float(), torch.from_numpy(envs.mask).to(device)).argmax(1).cpu().numpy()
-            for e in envs.step(actions):
-                if not done[e.env]:
-                    done[e.env] = True
-                    ends.append(e)
-    return ends
+    """`fights_many` for one run."""
+    return fights_many(policy, device, [FightJob(start, max_hp, encounters, seed)], repeats)[0]
 
 
 def verdict(change: Change | None, ends: list[End]) -> Verdict:

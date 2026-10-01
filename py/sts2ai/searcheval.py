@@ -122,7 +122,9 @@ def main() -> None:
             greedy[enc] += won
     t1 = time.time()
     for r in range(args.repeats):
-        for enc, won in play(policy, device, args.copies, kinds, args.acts, args.seed + r, args.mean, args.depth, args.recordings, args.two_level, args.setups).items():
+        for enc, won in play(
+            policy, device, args.copies, kinds, args.acts, args.seed + r, args.mean, args.depth, args.recordings, args.two_level, args.setups
+        ).items():
             search[enc] += won
     t2 = time.time()
     print(f"{'encounter':32s} greedy  search")

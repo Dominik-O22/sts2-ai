@@ -988,6 +988,9 @@ pub struct VecEnv {
     starts: Arc<Mutex<Starts>>,
     cfg: EnvConfig,
     fixed: Vec<FightSetup>,
+    /// Fights waiting for `start_fights`, each with the seed its combat
+    /// draws from (`queue_fights`).
+    queued: Vec<(FightSetup, u64)>,
     hard: Vec<(Encounter, f32)>,
     real: Vec<(Vec<FightSetup>, f32)>,
     /// The afterstates built last (`afterstates`).
@@ -1007,7 +1010,7 @@ impl VecEnv {
         for (i, s) in slots.iter_mut().enumerate() {
             s.reset(i, n, &cfg, Pools { fixed: &[], hard: &[], real: &[] });
         }
-        Self { slots, cfg, fixed: vec![], hard: vec![], real: vec![], starts: Default::default(), pending: None }
+        Self { slots, cfg, fixed: vec![], queued: vec![], hard: vec![], real: vec![], starts: Default::default(), pending: None }
     }
 
     pub fn len(&self) -> usize {
@@ -1041,6 +1044,28 @@ impl VecEnv {
     }
 
     /// Resets every env so the first `n` setups start immediately.
+    /// Replace the fights `start_fights` starts from. Fights under way keep
+    /// their own copies.
+    pub fn queue_fights(&mut self, fights: Vec<(FightSetup, u64)>) {
+        self.queued = fights;
+    }
+
+    /// Start queued fight `k` in env `env` for each `(env, k)`, its stream
+    /// seeded from the fight's seed, so a fight plays the same shuffles in
+    /// whichever env it lands, and encode those envs' rows. The caller
+    /// keeps an env out of `step` (a negative action) until it starts one.
+    pub fn start_fights(&mut self, starts: &[(usize, usize)], floats: &mut [f32], ids: &mut [i64], mask: &mut [bool]) {
+        self.check_buffers(floats, ids, mask);
+        for &(env, k) in starts {
+            let (setup, seed) = &self.queued[k];
+            let s = &mut self.slots[env];
+            s.rng = Rng::new(*seed);
+            s.start(setup.clone());
+            let row = |w: usize| env * w..(env + 1) * w;
+            encode::encode(&s.combat, &mut floats[row(N_FLOATS)], &mut ids[row(N_IDS)], &mut mask[row(N_ACTIONS)]);
+        }
+    }
+
     pub fn set_fixed(&mut self, setups: Vec<FightSetup>) {
         self.fixed = setups;
         let n = self.slots.len();
@@ -1361,6 +1386,7 @@ impl VecEnv {
     /// Apply one action index per env, reset the envs whose fight ended,
     /// and encode the states that follow. `rewards` and `dones` describe
     /// the transition; the returned list describes every fight that ended.
+    /// An env given a negative action sits the step out, its row as it was.
     pub fn step(
         &mut self,
         actions: &[i64],
@@ -1385,8 +1411,9 @@ impl VecEnv {
             .zip(rewards.par_iter_mut())
             .zip(dones.par_iter_mut())
             .map(|(((((((i, s), &a), f), ids), m), r), d)| {
-                // A run waiting at a decision sits the step out.
-                if s.waiting() {
+                // A run waiting at a decision sits the step out, as does an
+                // env the caller is done with.
+                if a < 0 || s.waiting() {
                     (*r, *d) = (0.0, false);
                     return None;
                 }
@@ -2569,6 +2596,32 @@ pub(crate) mod tests {
         assert_eq!(env.slots[1].setup.encounter, setups[1].encounter);
         env.slots[0].reset(0, 2, &env.cfg, Pools { fixed: &env.fixed, hard: &[], real: &[] });
         assert_eq!(env.slots[0].setup.encounter, setups[2].encounter);
+    }
+
+    /// A queued fight plays the same shuffles in whichever env it starts:
+    /// envs 0 and 2 start fight 0 at different times and play it the same
+    /// under the same actions, while env 1 holds the same setup on another
+    /// seed and draws differently.
+    #[test]
+    fn queued_fights_play_the_same_wherever_they_start() {
+        let setup = generate(&mut Rng::new(4), 20, Ascension(10));
+        let mut env = VecEnv::new(3, 9, EnvConfig::default());
+        let (mut f, mut i, mut m) = (vec![0.0; 3 * N_FLOATS], vec![0; 3 * N_IDS], vec![false; 3 * N_ACTIONS]);
+        let (mut r, mut d) = (vec![0.0; 3], vec![false; 3]);
+        env.queue_fights(vec![(setup.clone(), 11), (setup, 12)]);
+        env.start_fights(&[(0, 0), (1, 1)], &mut f, &mut i, &mut m);
+        env.step(&[-1, -1, -1], &mut f, &mut i, &mut m, &mut r, &mut d);
+        env.start_fights(&[(2, 0)], &mut f, &mut i, &mut m);
+        assert_eq!(f[..N_FLOATS], f[2 * N_FLOATS..], "same fight, same opening hand");
+        assert_ne!(f[..N_FLOATS], f[N_FLOATS..2 * N_FLOATS], "another seed draws another hand");
+        for _ in 0..30 {
+            let a = m[..N_ACTIONS].iter().position(|&x| x).unwrap() as i64;
+            env.step(&[a, -1, a], &mut f, &mut i, &mut m, &mut r, &mut d);
+            assert_eq!(f[..N_FLOATS], f[2 * N_FLOATS..]);
+            if d[0] {
+                break;
+            }
+        }
     }
 
     /// Each pool of played fights takes its share of the resets, and the

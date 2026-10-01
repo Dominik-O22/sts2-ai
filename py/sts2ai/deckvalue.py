@@ -1,6 +1,6 @@
 """Deck value: a network that predicts what the deck advisor's fights find.
 
-    uv run python -m sts2ai.deckvalue label runs/<run>/latest.pt --n 200 --out labels.jsonl
+    uv run python -m sts2ai.deckvalue label runs/<run>/latest.pt --n 200 --out labels.jsonl [--starts FIGHTS.jsonl ...] [--next-act]
     uv run python -m sts2ai.deckvalue train labels.jsonl --out deckvalue.pt
     uv run python -m sts2ai.deckvalue check runs/<run>/latest.pt deckvalue.pt [RECORDING ...]
 
@@ -8,10 +8,11 @@
 This learns that price: a run state (deck, relics, potions, HP, act) in, the
 mean fight reward against each elite and boss of its act out, so a choice
 costs one forward pass instead of seconds of fights. The fights stay the
-teacher: `label` plays them on generated run states, each with a variant
-one change away (a card added, upgraded or removed) so the labels carry the
-differences a choice makes, and `train` fits the network to them. `check`
-sets the network's picks beside the fights' on decks from played runs.
+teacher: `label` plays them on run states (generated, or drawn from run
+evals' fight logs with `--starts`), each with a variant one change away
+(a card added, upgraded or removed) so the labels carry the differences a
+choice makes, and `train` fits the network to them. `check` sets the
+network's picks beside the fights' on decks from played runs.
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+from collections.abc import Iterator
 from pathlib import Path
 
 import numpy as np
@@ -26,8 +28,8 @@ import torch
 from torch import Tensor, nn
 
 from sts2ai import _sim
-from sts2ai.cards import BOSS_FLOOR, fights, horizon
-from sts2ai.env import ASCENSION, DEFAULT_RECORDINGS, RunLayout
+from sts2ai.cards import BOSS_FLOOR, FightJob, fights_many, fights_stream, horizon
+from sts2ai.env import ASCENSION, DEFAULT_RECORDINGS, End, Envs, RunLayout
 from sts2ai.model import Policy, load_policy
 
 ACTS = ["Overgrowth", "Underdocks", "Hive", "Glory"]
@@ -186,32 +188,77 @@ def variant(run: dict, rng: np.random.Generator) -> dict:
     return {**run, "deck": deck}
 
 
-def label(policy: Policy, device: torch.device, run: dict, repeats: int, seed: int) -> dict[str, float]:
-    """Mean fight reward per elite (at the run's HP) and boss (at full HP)
-    of the run's act: the advisor's fights."""
-    encounters = horizon(run["act"], None, run["hp"], run["max_hp"], next_act=False)
+def label_many(policy: Policy, device: torch.device, runs: list[dict], repeats: int, seeds: list[int], next_act: bool = False) -> list[dict[str, float]]:
+    """Per run, the mean fight reward per elite (at the run's HP) and boss
+    (at full HP) of its act, and with `next_act` every elite and boss of the
+    act after at full HP: the advisor's fights, all runs' at once."""
+    return [mean_rewards(ends) for ends in fights_many(policy, device, [fight_job(r, s, next_act) for r, s in zip(runs, seeds)], repeats)]
+
+
+def fight_job(run: dict, seed: int, next_act: bool) -> FightJob:
+    """The fights a run state is labeled on (`label_many`)."""
+    return FightJob(run, run["max_hp"], horizon(run["act"], None, run["hp"], run["max_hp"], next_act=next_act), seed)
+
+
+def mean_rewards(ends: list[End]) -> dict[str, float]:
+    """Mean fight reward by encounter."""
     by_enc: dict[str, list[float]] = {}
-    for e in fights(policy, device, run, run["max_hp"], encounters, repeats, seed):
+    for e in ends:
         by_enc.setdefault(slug(e.encounter), []).append(e.reward)
     return {k: float(np.mean(v)) for k, v in by_enc.items()}
+
+
+def label(policy: Policy, device: torch.device, run: dict, repeats: int, seed: int, next_act: bool = False) -> dict[str, float]:
+    """`label_many` for one run."""
+    return label_many(policy, device, [run], repeats, [seed], next_act)[0]
+
+
+def logged_starts(paths: list[Path], n: int, rng: np.random.Generator) -> list[dict]:
+    """`n` run states drawn from fight logs (`runplay --fights-out`, setups
+    files): each line's start, with its HP and act."""
+    lines = [json.loads(line) for path in paths for line in path.read_text().splitlines() if line.strip()]
+    starts = []
+    for i in rng.choice(len(lines), size=min(n, len(lines)), replace=False):
+        d = lines[i]
+        starts.append({**d["start"], "hp": d["hp"], "max_hp": d["max_hp"], "act": ACT_OF[d["encounter"]]})
+    return starts
 
 
 def cmd_label(args) -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     policy = load_policy(args.checkpoint, device).eval()
+    # The live-row count changes every step, hence dynamic; labeling runs
+    # long enough to repay the compile.
+    net = torch.compile(policy, dynamic=True) if device.type == "cuda" else policy
     rng = np.random.default_rng(args.seed)
-    with open(args.out, "a") as out, torch.no_grad():
-        for i in range(args.n):
-            floor = int(rng.integers(1, 3 * BOSS_FLOOR + 1))
+    logged = logged_starts(args.starts, args.n, rng) if args.starts else None
+    n = len(logged) if logged else args.n
+    held: dict[int, tuple[dict, int]] = {}  # job index -> (run, pair seed), until its fights are in
+
+    def jobs() -> Iterator[FightJob]:
+        k = 0
+        for i in range(n):
             run_seed = args.seed * 1_000_003 + i
-            run = json.loads(_sim.generate_run(run_seed, floor))
-            run["act"] = ACT_OF[run["encounter"]]
+            if logged:
+                run = logged[i]
+            else:
+                floor = int(rng.integers(1, 3 * BOSS_FLOOR + 1))
+                run = json.loads(_sim.generate_run(run_seed, floor))
+                run["act"] = ACT_OF[run["encounter"]]
             for r in (run, variant(run, rng)):
-                values = label(policy, device, r, args.repeats, seed=run_seed)
-                out.write(json.dumps({"run": r, "values": values, "repeats": args.repeats, "pair": run_seed}) + "\n")
-            out.flush()
-            if (i + 1) % 10 == 0:
-                print(f"{i + 1}/{args.n}", flush=True)
+                held[k] = (r, run_seed)
+                k += 1
+                yield fight_job(r, run_seed, args.next_act)
+
+    written = 0
+    with open(args.out, "a") as out:
+        for j, ends in fights_stream(net, device, jobs(), args.repeats, pool=args.pool):
+            run, pair = held.pop(j)
+            out.write(json.dumps({"run": run, "values": mean_rewards(ends), "repeats": args.repeats, "pair": pair}) + "\n")
+            written += 1
+            if written % 100 == 0:
+                out.flush()
+                print(f"{written}/{2 * n} states", flush=True)
 
 
 def cmd_train(args) -> None:
@@ -301,54 +348,94 @@ def played_starts(paths: list[Path]) -> list[dict]:
     return starts
 
 
+@torch.no_grad()
+def opening_values(policy: Policy, device: torch.device, jobs: list[FightJob], rolls: int = 4) -> np.ndarray:
+    """Each job's mean value-head read over its fights' openings, `rolls`
+    per encounter: how afterstate's forecast reads a run state, before its
+    calibration."""
+    n = sum(len(job.encounters) for job in jobs) * rolls
+    envs = Envs(n)
+    starts = envs.sim.queue_fight_jobs([(json.dumps(job.start), job.max_hp, job.encounters, job.seed) for job in jobs], rolls)
+    envs.sim.start_fights(list(range(n)), list(range(n)), envs.floats, envs.ids, envs.mask)
+    values = np.concatenate(
+        [
+            policy(torch.from_numpy(envs.floats[i : i + 4096]).to(device), torch.from_numpy(envs.ids[i : i + 4096]).to(device))[1].float().cpu().numpy()
+            for i in range(0, n, 4096)
+        ]
+    )
+    return np.array([values[a:b].mean() for a, b in zip(starts, [*starts[1:], n])])
+
+
+def options_of(start: dict, rng: np.random.Generator) -> list[dict]:
+    """What a card reward and a rest site offer a deck: keeping it, three
+    reward cards, an upgrade, a removal."""
+    deck = start["deck"]
+    options = [start] + [{**start, "deck": deck + [{"id": str(c), "up": False}]} for c in rng.choice(REWARD_POOL, 3, replace=False)]
+    if up := [i for i, c in enumerate(deck) if not c.get("up")]:
+        i = int(rng.choice(up))
+        options.append({**start, "deck": deck[:i] + [{**deck[i], "up": True}] + deck[i + 1 :]})
+    i = int(rng.integers(len(deck)))
+    options.append({**start, "deck": deck[:i] + deck[i + 1 :]})
+    return options
+
+
 def cmd_check(args) -> None:
-    """For each played deck, the choices a card reward and a rest site
-    offer (three reward cards, an upgrade, a removal, or keeping it), valued
-    by the fights at `--repeats` and by the network, over the same
-    encounters. Prints how often the picks match and what the network's
-    pick gives up against the fights' best, each beside a random pick's."""
+    """For each deck, the choices a card reward and a rest site offer,
+    valued by the fights at `--repeats` (the truth), by the network, and by
+    the value head on the fights' openings (afterstate's read). Prints how
+    often each pick matches the fights' and what it gives up against the
+    fights' best, beside a random pick's."""
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     policy = load_policy(args.checkpoint, device).eval()
     model = load(args.model, torch.device("cpu"))
     rng = np.random.default_rng(args.seed)
-    starts = played_starts(args.recordings)
+    starts = logged_starts(args.starts, args.decks, rng) if args.starts else played_starts(args.recordings)
     if not starts:
-        raise SystemExit("no played-run recordings (pass files to use others)")
-    same = regret = random_regret = 0.0
-    for n, start in enumerate(starts):
-        deck = start["deck"]
-        options = [start] + [{**start, "deck": deck + [{"id": str(c), "up": False}]} for c in rng.choice(REWARD_POOL, 3, replace=False)]
-        if up := [i for i, c in enumerate(deck) if not c.get("up")]:
-            i = int(rng.choice(up))
-            options.append({**start, "deck": deck[:i] + [{**deck[i], "up": True}] + deck[i + 1 :]})
-        i = int(rng.integers(len(deck)))
-        options.append({**start, "deck": deck[:i] + deck[i + 1 :]})
+        raise SystemExit("no decks: no played-run recordings (pass files, or --starts)")
+    pickers = ("network", "opening", "random")
+    same = dict.fromkeys(pickers, 0.0)
+    regret = dict.fromkeys(pickers, 0.0)
+    for first in range(0, len(starts), args.group):
+        decks = [options_of(start, rng) for start in starts[first : first + args.group]]
+        options = [o for d in decks for o in d]
+        jobs = [fight_job(o, args.seed, args.next_act) for o in options]
+        truth = [mean_rewards(ends) for ends in fights_many(policy, device, jobs, args.repeats)]
+        opening = opening_values(policy, device, jobs)
         with torch.no_grad():
-            truth = [label(policy, device, o, args.repeats, seed=args.seed) for o in options]
-            pred = model(encode(options))
-        cols = [ENCOUNTERS.index(e) for e in truth[0]]
-        fought = np.array([np.mean(list(t.values())) for t in truth])
-        guessed = pred[:, cols].mean(1).numpy()
-        same += int(fought.argmax() == guessed.argmax())
-        regret += float(fought.max() - fought[guessed.argmax()])
-        random_regret += float(fought.max() - fought.mean())
-        print(
-            f"{start['encounter']:28s} {len(deck):2d} cards  fights pick {int(fought.argmax())} ({fought.max():+.2f})  net pick {int(guessed.argmax())} ({fought[guessed.argmax()]:+.2f})",
-            flush=True,
-        )
+            pred = model(encode(options)).numpy()
+        at = 0
+        for start, opts in zip(starts[first:], decks):
+            part = slice(at, at + len(opts))
+            at += len(opts)
+            cols = [ENCOUNTERS.index(e) for e in truth[part.start]]
+            fought = np.array([np.mean(list(t.values())) for t in truth[part]])
+            picks = {"network": int(pred[part][:, cols].mean(1).argmax()), "opening": int(opening[part].argmax())}
+            for k, j in picks.items():
+                same[k] += int(j == fought.argmax())
+                regret[k] += float(fought.max() - fought[j])
+            same["random"] += 1 / len(opts)
+            regret["random"] += float(fought.max() - fought.mean())
+            print(
+                f"{start['encounter']:28s} {len(start['deck']):2d} cards  fights pick {int(fought.argmax())} ({fought.max():+.2f})  net {picks['network']} opening {picks['opening']}",
+                flush=True,
+            )
     n = len(starts)
-    print(f"{n} decks: same pick {same / n:.0%} (random {1 / len(options):.0%}), gives up {regret / n:.3f} a fight on average (random {random_regret / n:.3f})")
+    for k in pickers:
+        print(f"{k:8s} same pick {same[k] / n:.0%}  gives up {regret[k] / n:.3f} a fight on average")
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
-    lab = sub.add_parser("label", help="play fights on generated run states and write labels")
+    lab = sub.add_parser("label", help="play fights on run states (generated, or from fight logs) and write labels")
     lab.add_argument("checkpoint", type=Path)
     lab.add_argument("--n", type=int, default=200, help="run states, each with one variant")
     lab.add_argument("--repeats", type=int, default=64, help="fights per encounter per state")
     lab.add_argument("--seed", type=int, default=1)
     lab.add_argument("--out", type=Path, default=Path("deckvalue-labels.jsonl"))
+    lab.add_argument("--starts", type=Path, nargs="+", help="fight logs (`runplay --fights-out`) to draw the run states from instead of generating them")
+    lab.add_argument("--next-act", action="store_true", help="label the next act's elites and bosses too, at full HP")
+    lab.add_argument("--pool", type=int, default=16384, help="envs playing the fights, each starting the next queued fight as its own ends")
     tr = sub.add_parser("train", help="fit the network to labels")
     tr.add_argument("labels", type=Path)
     tr.add_argument("--policy", type=Path, help="combat checkpoint to seed the card embedding from")
@@ -361,6 +448,10 @@ def main() -> None:
     ch.add_argument("model", type=Path)
     ch.add_argument("recordings", nargs="*", type=Path, help="recordings to take decks from (default: every played run's)")
     ch.add_argument("--repeats", type=int, default=256, help="fights per encounter per option")
+    ch.add_argument("--starts", type=Path, nargs="+", help="fight logs to draw the decks from instead of played runs")
+    ch.add_argument("--decks", type=int, default=200, help="decks drawn from --starts")
+    ch.add_argument("--next-act", action="store_true", help="value the next act's fights too, as the labels did")
+    ch.add_argument("--group", type=int, default=16, help="decks whose options are fought together")
     ch.add_argument("--seed", type=int, default=1)
     args = ap.parse_args()
     {"label": cmd_label, "train": cmd_train, "check": cmd_check}[args.cmd](args)
