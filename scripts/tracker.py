@@ -154,7 +154,12 @@ def convert(page: dict, pages: dict[tuple[str, str], str]) -> dict:
             stats["potion_used"] = f["potionsUsed"]
         if f["eventChoices"]:
             stats["event_choices"] = [
-                {"title": {"key": f"{c['eventId']}.pages.{pages.get((c['eventId'], c['choiceId']), 'INITIAL')}.options.{c['choiceId']}.title", "table": "events"}}
+                {
+                    "title": {
+                        "key": f"{c['eventId']}.pages.{pages.get((c['eventId'], c['choiceId']), 'INITIAL')}.options.{c['choiceId']}.title",
+                        "table": "events",
+                    }
+                }
                 for c in f["eventChoices"]
             ]
         history[f["actIndex"]].append({"map_point_type": f["mapPointType"], "player_stats": [stats], "rooms": [room]})
@@ -201,7 +206,9 @@ def fetch(url: str) -> dict:
         time.sleep(max(0.0, _last_request + PACE - time.monotonic()))
         _last_request = time.monotonic()
         base, _, query = url.strip().rstrip("/").partition("?")
-        request = urllib.request.Request(f"{base}/__data.json" + (f"?{query}" if query else ""), headers={"User-Agent": "sts2ai-tracker/1", "Cookie": f"sts_game_version={BUILD}"})
+        request = urllib.request.Request(
+            f"{base}/__data.json" + (f"?{query}" if query else ""), headers={"User-Agent": "sts2ai-tracker/1", "Cookie": f"sts_game_version={BUILD}"}
+        )
         try:
             with urllib.request.urlopen(request, timeout=30) as r:
                 nodes = json.load(r)["nodes"]

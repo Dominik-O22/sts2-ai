@@ -79,6 +79,7 @@ GAME_DIR = Path.home() / ".local/share/SlayTheSpire2/sts2ai"
 RECORDINGS = GAME_DIR / "recordings"
 DEV = RECORDINGS / "dev"
 
+
 @dataclass
 class Loadout:
     """What the run should carry into a job's fights: the exact deck, the
@@ -91,8 +92,7 @@ class Loadout:
 
 # Block, a trickle of damage, and nothing with a fiddly port.
 STANDARD = Loadout(
-    {"STRIKE_IRONCLAD": 3, "DEFEND_IRONCLAD": 4, "BASH": 1, "SHRUG_IT_OFF": 4, "BLOOD_WALL": 2,
-     "IMPERVIOUS": 2, "IRON_WAVE": 2, "FEEL_NO_PAIN": 1},
+    {"STRIKE_IRONCLAD": 3, "DEFEND_IRONCLAD": 4, "BASH": 1, "SHRUG_IT_OFF": 4, "BLOOD_WALL": 2, "IMPERVIOUS": 2, "IRON_WAVE": 2, "FEEL_NO_PAIN": 1},
     {"ANCHOR": 1, "BAG_OF_PREPARATION": 1},
     80,
 )
@@ -101,9 +101,22 @@ STANDARD = Loadout(
 # Strength that scales (Inflame, Demon Form), plain hits, and still enough
 # block. Bosses have hundreds of HP, so their cycles show all the same.
 POWERED = Loadout(
-    {"STRIKE_IRONCLAD": 2, "DEFEND_IRONCLAD": 3, "BASH": 1, "SHRUG_IT_OFF": 3, "IMPERVIOUS": 2,
-     "FLAME_BARRIER": 1, "FEEL_NO_PAIN": 1, "INFLAME": 2, "DEMON_FORM": 1, "THUNDERCLAP": 2,
-     "BREAKTHROUGH": 1, "POMMEL_STRIKE": 2, "UPPERCUT": 1, "IRON_WAVE": 2},
+    {
+        "STRIKE_IRONCLAD": 2,
+        "DEFEND_IRONCLAD": 3,
+        "BASH": 1,
+        "SHRUG_IT_OFF": 3,
+        "IMPERVIOUS": 2,
+        "FLAME_BARRIER": 1,
+        "FEEL_NO_PAIN": 1,
+        "INFLAME": 2,
+        "DEMON_FORM": 1,
+        "THUNDERCLAP": 2,
+        "BREAKTHROUGH": 1,
+        "POMMEL_STRIKE": 2,
+        "UPPERCUT": 1,
+        "IRON_WAVE": 2,
+    },
     STANDARD.relics,
     150,
 )
@@ -116,7 +129,7 @@ MAX_HP_RELICS = [("MANGO", 14), ("PEAR", 10), ("STRAWBERRY", 7)]
 CARD_BASE = {"STRIKE_IRONCLAD": 3, "DEFEND_IRONCLAD": 3, "BASH": 1, "SHRUG_IT_OFF": 2}
 
 
-def loadout_for(job: "Job") -> Loadout:
+def loadout_for(job: Job) -> Loadout:
     if job.cards:
         return Loadout({**CARD_BASE, **{c: 2 for c in job.cards}}, STANDARD.relics, 150)
     return POWERED if job.tags & {"hive", "glory"} else STANDARD
@@ -278,10 +291,18 @@ class Job:
         return all(t == self.name or t in self.tags for t in terms)
 
 
-def relic_job(name: str, relics: list[str], advice: str, encounter: str = "SEWER_CLAM_NORMAL", *,
-              setup: list[str] = [], teardown: list[str] = [], human: bool = False) -> Job:
+def relic_job(
+    name: str,
+    relics: list[str],
+    advice: str,
+    encounter: str = "SEWER_CLAM_NORMAL",
+    *,
+    setup: list[str] | None = None,
+    teardown: list[str] | None = None,
+    human: bool = False,
+) -> Job:
     """A relic group: on for one fight, off again after."""
-    return Job(name, {"relics"}, [Send(setup), Fight(encounter)], relics, teardown, advice, human)
+    return Job(name, {"relics"}, [Send(setup or []), Fight(encounter)], relics, teardown or [], advice, human)
 
 
 # Sewer Clam by default: one monster, Plating to break, and a fight the
@@ -290,81 +311,107 @@ def relic_job(name: str, relics: list[str], advice: str, encounter: str = "SEWER
 # whose potions land before the start record so the replay cannot see it
 # work, and Lizard Tail, which needs a death.
 RELIC_FIGHTS = [
-    relic_job("paels_eye", ["PAELS_EYE"],
-              "End turn 1 without playing anything: the hand exhausts, the clam does not move, and you go again.",
-              human=True),
-    relic_job("whispering_earring", ["WHISPERING_EARRING"],
-              "Nothing to do on turn 1: it plays your hand for you, leftmost card first, at the clam."),
-    relic_job("snecko_eye", ["SNECKO_EYE", "FAKE_SNECKO_EYE"],
-              "Play normally. Every card you draw rolls a new cost for the fight."),
-    relic_job("choices_paradox", ["CHOICES_PARADOX"],
-              "Turn 1 offers five cards. Take one and hold it past the end of the turn to see it retained."),
-    relic_job("history_course", ["HISTORY_COURSE"],
-              "End a few turns on different attacks and skills: each turn opens by replaying the last one."),
-    relic_job("first_plays", ["THROWING_AXE", "MUSIC_BOX"],
-              "Open the fight with an attack (Throwing Axe plays it twice), and play an attack every turn "
-              "(Music Box hands back an ethereal copy of the first)."),
-    relic_job("play_limits", ["BRILLIANT_SCARF", "VELVET_CHOKER"],
-              "Play five cards in one turn, the Angers help: the fifth is free. Then try for a seventh, "
-              "which Velvet Choker refuses.",
-              setup=["card ANGER Deck"] * 3, teardown=["remove_card ANGER Deck"] * 3, human=True),
-    relic_job("draw_and_hand", ["FIDDLE", "RUNIC_PYRAMID"],
-              "Play Shrug It Off: Fiddle eats its draw. Leave cards in hand; they stay for next turn."),
-    relic_job("turn_one", ["BONE_TEA", "BLESSED_ANTLER", "RADIANT_PEARL", "JEWELED_MASK", "BIG_MUSHROOM",
-                           "ROYAL_POISON", "FAKE_BLOOD_VIAL", "TEA_OF_DISCOURTESY", "EMBER_TEA", "SWORD_OF_JADE",
-                           "FAKE_ANCHOR"],
-              "All of it lands on turn 1. Play the Luminesce at some point."),
-    relic_job("every_turn", ["CROSSBOW", "SAI", "MR_STRUGGLES", "FAKE_HAPPY_FLOWER", "POLLINOUS_CORE",
-                             "TOASTY_MITTENS", "PAELS_BLOOD", "IRON_CLUB", "SEAL_OF_GOLD"],
-              "Go at least six turns, so the five-turn flower and the four-turn core both fire.",
-              setup=["gold 100"]),
-    relic_job("energy", ["PRISMATIC_GEM", "ECTOPLASM", "SOZU", "BLOOD_SOAKED_ROSE", "PHILOSOPHERS_STONE",
-                         "PUMPKIN_CANDLE", "SPIKED_GAUNTLETS", "PAELS_TEARS"],
-              "End a turn with energy left (Pael's Tears pays it back), and play Feel No Pain at its "
-              "raised cost. Sozu refuses the fight's potions, so no Fairy this time.",
-              teardown=["remove_card ENTHRALLED Deck"], human=True),
-    relic_job("card_hooks", ["DAUGHTER_OF_THE_WIND", "LOST_WISP", "FORGOTTEN_SOUL", "HAND_DRILL",
-                             "FAKE_STRIKE_DUMMY", "PAELS_LEGION", "DIAMOND_DIADEM", "FAKE_ORICHALCUM"],
-              "Break the clam's block with an attack (Hand Drill), play Feel No Pain (Lost Wisp), exhaust "
-              "something (Forgotten Soul), and have one turn of two cards or fewer (Diamond Diadem).",
-              human=True),
-    relic_job("biiig_hug", ["BIIIG_HUG"],
-              "On pickup it asks for four cards to remove: take Defends. Every reshuffle adds a Soot.",
-              human=True),
+    relic_job("paels_eye", ["PAELS_EYE"], "End turn 1 without playing anything: the hand exhausts, the clam does not move, and you go again.", human=True),
+    relic_job("whispering_earring", ["WHISPERING_EARRING"], "Nothing to do on turn 1: it plays your hand for you, leftmost card first, at the clam."),
+    relic_job("snecko_eye", ["SNECKO_EYE", "FAKE_SNECKO_EYE"], "Play normally. Every card you draw rolls a new cost for the fight."),
+    relic_job("choices_paradox", ["CHOICES_PARADOX"], "Turn 1 offers five cards. Take one and hold it past the end of the turn to see it retained."),
+    relic_job("history_course", ["HISTORY_COURSE"], "End a few turns on different attacks and skills: each turn opens by replaying the last one."),
+    relic_job(
+        "first_plays",
+        ["THROWING_AXE", "MUSIC_BOX"],
+        "Open the fight with an attack (Throwing Axe plays it twice), and play an attack every turn (Music Box hands back an ethereal copy of the first).",
+    ),
+    relic_job(
+        "play_limits",
+        ["BRILLIANT_SCARF", "VELVET_CHOKER"],
+        "Play five cards in one turn, the Angers help: the fifth is free. Then try for a seventh, which Velvet Choker refuses.",
+        setup=["card ANGER Deck"] * 3,
+        teardown=["remove_card ANGER Deck"] * 3,
+        human=True,
+    ),
+    relic_job("draw_and_hand", ["FIDDLE", "RUNIC_PYRAMID"], "Play Shrug It Off: Fiddle eats its draw. Leave cards in hand; they stay for next turn."),
+    relic_job(
+        "turn_one",
+        [
+            "BONE_TEA",
+            "BLESSED_ANTLER",
+            "RADIANT_PEARL",
+            "JEWELED_MASK",
+            "BIG_MUSHROOM",
+            "ROYAL_POISON",
+            "FAKE_BLOOD_VIAL",
+            "TEA_OF_DISCOURTESY",
+            "EMBER_TEA",
+            "SWORD_OF_JADE",
+            "FAKE_ANCHOR",
+        ],
+        "All of it lands on turn 1. Play the Luminesce at some point.",
+    ),
+    relic_job(
+        "every_turn",
+        ["CROSSBOW", "SAI", "MR_STRUGGLES", "FAKE_HAPPY_FLOWER", "POLLINOUS_CORE", "TOASTY_MITTENS", "PAELS_BLOOD", "IRON_CLUB", "SEAL_OF_GOLD"],
+        "Go at least six turns, so the five-turn flower and the four-turn core both fire.",
+        setup=["gold 100"],
+    ),
+    relic_job(
+        "energy",
+        ["PRISMATIC_GEM", "ECTOPLASM", "SOZU", "BLOOD_SOAKED_ROSE", "PHILOSOPHERS_STONE", "PUMPKIN_CANDLE", "SPIKED_GAUNTLETS", "PAELS_TEARS"],
+        "End a turn with energy left (Pael's Tears pays it back), and play Feel No Pain at its "
+        "raised cost. Sozu refuses the fight's potions, so no Fairy this time.",
+        teardown=["remove_card ENTHRALLED Deck"],
+        human=True,
+    ),
+    relic_job(
+        "card_hooks",
+        ["DAUGHTER_OF_THE_WIND", "LOST_WISP", "FORGOTTEN_SOUL", "HAND_DRILL", "FAKE_STRIKE_DUMMY", "PAELS_LEGION", "DIAMOND_DIADEM", "FAKE_ORICHALCUM"],
+        "Break the clam's block with an attack (Hand Drill), play Feel No Pain (Lost Wisp), exhaust "
+        "something (Forgotten Soul), and have one turn of two cards or fewer (Diamond Diadem).",
+        human=True,
+    ),
+    relic_job("biiig_hug", ["BIIIG_HUG"], "On pickup it asks for four cards to remove: take Defends. Every reshuffle adds a Soot.", human=True),
     relic_job("very_hot_cocoa", ["VERY_HOT_COCOA"], "Spend the four extra energy on turn 1."),
-    relic_job("stone_cracker", ["STONE_CRACKER"],
-              "Two draw pile cards start the fight upgraded. Go a few turns so both get played."),
+    relic_job("stone_cracker", ["STONE_CRACKER"], "Two draw pile cards start the fight upgraded. Go a few turns so both get played."),
     # Potion Belt makes room for the rock next to the per-fight potions.
-    relic_job("potion_relics", ["PETRIFIED_TOAD", "REPTILE_TRINKET", "POTION_BELT"],
-              "The Toad puts a Potion-Shaped Rock in the belt. Throw it on turn 1, then attack: "
-              "Reptile Trinket gives 3 Strength until the turn ends."),
+    relic_job(
+        "potion_relics",
+        ["PETRIFIED_TOAD", "REPTILE_TRINKET", "POTION_BELT"],
+        "The Toad puts a Potion-Shaped Rock in the belt. Throw it on turn 1, then attack: Reptile Trinket gives 3 Strength until the turn ends.",
+    ),
     relic_job("bellows", ["BELLOWS"], "Nothing to steer: the opening hand starts upgraded."),
-    relic_job("gambling_chip", ["GAMBLING_CHIP"],
-              "Turn 1 asks which cards to discard: pick two, and as many are drawn in their place.",
-              human=True),
-    relic_job("mystic_lighter", ["MYSTIC_LIGHTER", "FRESNEL_LENS"],
-              "Fresnel Lens gives the two new Iron Waves Nimble. Play them: each hits for 9 more.",
-              setup=["card IRON_WAVE Deck"] * 2, teardown=["remove_card IRON_WAVE Deck"] * 4),
-    relic_job("dragon_fruit", ["DRAGON_FRUIT"],
-              "Land the killing blow with Hand of Greed: the gold it pays raises max HP by 1.",
-              setup=["card HAND_OF_GREED Deck"], teardown=["remove_card HAND_OF_GREED Deck"], human=True),
+    relic_job("gambling_chip", ["GAMBLING_CHIP"], "Turn 1 asks which cards to discard: pick two, and as many are drawn in their place.", human=True),
+    relic_job(
+        "mystic_lighter",
+        ["MYSTIC_LIGHTER", "FRESNEL_LENS"],
+        "Fresnel Lens gives the two new Iron Waves Nimble. Play them: each hits for 9 more.",
+        setup=["card IRON_WAVE Deck"] * 2,
+        teardown=["remove_card IRON_WAVE Deck"] * 4,
+    ),
+    relic_job(
+        "dragon_fruit",
+        ["DRAGON_FRUIT"],
+        "Land the killing blow with Hand of Greed: the gold it pays raises max HP by 1.",
+        setup=["card HAND_OF_GREED Deck"],
+        teardown=["remove_card HAND_OF_GREED Deck"],
+        human=True,
+    ),
     # Not ported yet: this recording is what the port gets checked against.
-    relic_job("toolbox", ["TOOLBOX"],
-              "Before the first draw it offers three colorless cards: take one and play it.", human=True),
-    relic_job("elite", ["BOOMING_CONCH", "BLACK_BLOOD"],
-              "Elites only for the conch. Win it: Black Blood heals 12 afterwards.",
-              encounter="TERROR_EEL_ELITE"),
+    relic_job("toolbox", ["TOOLBOX"], "Before the first draw it offers three colorless cards: take one and play it.", human=True),
+    relic_job("elite", ["BOOMING_CONCH", "BLACK_BLOOD"], "Elites only for the conch. Win it: Black Blood heals 12 afterwards.", encounter="TERROR_EEL_ELITE"),
     # Relics that carry a count or a flag from one fight to the next. The
     # second fight starts from what the first and the rest site left, which
     # is what the recorder's `relic_state` has to get across.
-    Job("carried_state", {"relics"},
-        [Fight("SEWER_CLAM_NORMAL"), Send(["room RestSite"]),
-         Say("At the rest site take Lift (Girya), then go back to the map.", wait=True),
-         Fight("CULTISTS_NORMAL")],
-        ["PEN_NIB", "NUNCHAKU", "TUNING_FORK", "JOSS_PAPER", "HAPPY_FLOWER", "PENDULUM", "GIRYA",
-         "VENERABLE_TEA_SET"],
-        advice="Play plenty of attacks and skills and exhaust a few cards in the first fight, so the "
-        "counters end part-way into a cycle."),
+    Job(
+        "carried_state",
+        {"relics"},
+        [
+            Fight("SEWER_CLAM_NORMAL"),
+            Send(["room RestSite"]),
+            Say("At the rest site take Lift (Girya), then go back to the map.", wait=True),
+            Fight("CULTISTS_NORMAL"),
+        ],
+        ["PEN_NIB", "NUNCHAKU", "TUNING_FORK", "JOSS_PAPER", "HAPPY_FLOWER", "PENDULUM", "GIRYA", "VENERABLE_TEA_SET"],
+        advice="Play plenty of attacks and skills and exhaust a few cards in the first fight, so the counters end part-way into a cycle.",
+    ),
 ]
 
 
@@ -379,12 +426,17 @@ def card_jobs() -> list[Job]:
     from sts2ai import _sim
 
     names = _sim.card_ids()
-    new = names[names.index("ALCHEMIZE"):]
+    new = names[names.index("ALCHEMIZE") :]
     refused = set(_sim.unsupported_cards())
     new = [c for c in new if c not in refused]
     return [
-        Job(f"cards_{i // 5 + 1:02d}", {"cards"}, [Fight(e) for e in CARD_ENCOUNTERS], cards=new[i : i + 5],
-            advice="Play the new cards whenever they come up: " + ", ".join(new[i : i + 5]) + ".")
+        Job(
+            f"cards_{i // 5 + 1:02d}",
+            {"cards"},
+            [Fight(e) for e in CARD_ENCOUNTERS],
+            cards=new[i : i + 5],
+            advice="Play the new cards whenever they come up: " + ", ".join(new[i : i + 5]) + ".",
+        )
         for i in range(0, len(new), 5)
     ]
 
@@ -393,8 +445,13 @@ def encounter_jobs() -> list[Job]:
     """One job per encounter the sim models, tagged with act and kind, and
     `event` for the fights an event starts."""
     return [
-        Job(enc.lower(), {act.lower(), kind.lower(), "encounters"} | ({"event"} if enc.endswith("_EVENT_ENCOUNTER") else set()),
-            [Fight(enc, EVENT_STARTS.get(enc))], advice=ADVICE.get(enc), human=enc in EVENT_STARTS)
+        Job(
+            enc.lower(),
+            {act.lower(), kind.lower(), "encounters"} | ({"event"} if enc.endswith("_EVENT_ENCOUNTER") else set()),
+            [Fight(enc, EVENT_STARTS.get(enc))],
+            advice=ADVICE.get(enc),
+            human=enc in EVENT_STARTS,
+        )
         for enc, act, kind in encounters()
     ]
 
@@ -407,7 +464,7 @@ def send(commands: list[str], quiet: bool = False) -> list[str]:
     """Run dev console lines through the mod; returns what it said."""
     if not commands:
         return []
-    out = subprocess.run([str(ROOT / "scripts/game.sh"), *commands], capture_output=True, text=True)
+    out = subprocess.run([str(ROOT / "scripts/game.sh"), *commands], capture_output=True, text=True, check=False)
     lines = out.stdout.strip().splitlines()
     if not quiet:
         for line in lines:
@@ -427,6 +484,7 @@ def replay(path: Path) -> tuple[bool, str]:
         cwd=ROOT / "sim",
         capture_output=True,
         text=True,
+        check=False,
     )
     line = next((l for l in out.stdout.splitlines() if l.startswith(("ok", "DIFF", "ERR"))), out.stderr.strip())
     return line.startswith("ok"), line
@@ -534,8 +592,7 @@ def card_coverage() -> dict[str, bool]:
                 continue
             if clean is None:
                 clean = replay_once(path)[0]
-            unplayable = card in held and all(c.get("cost", 0) < 0 for r in records if r.get("t") == "snapshot"
-                                              for c in r.get("hand", []) if c["id"] == card)
+            unplayable = card in held and all(c.get("cost", 0) < 0 for r in records if r.get("t") == "snapshot" for c in r.get("hand", []) if c["id"] == card)
             seen[card] = clean and (card in played or unplayable or card in SOLO_UNPLAYABLE)
     return seen
 
@@ -576,10 +633,12 @@ class Pilot:
 
     def start(self) -> None:
         if self.proc is None:
-            log = open(GAME_DIR / "pilot.log", "a")
+            log = open(GAME_DIR / "pilot.log", "a")  # noqa: SIM115 (the pilot writes to it after start returns)
             self.proc = subprocess.Popen(
                 [sys.executable, "-m", "sts2ai.play", str(self.checkpoint), "--record", "--search", str(self.search)],
-                cwd=ROOT, stdout=log, stderr=subprocess.STDOUT,
+                cwd=ROOT,
+                stdout=log,
+                stderr=subprocess.STDOUT,
             )
 
     def stop(self) -> None:
@@ -646,8 +705,10 @@ def run_job(job: Job, pilot: Pilot | None, run: Run | None) -> list[tuple[bool, 
 
 def log_result(job: Job, enc: str, ok: bool, line: str, path: Path | None) -> None:
     with open(GAME_DIR / "results.jsonl", "a") as f:
-        f.write(json.dumps({"time": time.strftime("%Y-%m-%d %H:%M:%S"), "job": job.name, "fight": enc,
-                            "ok": ok, "line": line, "file": path.name if path else None}) + "\n")
+        f.write(
+            json.dumps({"time": time.strftime("%Y-%m-%d %H:%M:%S"), "job": job.name, "fight": enc, "ok": ok, "line": line, "file": path.name if path else None})
+            + "\n"
+        )
 
 
 def queued_jobs(jobs: list[Job]) -> list[Job]:
@@ -669,8 +730,7 @@ def queued_jobs(jobs: list[Job]) -> list[Job]:
             out += [j for j in jobs if j.matches(entry["run"].lower().split())]
         elif (spec := entry.get("job")) is not None:
             steps: list[Step] = [Send(spec.get("setup", []))] + [Fight(e) for e in spec["fights"]]
-            out.append(Job(spec["name"], {"queued"}, steps, spec.get("relics", []), spec.get("teardown", []),
-                           spec.get("advice"), spec.get("human", False)))
+            out.append(Job(spec["name"], {"queued"}, steps, spec.get("relics", []), spec.get("teardown", []), spec.get("advice"), spec.get("human", False)))
     return out
 
 

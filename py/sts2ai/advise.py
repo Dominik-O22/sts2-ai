@@ -35,8 +35,8 @@ import argparse
 import json
 import sys
 import time
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Iterator
 
 import numpy as np
 import torch
@@ -130,9 +130,7 @@ class Session:
         actions are masked out: the game refused them."""
         self.sim.observe(self.floats, self.ids, self.mask)
         self.mask[0, list(banned)] = False
-        logits, _ = self.policy(
-            torch.from_numpy(self.floats).to(self.device), torch.from_numpy(self.ids).to(self.device)
-        )
+        logits, _ = self.policy(torch.from_numpy(self.floats).to(self.device), torch.from_numpy(self.ids).to(self.device))
         probs = masked_logits(logits, torch.from_numpy(self.mask).to(self.device)).softmax(dim=1)[0].cpu().numpy()
         # Two Strikes in hand are two actions to the policy and one to you.
         merged: dict[str, float] = {}

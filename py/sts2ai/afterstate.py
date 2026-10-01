@@ -38,9 +38,7 @@ class Scorer:
     With `kinds` only decisions of those kinds (`DECISIONS` names) are
     made by afterstate; the others keep the policy's pick."""
 
-    def __init__(
-        self, envs: Envs, forecaster: Forecaster, samples: int, depth: int = 3, nodes: int = 256, kinds: frozenset[str] = frozenset()
-    ):
+    def __init__(self, envs: Envs, forecaster: Forecaster, samples: int, depth: int = 3, nodes: int = 256, kinds: frozenset[str] = frozenset()):
         assert forecaster.calibration is not None, "afterstates need a calibration"
         self.envs, self.forecaster, self.samples, self.depth, self.nodes = envs, forecaster, samples, depth, nodes
         self.kinds = kinds
@@ -78,9 +76,7 @@ class Scorer:
         the others, whose picks stay the policy's."""
         t = time.perf_counter()
         path = DECISIONS.index("Path")
-        rows = [
-            k for k in (range(len(waiting)) if rows is None else rows) if ids[k, 0] != path and (not self.kinds or DECISIONS[ids[k, 0]] in self.kinds)
-        ]
+        rows = [k for k in (range(len(waiting)) if rows is None else rows) if ids[k, 0] != path and (not self.kinds or DECISIONS[ids[k, 0]] in self.kinds)]
         # Row `k` of `waiting` is row `scored[k]` of the batch the sim scored.
         self.scored = {k: i for i, k in enumerate(rows)}
         score = np.full((len(waiting), self.L.max_options), np.nan, dtype=np.float32)

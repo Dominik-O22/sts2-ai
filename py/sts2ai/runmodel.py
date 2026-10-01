@@ -128,6 +128,7 @@ class RunPolicy(nn.Module):
             )
         )
         if map_rows.any():
+
             def mean(tokens: Tensor, f: Tensor) -> Tensor:
                 present = (f[..., :1] != 0).to(tokens.dtype)
                 return (tokens * present).sum(1) / present.sum(1).clamp(min=1)

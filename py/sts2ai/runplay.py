@@ -164,7 +164,7 @@ class EventTable:
     none known keeps the policy's pick."""
 
     def __init__(self, rows: Rows, layout: RunLayout, min_offered: int = 5):
-        self.L = L = layout
+        self.L = layout
         self.event = NAMES["decision"].index("Event")
         offered: Counter[tuple[int, int]] = Counter()
         picked: Counter[tuple[int, int]] = Counter()
@@ -391,7 +391,9 @@ def report(fights: list[End], runs: list[RunFight], seed: int, last: int, loop: 
         for source in sorted({r.source for r in counted if r.start == start}):
             some = [r for r in counted if r.start == start and r.source == source]
             won = np.mean([r.end == "won" for r in some])
-            print(f"  from {START_POINTS[start]} {source}: {len(some)} runs, won {won:.1%}, floor {np.mean([r.floor for r in some]):.1f}, reached act 3 {np.mean([r.act >= 2 for r in some]):.1%}")
+            print(
+                f"  from {START_POINTS[start]} {source}: {len(some)} runs, won {won:.1%}, floor {np.mean([r.floor for r in some]):.1f}, reached act 3 {np.mean([r.act >= 2 for r in some]):.1%}"
+            )
     decks = np.array([r.deck for r in counted])
     print(f"deck at the end: mean {decks.mean():.1f}, median {np.median(decks):.0f}, max {decks.max()}")
 
@@ -415,7 +417,9 @@ def report(fights: list[End], runs: list[RunFight], seed: int, last: int, loop: 
     losses = Counter(e.encounter for e in in_counted if not e.won)
     print("  most runs lost to: " + ", ".join(f"{enc} {k}" for enc, k in losses.most_common(8)))
 
-    rate = f"{loop.combat_steps * n / seconds:,.0f} combat steps/s, {loop.decisions / seconds:,.0f} run decisions/s, {len(runs) / seconds * 3600:,.0f} runs/hour"
+    rate = (
+        f"{loop.combat_steps * n / seconds:,.0f} combat steps/s, {loop.decisions / seconds:,.0f} run decisions/s, {len(runs) / seconds * 3600:,.0f} runs/hour"
+    )
     searched = f", {loop.searched} decisions searched" if loop.searching else ""
     print(f"throughput: {rate} ({seconds:.0f} s, {n} envs{searched})")
 
@@ -476,7 +480,11 @@ def main() -> None:
     picks = Picks(RunLayout.load(), args.show) if run_policy else None
     fights_out = args.fights_out.open("w") if args.fights_out else None
     event_table = EventTable(Rows.load(args.event_table), RunLayout.load()) if args.event_table else None
-    afterstate = Scorer(envs, forecast, args.afterstate, args.afterstate_depth, args.afterstate_nodes, frozenset(filter(None, args.afterstate_kinds.split(",")))) if args.afterstate > 0 else None
+    afterstate = (
+        Scorer(envs, forecast, args.afterstate, args.afterstate_depth, args.afterstate_nodes, frozenset(filter(None, args.afterstate_kinds.split(","))))
+        if args.afterstate > 0
+        else None
+    )
     fights, runs, loop, seconds = play(
         combat,
         device,

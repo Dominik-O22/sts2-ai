@@ -45,5 +45,6 @@ def main() -> None:
         for path, r in rows.items():
             print(f"{path:<{width}}" + "".join(fmt.format(r.get(k, float("nan"))) for k in keys))
 
+
 if __name__ == "__main__":
     main()

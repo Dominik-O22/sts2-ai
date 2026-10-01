@@ -24,10 +24,10 @@ from torch.utils.tensorboard import SummaryWriter
 
 from sts2ai.env import ASCENSION, DEFAULT_RECORDINGS, End, Envs, has_recordings
 from sts2ai.evaluate import easy, evaluate
-from sts2ai.setups import EASY_HOLDOUT
-from sts2ai.setups import HOLDOUT as REAL_HOLDOUT
 from sts2ai.model import Arch, Policy, build_policy, checkpoint_arch, checkpoint_layout, checkpoint_vocab, load_state, masked_logits, warm_start
 from sts2ai.search import rollout, spread
+from sts2ai.setups import EASY_HOLDOUT
+from sts2ai.setups import HOLDOUT as REAL_HOLDOUT
 from sts2ai.vocab import current_text
 
 BOSS_FLOOR = 16

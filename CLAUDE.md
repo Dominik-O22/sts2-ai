@@ -78,6 +78,7 @@ cd sim && cargo test --release              # check its exit code, not a pipe's
 cd sim && cargo run --release --bin replay  # every recording against the sim
 cd sim && cargo run --release --example runcheck -- --effects ~/.local/share/SlayTheSpire2/steam/*/modded/profile1/saves/history/*.run   # real runs against the run layer
 uv sync --reinstall-package sts2ai          # rebuild the Python extension
+uv run ruff check && uv run ruff format     # Python lint; never trade speed for a lint
 uv run python -m sts2ai.vocab               # checkpoint remap self-check
 ./scripts/build-mod.sh                      # recorder mod + bridge, needs a game restart
 uv run python -m sts2ai.play runs/<run>/latest.pt --search 256   # policy plays combats
