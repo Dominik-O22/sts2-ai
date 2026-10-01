@@ -1041,6 +1041,17 @@ impl VecEnv {
     }
 
     /// Resets every env so the first `n` setups start immediately.
+    /// `set_fixed`, each env's random stream first set from its own seed
+    /// (`seeds[i]` for env `i`), so two envs given the same setup and seed
+    /// play the same shuffles wherever they sit.
+    pub fn set_fixed_seeded(&mut self, setups: Vec<FightSetup>, seeds: &[u64]) {
+        assert_eq!(seeds.len(), self.slots.len(), "a seed per env");
+        for (s, &seed) in self.slots.iter_mut().zip(seeds) {
+            s.rng = Rng::new(seed);
+        }
+        self.set_fixed(setups);
+    }
+
     pub fn set_fixed(&mut self, setups: Vec<FightSetup>) {
         self.fixed = setups;
         let n = self.slots.len();
@@ -1361,6 +1372,7 @@ impl VecEnv {
     /// Apply one action index per env, reset the envs whose fight ended,
     /// and encode the states that follow. `rewards` and `dones` describe
     /// the transition; the returned list describes every fight that ended.
+    /// An env given a negative action sits the step out, its row as it was.
     pub fn step(
         &mut self,
         actions: &[i64],
@@ -1385,8 +1397,9 @@ impl VecEnv {
             .zip(rewards.par_iter_mut())
             .zip(dones.par_iter_mut())
             .map(|(((((((i, s), &a), f), ids), m), r), d)| {
-                // A run waiting at a decision sits the step out.
-                if s.waiting() {
+                // A run waiting at a decision sits the step out, as does an
+                // env the caller is done with.
+                if a < 0 || s.waiting() {
                     (*r, *d) = (0.0, false);
                     return None;
                 }

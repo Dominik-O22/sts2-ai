@@ -167,6 +167,33 @@ impl VecEnv {
         Ok(n)
     }
 
+    /// `use_run` for many runs at once, env `i` playing the `i`-th fight:
+    /// each job (run JSON, max HP, encounters as (game name, floor,
+    /// starting HP), seed) gets `repeats` fights per encounter, built by
+    /// `sim::gen::run_fights` one encounter at a time, its envs' streams
+    /// seeded from the job's seed and their place in the job, so jobs with
+    /// the same seed and encounters play the same shuffles. Needs exactly
+    /// as many envs as fights; returns the index each job starts at.
+    fn use_fight_jobs(&mut self, jobs: Vec<(String, i32, Vec<(String, u32, i32)>, u64)>, repeats: usize) -> PyResult<Vec<usize>> {
+        let ids = Ids::new();
+        let (mut setups, mut seeds, mut starts) = (vec![], vec![], vec![]);
+        for (start, max_hp, encounters, seed) in jobs {
+            let v: Value = serde_json::from_str(&start).map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("bad run json: {e}")))?;
+            starts.push(setups.len());
+            let first = setups.len();
+            for (name, floor, hp) in encounters {
+                let fights = sim::gen::run_fights(&v, &ids, hp, max_hp, &[(name, floor)], repeats, seed).map_err(pyo3::exceptions::PyValueError::new_err)?;
+                setups.extend(fights);
+            }
+            seeds.extend((0..setups.len() - first).map(|i| seed.wrapping_mul(0x9E37_79B9).wrapping_add(i as u64)));
+        }
+        if setups.len() != self.inner.len() {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!("{} fights for {} envs", setups.len(), self.inner.len())));
+        }
+        self.inner.set_fixed_seeded(setups, &seeds);
+        Ok(starts)
+    }
+
     /// Switch to cycling through fights of the run in `start` (JSON with a
     /// recorder `start` record's run fields: deck, relics, potions, gold,
     /// max_energy, ascension) at `hp` of `max_hp`: `repeats` fights against
