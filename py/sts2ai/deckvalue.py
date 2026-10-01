@@ -137,9 +137,7 @@ class RunPotential:
         # Per act id (the rows' `ACTS` order, which is ours), its elites;
         # per boss id, its column.
         acts = [None, *ACTS]
-        self.elites = torch.tensor(
-            [[float(ACT_OF[e] == a and KIND_OF[e] == "Elite") for e in ENCOUNTERS] for a in acts], device=device
-        )
+        self.elites = torch.tensor([[float(ACT_OF[e] == a and KIND_OF[e] == "Elite") for e in ENCOUNTERS] for a in acts], device=device)
         bosses = [slug(b) for b in names["boss"][1:]]
         self.bosses = torch.zeros((len(bosses) + 1, len(ENCOUNTERS)), device=device)
         for i, b in enumerate(bosses):
@@ -334,7 +332,10 @@ def cmd_check(args) -> None:
         same += int(fought.argmax() == guessed.argmax())
         regret += float(fought.max() - fought[guessed.argmax()])
         random_regret += float(fought.max() - fought.mean())
-        print(f"{start['encounter']:28s} {len(deck):2d} cards  fights pick {int(fought.argmax())} ({fought.max():+.2f})  net pick {int(guessed.argmax())} ({fought[guessed.argmax()]:+.2f})", flush=True)
+        print(
+            f"{start['encounter']:28s} {len(deck):2d} cards  fights pick {int(fought.argmax())} ({fought.max():+.2f})  net pick {int(guessed.argmax())} ({fought[guessed.argmax()]:+.2f})",
+            flush=True,
+        )
     n = len(starts)
     print(f"{n} decks: same pick {same / n:.0%} (random {1 / len(options):.0%}), gives up {regret / n:.3f} a fight on average (random {random_regret / n:.3f})")
 

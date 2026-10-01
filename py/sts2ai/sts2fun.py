@@ -98,7 +98,7 @@ def slug(name: str) -> str:
 
 
 def encounter_id(name: str) -> str:
-    """"Snapping Jaxfruit (Normal)" -> SNAPPING_JAXFRUIT_NORMAL, the game's
+    """ "Snapping Jaxfruit (Normal)" -> SNAPPING_JAXFRUIT_NORMAL, the game's
     encounter id."""
     return slug(name)
 
@@ -142,7 +142,14 @@ def parse_run(page: str) -> dict:
     for cid, up, name in re.findall(r'data-card-id="([^"]+)" data-upgraded="(\d)"[^>]*>\s*([^<]*)', deck_part):
         deck.append([cid, up == "1"])
         names[name.strip()] = cid
-    return {"win": " WIN " in f" {text(page[: page.index('Floor by Floor')])} ", "title": head, "floors": floors, "relics": relics, "deck": deck, "names": names}
+    return {
+        "win": " WIN " in f" {text(page[: page.index('Floor by Floor')])} ",
+        "title": head,
+        "floors": floors,
+        "relics": relics,
+        "deck": deck,
+        "names": names,
+    }
 
 
 STARTER = ["STRIKE_IRONCLAD"] * 5 + ["DEFEND_IRONCLAD"] * 4 + ["BASH", "ASCENDERS_BANE"]

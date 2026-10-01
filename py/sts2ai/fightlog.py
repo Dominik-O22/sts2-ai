@@ -27,9 +27,7 @@ def powers(vec: np.ndarray) -> str:
     return " ".join(f"{POWER_NAMES.get(i, f'p{i}')}={round(v * 10)}" for i, v in enumerate(vec) if v != 0)
 
 
-def describe_state(
-    L: Layout, f: np.ndarray, ids: np.ndarray, cards: list[str], monsters: list[str], enchants: list[str], intents: list[str]
-) -> str:
+def describe_state(L: Layout, f: np.ndarray, ids: np.ndarray, cards: list[str], monsters: list[str], enchants: list[str], intents: list[str]) -> str:
     hp, block, energy, turn = f[0] * 100, f[3] * 50, f[4] * 5, f[6] * 10
     hand = []
     for slot, i in enumerate(ids[L.i_hand : L.i_hand + L.max_hand]):
@@ -50,7 +48,7 @@ def describe_state(
         intent = " ".join(intents[k] for k, on in enumerate(kinds) if on)
         if nums[0]:
             intent += f" {nums[0] * 20:.0f}x{nums[1] * 3:.0f}"
-        enemies.append(f"{monsters[ids[L.i_enemies + s]]} {e[2] * 100:.0f}hp b{e[5] * 30:.0f} [{intent}] {powers(e[L.enemy_feats - L.n_powers:])}")
+        enemies.append(f"{monsters[ids[L.i_enemies + s]]} {e[2] * 100:.0f}hp b{e[5] * 30:.0f} [{intent}] {powers(e[L.enemy_feats - L.n_powers :])}")
     out = f"T{turn:.0f} hp{hp:.0f} b{block:.0f} e{energy:.0f} {powers(f[L.f_player_powers : L.f_hand])}\n"
     out += "  hand: " + ", ".join(hand) + "\n"
     return out + "".join(f"  vs {e}\n" for e in enemies)

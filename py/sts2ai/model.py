@@ -284,9 +284,7 @@ class SlotMLP(Policy):
         self.potion = nn.Embedding(L.potion_vocab, potion_dim, padding_idx=0)
         self.enchant = nn.Embedding(L.enchant_vocab, enchant_dim, padding_idx=0)
         # One enemy: its two embeddings, then its dense block.
-        self.enemy = nn.Sequential(
-            nn.Linear(monster_dim + move_dim + L.enemy_feats, enemy_dim), nn.ReLU(), nn.Linear(enemy_dim, enemy_dim), nn.ReLU()
-        )
+        self.enemy = nn.Sequential(nn.Linear(monster_dim + move_dim + L.enemy_feats, enemy_dim), nn.ReLU(), nn.Linear(enemy_dim, enemy_dim), nn.ReLU())
         in_dim = (
             L.n_floats
             - L.max_enemies * L.enemy_feats
@@ -311,9 +309,7 @@ class SlotMLP(Policy):
         """Returns unmasked logits `[B, n_actions]` and values `[B]`."""
         L = self.layout
         B = floats.shape[0]
-        hand = torch.cat(
-            [self.card(ids[:, L.i_hand : L.i_hand + L.max_hand]), self.enchant(ids[:, L.i_enchants : L.i_enchants + L.max_hand])], dim=2
-        )
+        hand = torch.cat([self.card(ids[:, L.i_hand : L.i_hand + L.max_hand]), self.enchant(ids[:, L.i_enchants : L.i_enchants + L.max_hand])], dim=2)
         choices = self.card(ids[:, L.i_choices : L.i_choices + L.max_choices])
         potions = self.potion(ids[:, L.i_potions : L.i_potions + L.max_potions])
 
@@ -387,9 +383,7 @@ class SlotAttention(Policy):
         # Named like `SlotMLP`'s so `vocab.remap_state` moves their input
         # columns when a vocabulary grows: `enemy` as the enemy encoder,
         # `glob` as the torso with no embeddings after the floats.
-        self.enemy = nn.Sequential(
-            nn.Linear(monster_dim + move_dim + L.enemy_feats, enemy_dim), nn.ReLU(), nn.Linear(enemy_dim, enemy_dim), nn.ReLU()
-        )
+        self.enemy = nn.Sequential(nn.Linear(monster_dim + move_dim + L.enemy_feats, enemy_dim), nn.ReLU(), nn.Linear(enemy_dim, enemy_dim), nn.ReLU())
         self.glob = nn.Linear(L.n_floats - L.max_enemies * L.enemy_feats, d)
         # One projection per token kind; their biases tell the kinds apart.
         # Choices are not tokens (module docstring).
@@ -446,8 +440,7 @@ class SlotAttention(Policy):
         enemy_present = floats[:, L.f_enemies : L.f_relics].view(-1, L.max_enemies, L.enemy_feats)[:, :, 0]
         one = torch.ones_like(hand_ids[:, :1], dtype=torch.bool)
         return torch.cat(
-            [one, hand_ids != 0, enemy_present != 0, ids[:, L.i_potions : L.i_potions + L.max_potions] != 0]
-            + ([one.expand(-1, 3)] if self.arch.piles else []),
+            [one, hand_ids != 0, enemy_present != 0, ids[:, L.i_potions : L.i_potions + L.max_potions] != 0] + ([one.expand(-1, 3)] if self.arch.piles else []),
             dim=1,
         )
 

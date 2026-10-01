@@ -328,9 +328,7 @@ def play(
             forks = envs.sim.fork(roots, copies, seed=seed + step)
             first = np.concatenate([search.spread(np.flatnonzero(envs.mask[i]), copies) for i in roots])
             second = (np.full(len(first), -1), np.zeros(len(first), np.int64))
-            score = search.rollout(
-                policy, device, forks, first, second=second, on_step=lambda _, live: setattr(run, "copy_steps", run.copy_steps + len(live))
-            )
+            score = search.rollout(policy, device, forks, first, second=second, on_step=lambda _, live: setattr(run, "copy_steps", run.copy_steps + len(live)))
             for r, i in enumerate(roots):
                 part = slice(r * copies, (r + 1) * copies)
                 own = int(actions[i])
@@ -447,7 +445,10 @@ def main() -> None:
             if name == "easy":
                 ours = np.array([hp_lost(parsed[i], e) for i, e in enumerate(ends)])
                 theirs = np.array([float(p["winner_hp_lost"]) for p in parsed])
-                print(f"{mode:7s} won {won:6.1%}  HP lost {ours.mean():5.2f}  winner {theirs.mean():5.2f}  gap {np.mean(ours - theirs):+5.2f}  {cost(run)}", flush=True)
+                print(
+                    f"{mode:7s} won {won:6.1%}  HP lost {ours.mean():5.2f}  winner {theirs.mean():5.2f}  gap {np.mean(ours - theirs):+5.2f}  {cost(run)}",
+                    flush=True,
+                )
             else:
                 print(f"{mode:7s} won {won:6.1%}  {cost(run)}", flush=True)
             if report := search_report(run):

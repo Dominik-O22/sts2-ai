@@ -52,8 +52,7 @@ PLAN_MARGIN = 0.02
 def forward(policy: Policy, device: torch.device, floats: torch.Tensor, ids: torch.Tensor, chunk: int = CHUNK) -> tuple[torch.Tensor, torch.Tensor]:
     """The policy over a batch of any size, in `chunk`-sized pieces."""
     parts = [
-        policy(floats[i : i + chunk].to(device, non_blocking=True), ids[i : i + chunk].to(device, non_blocking=True))
-        for i in range(0, len(floats), chunk)
+        policy(floats[i : i + chunk].to(device, non_blocking=True), ids[i : i + chunk].to(device, non_blocking=True)) for i in range(0, len(floats), chunk)
     ]
     return torch.cat([p[0] for p in parts]), torch.cat([p[1] for p in parts])
 

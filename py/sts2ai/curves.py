@@ -61,7 +61,9 @@ def main() -> None:
     ap.add_argument("--repeats", type=int, default=2)
     args = ap.parse_args()
     device = torch.device("cuda")
-    print(f"{'run':12s} {'iter':>6s} {'hours':>5s} {'holdout':>7s} {'bosses':>6s} | {'winners':>7s} {'elites':>6s} {'bosses':>6s} | {'easy HP+':>8s} {'normals':>7s}")
+    print(
+        f"{'run':12s} {'iter':>6s} {'hours':>5s} {'holdout':>7s} {'bosses':>6s} | {'winners':>7s} {'elites':>6s} {'bosses':>6s} | {'easy HP+':>8s} {'normals':>7s}"
+    )
     for run in args.runs:
         cache_path = run / "curves.json"
         cache = json.loads(cache_path.read_text()) if cache_path.exists() else {}

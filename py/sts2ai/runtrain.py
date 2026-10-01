@@ -416,7 +416,15 @@ def train(combat_path: Path, run_dir: Path, cfg: Config, resume: Path | None) ->
     # the rows then only anchor PPO.
     if cfg.imitate and resume is None:
         holdout = Path(cfg.imitate).with_name("holdout.npz")
-        pretrain(policy, Rows.load(Path(cfg.imitate)), device, cfg.imitate_epochs, cfg.imitate_lr, cfg.imitate_batch, Rows.load(holdout) if holdout.exists() else None)
+        pretrain(
+            policy,
+            Rows.load(Path(cfg.imitate)),
+            device,
+            cfg.imitate_epochs,
+            cfg.imitate_lr,
+            cfg.imitate_batch,
+            Rows.load(holdout) if holdout.exists() else None,
+        )
         save_run_policy(run_dir / "imitated.pt", policy, None, config=asdict(cfg), combat=str(combat_path), **saved)
         if cfg.minutes <= 0:
             return
@@ -507,9 +515,7 @@ def train(combat_path: Path, run_dir: Path, cfg: Config, resume: Path | None) ->
             writer.add_scalar("speed/combat_steps_per_s", loop.combat_steps * cfg.envs / secs, it)
             writer.add_scalar("start/frontier", curriculum.frontier, it)
             top = ", ".join(f"{k} {v / max(stats.picks.total(), 1):.0%}" for k, v in stats.picks.most_common(8))
-            late = "  ".join(
-                f"{name} {np.mean([r.end == 'won' for r in runs]):.0%} ({len(runs)})" for name, runs in sorted(stats.late.items())
-            )
+            late = "  ".join(f"{name} {np.mean([r.end == 'won' for r in runs]):.0%} ({len(runs)})" for name, runs in sorted(stats.late.items()))
             print(
                 f"it {it} {secs / 60:.1f} min  floor {summary.get('run/floor', 0):.1f}  won {summary.get('run/won', 0):.1%}  "
                 f"act2 {summary.get('run/act2', 0):.1%}  act3 {summary.get('run/act3', 0):.1%}  "
