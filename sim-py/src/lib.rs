@@ -167,31 +167,46 @@ impl VecEnv {
         Ok(n)
     }
 
-    /// `use_run` for many runs at once, env `i` playing the `i`-th fight:
+    /// Queue many runs' fights for `start_fights`, replacing the queue:
     /// each job (run JSON, max HP, encounters as (game name, floor,
     /// starting HP), seed) gets `repeats` fights per encounter, built by
-    /// `sim::gen::run_fights` one encounter at a time, its envs' streams
-    /// seeded from the job's seed and their place in the job, so jobs with
-    /// the same seed and encounters play the same shuffles. Needs exactly
-    /// as many envs as fights; returns the index each job starts at.
-    fn use_fight_jobs(&mut self, jobs: Vec<(String, i32, Vec<(String, u32, i32)>, u64)>, repeats: usize) -> PyResult<Vec<usize>> {
+    /// `sim::gen::run_fights` one encounter at a time. A fight's seed comes
+    /// from its job's seed and its place in the job, so jobs with the same
+    /// seed and encounters play the same shuffles. Returns the queue index
+    /// each job starts at.
+    fn queue_fight_jobs(&mut self, jobs: Vec<(String, i32, Vec<(String, u32, i32)>, u64)>, repeats: usize) -> PyResult<Vec<usize>> {
         let ids = Ids::new();
-        let (mut setups, mut seeds, mut starts) = (vec![], vec![], vec![]);
+        let (mut fights, mut starts) = (vec![], vec![]);
         for (start, max_hp, encounters, seed) in jobs {
             let v: Value = serde_json::from_str(&start).map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("bad run json: {e}")))?;
-            starts.push(setups.len());
-            let first = setups.len();
+            starts.push(fights.len());
+            let mut place = 0u64;
             for (name, floor, hp) in encounters {
-                let fights = sim::gen::run_fights(&v, &ids, hp, max_hp, &[(name, floor)], repeats, seed).map_err(pyo3::exceptions::PyValueError::new_err)?;
-                setups.extend(fights);
+                for setup in sim::gen::run_fights(&v, &ids, hp, max_hp, &[(name, floor)], repeats, seed).map_err(pyo3::exceptions::PyValueError::new_err)? {
+                    fights.push((setup, seed.wrapping_mul(0x9E37_79B9).wrapping_add(place)));
+                    place += 1;
+                }
             }
-            seeds.extend((0..setups.len() - first).map(|i| seed.wrapping_mul(0x9E37_79B9).wrapping_add(i as u64)));
         }
-        if setups.len() != self.inner.len() {
-            return Err(pyo3::exceptions::PyValueError::new_err(format!("{} fights for {} envs", setups.len(), self.inner.len())));
-        }
-        self.inner.set_fixed_seeded(setups, &seeds);
+        self.inner.queue_fights(fights);
         Ok(starts)
+    }
+
+    /// Start queued fight `fights[i]` in env `envs[i]` and encode those
+    /// envs' rows (`sim::env::VecEnv::start_fights`).
+    fn start_fights(
+        &mut self,
+        py: Python<'_>,
+        envs: Vec<usize>,
+        fights: Vec<usize>,
+        mut floats: PyReadwriteArray2<f32>,
+        mut ids: PyReadwriteArray2<i64>,
+        mut mask: PyReadwriteArray2<bool>,
+    ) -> PyResult<()> {
+        let starts: Vec<(usize, usize)> = envs.into_iter().zip(fights).collect();
+        let (f, i, m) = (floats.as_slice_mut()?, ids.as_slice_mut()?, mask.as_slice_mut()?);
+        py.detach(|| self.inner.start_fights(&starts, f, i, m));
+        Ok(())
     }
 
     /// Switch to cycling through fights of the run in `start` (JSON with a
