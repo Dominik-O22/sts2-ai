@@ -27,7 +27,7 @@ import torch
 from torch import Tensor, nn
 
 from sts2ai import _sim
-from sts2ai.cards import BOSS_FLOOR, fights, horizon
+from sts2ai.cards import BOSS_FLOOR, FightJob, fights_many, horizon
 from sts2ai.env import ASCENSION, DEFAULT_RECORDINGS, RunLayout
 from sts2ai.model import Policy, load_policy
 
@@ -187,15 +187,23 @@ def variant(run: dict, rng: np.random.Generator) -> dict:
     return {**run, "deck": deck}
 
 
+def label_many(policy: Policy, device: torch.device, runs: list[dict], repeats: int, seeds: list[int], next_act: bool = False) -> list[dict[str, float]]:
+    """Per run, the mean fight reward per elite (at the run's HP) and boss
+    (at full HP) of its act, and with `next_act` every elite and boss of the
+    act after at full HP: the advisor's fights, all runs' at once."""
+    jobs = [FightJob(r, r["max_hp"], horizon(r["act"], None, r["hp"], r["max_hp"], next_act=next_act), s) for r, s in zip(runs, seeds)]
+    out = []
+    for ends in fights_many(policy, device, jobs, repeats):
+        by_enc: dict[str, list[float]] = {}
+        for e in ends:
+            by_enc.setdefault(slug(e.encounter), []).append(e.reward)
+        out.append({k: float(np.mean(v)) for k, v in by_enc.items()})
+    return out
+
+
 def label(policy: Policy, device: torch.device, run: dict, repeats: int, seed: int, next_act: bool = False) -> dict[str, float]:
-    """Mean fight reward per elite (at the run's HP) and boss (at full HP)
-    of the run's act, and with `next_act` every elite and boss of the act
-    after at full HP: the advisor's fights."""
-    encounters = horizon(run["act"], None, run["hp"], run["max_hp"], next_act=next_act)
-    by_enc: dict[str, list[float]] = {}
-    for e in fights(policy, device, run, run["max_hp"], encounters, repeats, seed):
-        by_enc.setdefault(slug(e.encounter), []).append(e.reward)
-    return {k: float(np.mean(v)) for k, v in by_enc.items()}
+    """`label_many` for one run."""
+    return label_many(policy, device, [run], repeats, [seed], next_act)[0]
 
 
 def logged_starts(paths: list[Path], n: int, rng: np.random.Generator) -> list[dict]:
@@ -212,23 +220,29 @@ def logged_starts(paths: list[Path], n: int, rng: np.random.Generator) -> list[d
 def cmd_label(args) -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     policy = load_policy(args.checkpoint, device).eval()
+    # The live-row count changes every step, hence dynamic; labeling runs
+    # long enough to repay the compile.
+    net = torch.compile(policy, dynamic=True) if device.type == "cuda" else policy
     rng = np.random.default_rng(args.seed)
     logged = logged_starts(args.starts, args.n, rng) if args.starts else None
+    n = len(logged) if logged else args.n
     with open(args.out, "a") as out, torch.no_grad():
-        for i in range(len(logged) if logged else args.n):
-            run_seed = args.seed * 1_000_003 + i
-            if logged:
-                run = logged[i]
-            else:
-                floor = int(rng.integers(1, 3 * BOSS_FLOOR + 1))
-                run = json.loads(_sim.generate_run(run_seed, floor))
-                run["act"] = ACT_OF[run["encounter"]]
-            for r in (run, variant(run, rng)):
-                values = label(policy, device, r, args.repeats, seed=run_seed, next_act=args.next_act)
-                out.write(json.dumps({"run": r, "values": values, "repeats": args.repeats, "pair": run_seed}) + "\n")
+        for first in range(0, n, args.batch):
+            runs, seeds = [], []
+            for i in range(first, min(first + args.batch, n)):
+                run_seed = args.seed * 1_000_003 + i
+                if logged:
+                    run = logged[i]
+                else:
+                    floor = int(rng.integers(1, 3 * BOSS_FLOOR + 1))
+                    run = json.loads(_sim.generate_run(run_seed, floor))
+                    run["act"] = ACT_OF[run["encounter"]]
+                runs += [run, variant(run, rng)]
+                seeds += [run_seed, run_seed]
+            for r, s, values in zip(runs, seeds, label_many(net, device, runs, args.repeats, seeds, args.next_act)):
+                out.write(json.dumps({"run": r, "values": values, "repeats": args.repeats, "pair": s}) + "\n")
             out.flush()
-            if (i + 1) % 10 == 0:
-                print(f"{i + 1}/{args.n}", flush=True)
+            print(f"{min(first + args.batch, n)}/{n}", flush=True)
 
 
 def cmd_train(args) -> None:
@@ -368,6 +382,7 @@ def main() -> None:
     lab.add_argument("--out", type=Path, default=Path("deckvalue-labels.jsonl"))
     lab.add_argument("--starts", type=Path, nargs="+", help="fight logs (`runplay --fights-out`) to draw the run states from instead of generating them")
     lab.add_argument("--next-act", action="store_true", help="label the next act's elites and bosses too, at full HP")
+    lab.add_argument("--batch", type=int, default=8, help="run states (each with its variant) whose fights are stepped together")
     tr = sub.add_parser("train", help="fit the network to labels")
     tr.add_argument("labels", type=Path)
     tr.add_argument("--policy", type=Path, help="combat checkpoint to seed the card embedding from")

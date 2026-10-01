@@ -37,13 +37,13 @@ import json
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Literal, NamedTuple
 
 import numpy as np
 import torch
 
 from sts2ai import _sim
-from sts2ai.env import DEFAULT_RECORDINGS, End, Envs
+from sts2ai.env import DEFAULT_RECORDINGS, End, Envs, pinned
 from sts2ai.model import Policy, load_policy, masked_logits
 
 RUN_STATE = DEFAULT_RECORDINGS.parent / "run.json"
@@ -127,27 +127,54 @@ def horizon(act: str, bosses: list[str] | None, hp: int, max_hp: int, next_act: 
     return fights
 
 
+class FightJob(NamedTuple):
+    """A run in `start` to fight `encounters` (game name, floor, starting
+    HP) from, at `max_hp`, its enemies rolled from `seed`."""
+
+    start: dict
+    max_hp: int
+    encounters: list[tuple[str, int, int]]
+    seed: int
+
+
 @torch.no_grad()
-def fights(policy: Policy, device: torch.device, start: dict, max_hp: int, encounters: list[tuple[str, int, int]], repeats: int, seed: int) -> list[End]:
-    """`repeats` greedy fights of the run in `start` against each of
-    `encounters` (game name, floor, starting HP), every env's first fight
-    only."""
-    ends: list[End] = []
-    for fight_hp in sorted({h for _, _, h in encounters}):
-        group = [(name, floor) for name, floor, h in encounters if h == fight_hp]
-        n = len(group) * repeats
-        envs = Envs(n, seed=seed)
-        envs.sim.use_run(json.dumps(start), fight_hp, max_hp, group, repeats, seed)
-        envs.sim.observe(envs.floats, envs.ids, envs.mask)
-        done = np.zeros(n, bool)
-        while not done.all():
-            logits, _ = policy(torch.from_numpy(envs.floats).to(device), torch.from_numpy(envs.ids).to(device))
-            actions = masked_logits(logits.float(), torch.from_numpy(envs.mask).to(device)).argmax(1).cpu().numpy()
-            for e in envs.step(actions):
-                if not done[e.env]:
-                    done[e.env] = True
-                    ends.append(e)
+def fights_many(policy: Policy, device: torch.device, jobs: list[FightJob], repeats: int) -> list[list[End]]:
+    """`repeats` greedy fights of each job against each of its encounters,
+    every env's first fight only, all in one env set: a step gathers the
+    fights still going into pinned buffers, reads them in one bf16 forward
+    pass and steps only them: an env whose fight has ended sits out (a
+    negative action)."""
+    n = sum(len(job.encounters) for job in jobs) * repeats
+    envs = Envs(n)
+    starts = envs.sim.use_fight_jobs([(json.dumps(job.start), job.max_hp, job.encounters, job.seed) for job in jobs], repeats)
+    envs.sim.observe(envs.floats, envs.ids, envs.mask)
+    job_of = np.repeat(np.arange(len(jobs)), np.diff([*starts, n]))
+    buffers = [torch.from_numpy(a) for a in (envs.floats, envs.ids, envs.mask)]
+    staged = [torch.from_numpy(pinned(b.shape, b.dtype)) for b in buffers]
+    done = np.zeros(n, bool)
+    ends: list[list[End]] = [[] for _ in jobs]
+    autocast = torch.autocast(device.type, dtype=torch.bfloat16, enabled=device.type == "cuda")
+    while not done.all():
+        rows = np.flatnonzero(~done)
+        k = len(rows)
+        picked = torch.from_numpy(rows)
+        for src, dst in zip(buffers, staged):
+            torch.index_select(src, 0, picked, out=dst[:k])
+        floats, ids, mask = (s[:k].to(device, non_blocking=True) for s in staged)
+        with autocast:
+            logits, _ = policy(floats, ids)
+        actions = np.full(n, -1)
+        actions[rows] = masked_logits(logits.float(), mask).argmax(1).cpu().numpy()
+        for e in envs.step(actions):
+            if not done[e.env]:
+                done[e.env] = True
+                ends[job_of[e.env]].append(e)
     return ends
+
+
+def fights(policy: Policy, device: torch.device, start: dict, max_hp: int, encounters: list[tuple[str, int, int]], repeats: int, seed: int) -> list[End]:
+    """`fights_many` for one run."""
+    return fights_many(policy, device, [FightJob(start, max_hp, encounters, seed)], repeats)[0]
 
 
 def verdict(change: Change | None, ends: list[End]) -> Verdict:
