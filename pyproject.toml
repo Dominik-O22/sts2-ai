@@ -33,9 +33,11 @@ cache-keys = [
     { file = "sim-py/src/**/*.rs" },
 ]
 
-# `uv run ruff check` and `uv run ruff format`. Short named lambdas are
-# kept on purpose (E731), and run dates are days, so naive datetimes are
-# fine (DTZ).
+# `uv run ruff check` and `uv run ruff format`. Speed and accuracy come
+# before any lint: where a rule would slow a hot path, keep the fast code
+# and silence the rule on that line with `# noqa: CODE (why)`. Short named
+# lambdas are kept on purpose (E731), and run dates are days, so naive
+# datetimes are fine (DTZ).
 [tool.ruff]
 line-length = 160
 src = ["py", "scripts"]
