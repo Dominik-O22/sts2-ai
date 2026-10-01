@@ -1,12 +1,13 @@
 """How much the turn search adds to a policy, on the held-out set.
 
-    uv run python -m sts2ai.searcheval runs/<name>/latest.pt --copies 64
+    uv run python -m sts2ai.searcheval runs/<name>/latest.pt --copies 64 [--setups FIGHTS.jsonl]
 
-Plays the elite and boss fights of `evaluate`'s held-out set twice from
-the same shuffles: once greedy, once with a turn search at every decision
-(the advisor's `--search`, many fights per batch). A large gap means the
-fights are winnable and the policy leaves wins on the table; no gap means
-the ceiling is the fights, not the play.
+Plays the elite and boss fights of `evaluate`'s held-out set (or of
+`--recordings`, or of a `--setups` file such as `runplay --fights-out`
+writes) twice from the same shuffles: once greedy, once with a turn
+search at every decision (the advisor's `--search`, many fights per
+batch). A large gap means the fights are winnable and the policy leaves
+wins on the table; no gap means the ceiling is the fights, not the play.
 """
 
 from __future__ import annotations
@@ -52,16 +53,21 @@ def play(
     depth: int = 1,
     recordings: Path | None = None,
     two_level: bool = False,
+    setups: Path | None = None,
 ) -> dict[str, list[bool]]:
     """One fight per held-out elite and boss setup (or per recording of
-    one). Returns wins by encounter."""
-    probe = Envs(1, seed=seed)
-    n = probe.load_recordings(recordings) if recordings else probe.use_holdout(seed, HOLDOUT_PER_ENCOUNTER, acts)
+    one, or per line of a setups file). Returns wins by encounter."""
+
+    def load(envs: Envs) -> int:
+        if setups:
+            return envs.use_setups(setups, 1, seed)
+        if recordings:
+            return envs.load_recordings(recordings)
+        return envs.use_holdout(seed, HOLDOUT_PER_ENCOUNTER, acts)
+
+    n = load(Envs(1, seed=seed))
     envs = Envs(n, seed=seed)
-    if recordings:
-        envs.load_recordings(recordings)
-    else:
-        envs.use_holdout(seed, HOLDOUT_PER_ENCOUNTER, acts)
+    load(envs)
     fights = [envs.sim.fight(i) for i in range(n)]
     active = {i for i, (_, kind) in enumerate(fights) if kind in kinds}
     results: dict[str, list[bool]] = defaultdict(list)
@@ -100,6 +106,7 @@ def main() -> None:
     ap.add_argument("--mean", action="store_true", help="rank first actions by mean copy score, not best copy")
     ap.add_argument("--depth", type=int, default=1, help="player turns each copy plays (1: the rest of this one)")
     ap.add_argument("--recordings", type=Path, default=None, help="real-run recordings instead of the held-out set")
+    ap.add_argument("--setups", type=Path, default=None, help="played runs' fights (`sts2ai.setups` lines, `runplay --fights-out`) instead of the held-out set")
     ap.add_argument("--repeats", type=int, default=1, help="fights per setup, different seeds")
     ap.add_argument("--two-level", action="store_true", help="rank openings by their best second action (search.openings)")
     args = ap.parse_args()
@@ -111,11 +118,11 @@ def main() -> None:
     search: dict[str, list[bool]] = defaultdict(list)
     t0 = time.time()
     for r in range(args.repeats):
-        for enc, won in play(policy, device, 0, kinds, args.acts, args.seed + r, args.mean, recordings=args.recordings).items():
+        for enc, won in play(policy, device, 0, kinds, args.acts, args.seed + r, args.mean, recordings=args.recordings, setups=args.setups).items():
             greedy[enc] += won
     t1 = time.time()
     for r in range(args.repeats):
-        for enc, won in play(policy, device, args.copies, kinds, args.acts, args.seed + r, args.mean, args.depth, args.recordings, args.two_level).items():
+        for enc, won in play(policy, device, args.copies, kinds, args.acts, args.seed + r, args.mean, args.depth, args.recordings, args.two_level, args.setups).items():
             search[enc] += won
     t2 = time.time()
     print(f"{'encounter':32s} greedy  search")
