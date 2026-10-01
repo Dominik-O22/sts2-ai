@@ -9,6 +9,9 @@ dependencies = [
     "tensorboard>=2.18",
 ]
 
+[dependency-groups]
+dev = ["ruff>=0.16"]
+
 [build-system]
 requires = ["maturin>=1.9,<2"]
 build-backend = "maturin"
@@ -29,3 +32,13 @@ cache-keys = [
     { file = "sim/src/**/*.rs" },
     { file = "sim-py/src/**/*.rs" },
 ]
+
+# `uv run ruff check` and `uv run ruff format`. Short named lambdas are
+# kept on purpose (E731).
+[tool.ruff]
+line-length = 160
+src = ["py", "scripts"]
+
+[tool.ruff.lint]
+extend-select = ["I"]
+ignore = ["E731"]
