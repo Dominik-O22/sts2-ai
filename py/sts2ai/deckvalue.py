@@ -1,6 +1,6 @@
 """Deck value: a network that predicts what the deck advisor's fights find.
 
-    uv run python -m sts2ai.deckvalue label runs/<run>/latest.pt --n 200 --out labels.jsonl
+    uv run python -m sts2ai.deckvalue label runs/<run>/latest.pt --n 200 --out labels.jsonl [--starts FIGHTS.jsonl ...] [--next-act]
     uv run python -m sts2ai.deckvalue train labels.jsonl --out deckvalue.pt
     uv run python -m sts2ai.deckvalue check runs/<run>/latest.pt deckvalue.pt [RECORDING ...]
 
@@ -8,10 +8,11 @@
 This learns that price: a run state (deck, relics, potions, HP, act) in, the
 mean fight reward against each elite and boss of its act out, so a choice
 costs one forward pass instead of seconds of fights. The fights stay the
-teacher: `label` plays them on generated run states, each with a variant
-one change away (a card added, upgraded or removed) so the labels carry the
-differences a choice makes, and `train` fits the network to them. `check`
-sets the network's picks beside the fights' on decks from played runs.
+teacher: `label` plays them on run states (generated, or drawn from run
+evals' fight logs with `--starts`), each with a variant one change away
+(a card added, upgraded or removed) so the labels carry the differences a
+choice makes, and `train` fits the network to them. `check` sets the
+network's picks beside the fights' on decks from played runs.
 """
 
 from __future__ import annotations
@@ -186,28 +187,44 @@ def variant(run: dict, rng: np.random.Generator) -> dict:
     return {**run, "deck": deck}
 
 
-def label(policy: Policy, device: torch.device, run: dict, repeats: int, seed: int) -> dict[str, float]:
+def label(policy: Policy, device: torch.device, run: dict, repeats: int, seed: int, next_act: bool = False) -> dict[str, float]:
     """Mean fight reward per elite (at the run's HP) and boss (at full HP)
-    of the run's act: the advisor's fights."""
-    encounters = horizon(run["act"], None, run["hp"], run["max_hp"], next_act=False)
+    of the run's act, and with `next_act` every elite and boss of the act
+    after at full HP: the advisor's fights."""
+    encounters = horizon(run["act"], None, run["hp"], run["max_hp"], next_act=next_act)
     by_enc: dict[str, list[float]] = {}
     for e in fights(policy, device, run, run["max_hp"], encounters, repeats, seed):
         by_enc.setdefault(slug(e.encounter), []).append(e.reward)
     return {k: float(np.mean(v)) for k, v in by_enc.items()}
 
 
+def logged_starts(paths: list[Path], n: int, rng: np.random.Generator) -> list[dict]:
+    """`n` run states drawn from fight logs (`runplay --fights-out`, setups
+    files): each line's start, with its HP and act."""
+    lines = [json.loads(line) for path in paths for line in path.read_text().splitlines() if line.strip()]
+    starts = []
+    for i in rng.choice(len(lines), size=min(n, len(lines)), replace=False):
+        d = lines[i]
+        starts.append({**d["start"], "hp": d["hp"], "max_hp": d["max_hp"], "act": ACT_OF[d["encounter"]]})
+    return starts
+
+
 def cmd_label(args) -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     policy = load_policy(args.checkpoint, device).eval()
     rng = np.random.default_rng(args.seed)
+    logged = logged_starts(args.starts, args.n, rng) if args.starts else None
     with open(args.out, "a") as out, torch.no_grad():
-        for i in range(args.n):
-            floor = int(rng.integers(1, 3 * BOSS_FLOOR + 1))
+        for i in range(len(logged) if logged else args.n):
             run_seed = args.seed * 1_000_003 + i
-            run = json.loads(_sim.generate_run(run_seed, floor))
-            run["act"] = ACT_OF[run["encounter"]]
+            if logged:
+                run = logged[i]
+            else:
+                floor = int(rng.integers(1, 3 * BOSS_FLOOR + 1))
+                run = json.loads(_sim.generate_run(run_seed, floor))
+                run["act"] = ACT_OF[run["encounter"]]
             for r in (run, variant(run, rng)):
-                values = label(policy, device, r, args.repeats, seed=run_seed)
+                values = label(policy, device, r, args.repeats, seed=run_seed, next_act=args.next_act)
                 out.write(json.dumps({"run": r, "values": values, "repeats": args.repeats, "pair": run_seed}) + "\n")
             out.flush()
             if (i + 1) % 10 == 0:
@@ -343,12 +360,14 @@ def cmd_check(args) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
-    lab = sub.add_parser("label", help="play fights on generated run states and write labels")
+    lab = sub.add_parser("label", help="play fights on run states (generated, or from fight logs) and write labels")
     lab.add_argument("checkpoint", type=Path)
     lab.add_argument("--n", type=int, default=200, help="run states, each with one variant")
     lab.add_argument("--repeats", type=int, default=64, help="fights per encounter per state")
     lab.add_argument("--seed", type=int, default=1)
     lab.add_argument("--out", type=Path, default=Path("deckvalue-labels.jsonl"))
+    lab.add_argument("--starts", type=Path, nargs="+", help="fight logs (`runplay --fights-out`) to draw the run states from instead of generating them")
+    lab.add_argument("--next-act", action="store_true", help="label the next act's elites and bosses too, at full HP")
     tr = sub.add_parser("train", help="fit the network to labels")
     tr.add_argument("labels", type=Path)
     tr.add_argument("--policy", type=Path, help="combat checkpoint to seed the card embedding from")
