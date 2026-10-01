@@ -34,11 +34,12 @@ cache-keys = [
 ]
 
 # `uv run ruff check` and `uv run ruff format`. Short named lambdas are
-# kept on purpose (E731).
+# kept on purpose (E731), and run dates are days, so naive datetimes are
+# fine (DTZ).
 [tool.ruff]
 line-length = 160
 src = ["py", "scripts"]
 
 [tool.ruff.lint]
 extend-select = ["I"]
-ignore = ["E731"]
+ignore = ["E731", "DTZ"]

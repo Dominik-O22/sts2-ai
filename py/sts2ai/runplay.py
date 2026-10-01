@@ -164,7 +164,7 @@ class EventTable:
     none known keeps the policy's pick."""
 
     def __init__(self, rows: Rows, layout: RunLayout, min_offered: int = 5):
-        self.L = L = layout
+        self.L = layout
         self.event = NAMES["decision"].index("Event")
         offered: Counter[tuple[int, int]] = Counter()
         picked: Counter[tuple[int, int]] = Counter()

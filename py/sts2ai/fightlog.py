@@ -24,7 +24,7 @@ POWER_NAMES = {0: "Str", 1: "Dex", 2: "Vuln", 3: "Weak", 4: "Frail", 33: "Slippe
 
 
 def powers(vec: np.ndarray) -> str:
-    return " ".join(f"{POWER_NAMES.get(i, f'p{i}')}={int(round(v * 10))}" for i, v in enumerate(vec) if v != 0)
+    return " ".join(f"{POWER_NAMES.get(i, f'p{i}')}={round(v * 10)}" for i, v in enumerate(vec) if v != 0)
 
 
 def describe_state(
@@ -38,7 +38,7 @@ def describe_state(
         name = cards[i]
         if ench := ids[L.i_enchants + slot]:
             feats = f[L.f_hand + slot * L.hand_feats :][: L.hand_feats]
-            name += f"+{enchants[ench - 1]}" + ("(spent)" if feats[8] else f"{int(round(feats[7] * 3))}")
+            name += f"+{enchants[ench - 1]}" + ("(spent)" if feats[8] else f"{round(feats[7] * 3)}")
         hand.append(name)
     enemies = []
     for s in range(L.max_enemies):

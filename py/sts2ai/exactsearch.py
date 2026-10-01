@@ -37,9 +37,9 @@ import numpy as np
 import torch
 
 from sts2ai import _sim, search
-from sts2ai.search import PLAN_MARGIN
 from sts2ai.env import End, Envs, Layout
 from sts2ai.model import Policy, load_policy, masked_logits
+from sts2ai.search import PLAN_MARGIN
 from sts2ai.searcheval import pick
 from sts2ai.setups import EASY_HOLDOUT, HOLDOUT
 
@@ -390,7 +390,7 @@ def search_report(run: Run) -> str:
     merge = np.sum([x["arrivals"] for x in s]) / max(np.sum(nodes + np.array([x["end_leaves"] for x in s])), 1)
     lines = np.array([x["lines"] for x in s])
     rules = {k: int(np.sum([x[k] for x in s])) for k in ("det", "drawn", "sampled", "end_turn")}
-    q = lambda a: f"median {np.median(a):.0f} p90 {np.percentile(a, 90):.0f} max {a.max():.0f}"  # noqa: E731
+    q = lambda a: f"median {np.median(a):.0f} p90 {np.percentile(a, 90):.0f} max {a.max():.0f}"
     return "\n".join(
         [
             f"  searches {len(s)}, reused {run.reused} (decisions a search already held)",
@@ -426,9 +426,13 @@ def main() -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     policy = load_policy(args.checkpoint, device)
     policy.eval()
-    config = dict(
-        max_states=args.max_states, quiesce_states=args.quiesce_states, end_samples=args.end_samples, samples=args.samples, draw_cap=args.draw_cap
-    )
+    config = {
+        "max_states": args.max_states,
+        "quiesce_states": args.quiesce_states,
+        "end_samples": args.end_samples,
+        "samples": args.samples,
+        "draw_cap": args.draw_cap,
+    }
     modes = args.modes.split(",")
     for name, path, n in (("easy", EASY_HOLDOUT, args.easy), ("hard", HOLDOUT, args.hard)):
         if n <= 0:

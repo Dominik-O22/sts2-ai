@@ -23,6 +23,7 @@ fight went) and prints win rate and HP kept by forecast bucket.
 from __future__ import annotations
 
 import argparse
+import itertools
 import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -170,7 +171,7 @@ def table(win: np.ndarray, won: np.ndarray, kept: np.ndarray, kept_pred: np.ndar
     HP kept after a win forecast and seen."""
     edges = [0.0, 0.3, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 1.0001]
     print(f"  {'forecast':>11s} {'fights':>7s} {'mean':>6s} {'won':>6s}   {'kept fc':>7s} {'kept':>6s}")
-    for lo, hi in zip(edges, edges[1:]):
+    for lo, hi in itertools.pairwise(edges):
         b = (win >= lo) & (win < hi)
         if not b.any():
             continue

@@ -116,7 +116,7 @@ MAX_HP_RELICS = [("MANGO", 14), ("PEAR", 10), ("STRAWBERRY", 7)]
 CARD_BASE = {"STRIKE_IRONCLAD": 3, "DEFEND_IRONCLAD": 3, "BASH": 1, "SHRUG_IT_OFF": 2}
 
 
-def loadout_for(job: "Job") -> Loadout:
+def loadout_for(job: Job) -> Loadout:
     if job.cards:
         return Loadout({**CARD_BASE, **{c: 2 for c in job.cards}}, STANDARD.relics, 150)
     return POWERED if job.tags & {"hive", "glory"} else STANDARD
@@ -279,9 +279,9 @@ class Job:
 
 
 def relic_job(name: str, relics: list[str], advice: str, encounter: str = "SEWER_CLAM_NORMAL", *,
-              setup: list[str] = [], teardown: list[str] = [], human: bool = False) -> Job:
+              setup: list[str] | None = None, teardown: list[str] | None = None, human: bool = False) -> Job:
     """A relic group: on for one fight, off again after."""
-    return Job(name, {"relics"}, [Send(setup), Fight(encounter)], relics, teardown, advice, human)
+    return Job(name, {"relics"}, [Send(setup or []), Fight(encounter)], relics, teardown or [], advice, human)
 
 
 # Sewer Clam by default: one monster, Plating to break, and a fight the
@@ -407,7 +407,7 @@ def send(commands: list[str], quiet: bool = False) -> list[str]:
     """Run dev console lines through the mod; returns what it said."""
     if not commands:
         return []
-    out = subprocess.run([str(ROOT / "scripts/game.sh"), *commands], capture_output=True, text=True)
+    out = subprocess.run([str(ROOT / "scripts/game.sh"), *commands], capture_output=True, text=True, check=False)
     lines = out.stdout.strip().splitlines()
     if not quiet:
         for line in lines:
@@ -427,6 +427,7 @@ def replay(path: Path) -> tuple[bool, str]:
         cwd=ROOT / "sim",
         capture_output=True,
         text=True,
+        check=False,
     )
     line = next((l for l in out.stdout.splitlines() if l.startswith(("ok", "DIFF", "ERR"))), out.stderr.strip())
     return line.startswith("ok"), line
@@ -576,7 +577,7 @@ class Pilot:
 
     def start(self) -> None:
         if self.proc is None:
-            log = open(GAME_DIR / "pilot.log", "a")
+            log = open(GAME_DIR / "pilot.log", "a")  # noqa: SIM115 (the pilot writes to it after start returns)
             self.proc = subprocess.Popen(
                 [sys.executable, "-m", "sts2ai.play", str(self.checkpoint), "--record", "--search", str(self.search)],
                 cwd=ROOT, stdout=log, stderr=subprocess.STDOUT,

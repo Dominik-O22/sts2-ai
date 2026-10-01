@@ -4,4 +4,4 @@ its vectorized environment live in the Rust extension `sts2ai._sim`."""
 from sts2ai import _sim
 from sts2ai.env import Envs, Layout
 
-__all__ = ["_sim", "Envs", "Layout"]
+__all__ = ["Envs", "Layout", "_sim"]

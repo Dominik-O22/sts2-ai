@@ -585,5 +585,5 @@ def load_policy(path: Path, device: torch.device, old_vocab: Path | None = None)
     built for the current sim, on `device`."""
     ck = torch.load(path, map_location=device)
     policy = build_policy(Layout.load(), checkpoint_arch(ck)).to(device)
-    load_state(policy, ck["policy"] if "policy" in ck else ck, checkpoint_vocab(ck, old_vocab), checkpoint_layout(ck))
+    load_state(policy, ck.get("policy", ck), checkpoint_vocab(ck, old_vocab), checkpoint_layout(ck))
     return policy

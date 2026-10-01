@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import gzip
 import html
+import itertools
 import json
 import re
 import time
@@ -72,7 +73,7 @@ def leaderboard(page: str) -> list[tuple[str, int, int]]:
     """(player, runs, wins) of the home page's A10+ leaderboard."""
     start = page.index('id="lb-a10"')
     table = page[start : page.index("</table>", start)]
-    rows = re.findall(r'href="/player/([^"]+)".*?<td data-sort-value="(\d+)">\d+</td><td data-sort-value="(\d+)">', table, flags=re.S)
+    rows = re.findall(r'href="/player/([^"]+)".*?<td data-sort-value="(\d+)">\d+</td><td data-sort-value="(\d+)">', table, flags=re.DOTALL)
     return [(p, int(runs), int(wins)) for p, runs, wins in rows]
 
 
@@ -109,8 +110,8 @@ def parse_run(page: str) -> dict:
     table = table[: table.index("</table>")]
     names: dict[str, str] = {}  # card name as shown -> id
     floors = []
-    for row in re.findall(r"<tr>(.*?)</tr>", table, flags=re.S)[1:]:
-        cells = re.findall(r"<td[^>]*>(.*?)</td>", row, flags=re.S)
+    for row in re.findall(r"<tr>(.*?)</tr>", table, flags=re.DOTALL)[1:]:
+        cells = re.findall(r"<td[^>]*>(.*?)</td>", row, flags=re.DOTALL)
         floor, act, kind, encounter, turns, damage, hp, gold = (text(c) for c in cells[:8])
         rewards = cells[8]
         cards = []
@@ -135,7 +136,7 @@ def parse_run(page: str) -> dict:
             }
         )
     relic_part = page[page.index("<h2>Relics (") :]
-    relics = [[r, int(f)] for r, f in re.findall(r'data-relic-id="([^"]+)">.*?>F(\d+)</span>', relic_part[: relic_part.index("Final Deck")], flags=re.S)]
+    relics = [[r, int(f)] for r, f in re.findall(r'data-relic-id="([^"]+)">.*?>F(\d+)</span>', relic_part[: relic_part.index("Final Deck")], flags=re.DOTALL)]
     deck_part = page[page.index("Final Deck") :]
     deck = []
     for cid, up, name in re.findall(r'data-card-id="([^"]+)" data-upgraded="(\d)"[^>]*>\s*([^<]*)', deck_part):
@@ -194,7 +195,7 @@ def fights(run: dict, kinds: tuple[str, ...]) -> list[dict]:
     (`_ELITE`, `_BOSS`, `_WEAK`, `_NORMAL`), in `sts2ai.setups`' form."""
     out = []
     floors = run["floors"]
-    for before, f in zip(floors, floors[1:]):
+    for before, f in itertools.pairwise(floors):
         encounter = encounter_id(f["encounter"]) if f["encounter"].endswith(")") else ""
         if not encounter.endswith(kinds):
             continue

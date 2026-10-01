@@ -43,7 +43,7 @@ def scores(path: Path, device: torch.device, repeats: int) -> dict[str, float]:
     held, _, held_kinds = evaluate(policy, device, repeats)
     real, _, real_kinds = evaluate(policy, device, repeats, "setups")
     cheap = easy(policy, device, repeats)
-    mean = lambda d, kind: sum(d[f"{a}{kind}"] for a in ACTS) / len(ACTS)  # noqa: E731
+    mean = lambda d, kind: sum(d[f"{a}{kind}"] for a in ACTS) / len(ACTS)
     return {
         "holdout": held,
         "holdout_bosses": mean(held_kinds, "boss"),
