@@ -140,7 +140,9 @@ class FightJob(NamedTuple):
 
 
 @torch.no_grad()
-def fights_stream(policy: Policy, device: torch.device, jobs: Iterable[FightJob], repeats: int, pool: int = 16384, chunk: int = 16) -> Iterator[tuple[int, list[End]]]:
+def fights_stream(
+    policy: Policy, device: torch.device, jobs: Iterable[FightJob], repeats: int, pool: int = 16384, chunk: int = 16
+) -> Iterator[tuple[int, list[End]]]:
     """`repeats` greedy fights of each job against each of its encounters,
     yielded as (job index, its fights) once its last fight ends. `pool` envs
     play them continuously: the step an env's fight ends, it starts the
