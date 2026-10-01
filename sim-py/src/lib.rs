@@ -300,9 +300,11 @@ impl VecEnv {
     /// what the value head reads for them: the distinct settled states'
     /// forecast fights as combat rows `floats [n * N_FLOATS]` and `ids [n *
     /// N_IDS]`, and how many leaves and distinct states the trees hold.
-    fn afterstates<'py>(&mut self, py: Python<'py>, envs: Vec<usize>, samples: usize, depth: usize, nodes: usize) -> AfterstateRows<'py> {
+    /// With `rows` off the rows come back empty (`afterstate_runs` scoring).
+    #[pyo3(signature = (envs, samples, depth, nodes, rows=true))]
+    fn afterstates<'py>(&mut self, py: Python<'py>, envs: Vec<usize>, samples: usize, depth: usize, nodes: usize, rows: bool) -> AfterstateRows<'py> {
         let caps = sim::env::Caps { depth, nodes };
-        let rows = py.detach(|| self.inner.afterstates(&envs, samples, caps));
+        let rows = py.detach(|| self.inner.afterstates(&envs, samples, caps, rows));
         (rows.floats.into_pyarray(py), rows.ids.into_pyarray(py), rows.leaves, rows.states)
     }
 
@@ -319,6 +321,19 @@ impl VecEnv {
     ) -> PyResult<(Bound<'py, PyArray1<f32>>, std::collections::BTreeMap<String, usize>)> {
         let v = values.as_slice()?;
         let scored = py.detach(|| self.inner.afterstate_scores(v, [win.0, win.1, win.2]));
+        Ok((scored.score.into_pyarray(py), scored.capped))
+    }
+
+    /// The afterstates' distinct settled states as run records
+    /// (`sim::env::VecEnv::afterstate_runs`), for a scorer that reads runs.
+    fn afterstate_runs(&self) -> Vec<String> {
+        self.inner.afterstate_runs()
+    }
+
+    /// `afterstate_scores` from a score per distinct settled state
+    /// (`sim::env::VecEnv::afterstate_scores_given`).
+    fn afterstate_scores_given<'py>(&mut self, py: Python<'py>, scores: Vec<f64>) -> PyResult<(Bound<'py, PyArray1<f32>>, std::collections::BTreeMap<String, usize>)> {
+        let scored = py.detach(|| self.inner.afterstate_scores_given(scores));
         Ok((scored.score.into_pyarray(py), scored.capped))
     }
 

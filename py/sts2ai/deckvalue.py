@@ -28,7 +28,7 @@ import torch
 from torch import Tensor, nn
 
 from sts2ai import _sim
-from sts2ai.cards import BOSS_FLOOR, FightJob, fights_many, fights_stream, horizon
+from sts2ai.cards import BOSS_FLOOR, NEXT_ACT, FightJob, fights_many, fights_stream, horizon
 from sts2ai.env import ASCENSION, DEFAULT_RECORDINGS, End, Envs, RunLayout
 from sts2ai.model import Policy, load_policy
 
@@ -54,27 +54,26 @@ def slug(debug_name: str) -> str:
 def encode(runs: list[dict]) -> dict[str, Tensor]:
     """Run states to padded id tensors and a few numbers."""
     n = len(runs)
-    cards = torch.zeros((n, MAX_DECK), dtype=torch.long)
-    upgraded = torch.zeros((n, MAX_DECK), dtype=torch.long)
-    enchants = torch.zeros((n, MAX_DECK), dtype=torch.long)
-    relics = torch.zeros((n, MAX_RELICS), dtype=torch.long)
-    potions = torch.zeros((n, MAX_POTIONS), dtype=torch.long)
-    numbers = torch.zeros((n, 8))
+    cards = np.zeros((n, MAX_DECK), dtype=np.int64)
+    upgraded = np.zeros((n, MAX_DECK), dtype=np.int64)
+    enchants = np.zeros((n, MAX_DECK), dtype=np.int64)
+    relics = np.zeros((n, MAX_RELICS), dtype=np.int64)
+    potions = np.zeros((n, MAX_POTIONS), dtype=np.int64)
+    numbers = np.zeros((n, 8), dtype=np.float32)
+    card, enchant, relic, potion = INDEX["card"], INDEX["enchant"], INDEX["relic"], INDEX["potion"]
     for i, r in enumerate(runs):
-        for j, c in enumerate(r["deck"][:MAX_DECK]):
-            cards[i, j] = INDEX["card"].get(c["id"], 0)
-            upgraded[i, j] = int(bool(c.get("up")))
-            if c.get("ench"):
-                enchants[i, j] = INDEX["enchant"].get(c["ench"][0], 0)
-        for j, name in enumerate(r["relics"][:MAX_RELICS]):
-            relics[i, j] = INDEX["relic"].get(name, 0)
-        for j, name in enumerate(p for p in r["potions"] if p):
-            if j < MAX_POTIONS:
-                potions[i, j] = INDEX["potion"].get(name, 0)
-        act = ACTS.index(r["act"])
-        numbers[i, :4] = torch.tensor([r["hp"] / max(1, r["max_hp"]), r["max_hp"] / 100, len(r["deck"]) / 40, r.get("max_energy", 3) / 3])
-        numbers[i, 4 + min(act, 3)] = 1.0
-    return {"cards": cards, "upgraded": upgraded, "enchants": enchants, "relics": relics, "potions": potions, "numbers": numbers}
+        deck = r["deck"][:MAX_DECK]
+        cards[i, : len(deck)] = [card.get(c["id"], 0) for c in deck]
+        upgraded[i, : len(deck)] = [bool(c.get("up")) for c in deck]
+        enchants[i, : len(deck)] = [enchant.get(c["ench"][0], 0) if c.get("ench") else 0 for c in deck]
+        held = r["relics"][:MAX_RELICS]
+        relics[i, : len(held)] = [relic.get(name, 0) for name in held]
+        drinks = [p for p in r["potions"] if p][:MAX_POTIONS]
+        potions[i, : len(drinks)] = [potion.get(name, 0) for name in drinks]
+        numbers[i, :4] = (r["hp"] / max(1, r["max_hp"]), r["max_hp"] / 100, len(r["deck"]) / 40, r.get("max_energy", 3) / 3)
+        numbers[i, 4 + min(ACTS.index(r["act"]), 3)] = 1.0
+    arrays = {"cards": cards, "upgraded": upgraded, "enchants": enchants, "relics": relics, "potions": potions, "numbers": numbers}
+    return {k: torch.from_numpy(v) for k, v in arrays.items()}
 
 
 class DeckValue(nn.Module):
@@ -186,6 +185,29 @@ def variant(run: dict, rng: np.random.Generator) -> dict:
     else:
         deck.pop(int(rng.integers(len(deck))))
     return {**run, "deck": deck}
+
+
+def state_scores(model: DeckValue, runs: list[dict]) -> np.ndarray:
+    """A run state's score for afterstates (`afterstate.Scorer`): the
+    network's mean fight reward over its act's and the next act's elites
+    and bosses, mapped from reward (-1 a loss, up to 1.5 a clean win) to
+    0..1, where afterstates put a run that died (0) and one won (1). 0 for
+    a state with no run record."""
+    scores = np.zeros(len(runs))
+    have = [i for i, r in enumerate(runs) if r]
+    if have:
+        device = next(model.parameters()).device
+        with torch.no_grad():
+            x = {k: v.to(device, non_blocking=True) for k, v in encode([runs[i] for i in have]).items()}
+            pred = ((model(x).float().cpu().numpy() + 1.0) / 2.5).clip(0.0, 1.0)
+        for k, i in enumerate(have):
+            scores[i] = pred[k, HORIZON[runs[i]["act"]]].mean()
+    return scores
+
+
+# Per act, the outputs a state's score averages: its elites and bosses and
+# the next act's.
+HORIZON = {act: [j for j, e in enumerate(ENCOUNTERS) if ACT_OF[e] in (act, NEXT_ACT.get(act))] for act in ACTS}
 
 
 def label_many(policy: Policy, device: torch.device, runs: list[dict], repeats: int, seeds: list[int], next_act: bool = False) -> list[dict[str, float]]:

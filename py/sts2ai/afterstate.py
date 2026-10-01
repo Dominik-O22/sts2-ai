@@ -26,6 +26,7 @@ from collections import Counter
 import numpy as np
 
 from sts2ai import _sim
+from sts2ai.deckvalue import DeckValue, state_scores
 from sts2ai.env import Envs
 from sts2ai.forecast import Forecaster
 
@@ -38,9 +39,21 @@ class Scorer:
     With `kinds` only decisions of those kinds (`DECISIONS` names) are
     made by afterstate; the others keep the policy's pick."""
 
-    def __init__(self, envs: Envs, forecaster: Forecaster, samples: int, depth: int = 3, nodes: int = 256, kinds: frozenset[str] = frozenset()):
+    def __init__(
+        self,
+        envs: Envs,
+        forecaster: Forecaster,
+        samples: int,
+        depth: int = 3,
+        nodes: int = 256,
+        kinds: frozenset[str] = frozenset(),
+        deckvalue: DeckValue | None = None,
+    ):
         assert forecaster.calibration is not None, "afterstates need a calibration"
         self.envs, self.forecaster, self.samples, self.depth, self.nodes = envs, forecaster, samples, depth, nodes
+        # With a deck value network, settled states are scored by it
+        # (`deckvalue.state_scores`) instead of the forecast's openings.
+        self.deckvalue = deckvalue
         self.kinds = kinds
         self.L = forecaster.L
         self.decisions: Counter[str] = Counter()
@@ -54,8 +67,17 @@ class Scorer:
         """Every option of the decisions `waiting` wait at: `score[k, j]` of
         row `k`'s option token `j`, NaN where there is none."""
         t = time.perf_counter()
-        floats, ids, leaves, states = self.envs.afterstates(waiting, self.samples, self.depth, self.nodes)
+        floats, ids, leaves, states = self.envs.afterstates(waiting, self.samples, self.depth, self.nodes, rows=self.deckvalue is None)
         self.sim_seconds += time.perf_counter() - t
+        if self.deckvalue is not None:
+            t = time.perf_counter()
+            scores = state_scores(self.deckvalue, self.envs.afterstate_runs())
+            self.head_seconds += time.perf_counter() - t
+            score, capped = self.envs.afterstate_scores_given(scores)
+            self.capped.update(capped)
+            self.leaves += leaves
+            self.states += states
+            return score
         t = time.perf_counter()
         values = self.forecaster.values(floats, ids)
         self.head_seconds += time.perf_counter() - t

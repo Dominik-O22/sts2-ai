@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import NamedTuple
@@ -270,12 +271,13 @@ class Envs:
 
         return Fights.of(self.sim.forecast(envs), self.layout.n_floats, self.layout.n_ids)
 
-    def afterstates(self, envs: list[int], samples: int, depth: int, nodes: int) -> tuple[np.ndarray, np.ndarray, int, int]:
+    def afterstates(self, envs: list[int], samples: int, depth: int, nodes: int, rows: bool = True) -> tuple[np.ndarray, np.ndarray, int, int]:
         """Builds the afterstates of every option of the decisions `envs`
         wait at (`sts2ai.afterstate`) and returns the combat rows the value
         head reads for them (floats, ids) and how many leaves and distinct
-        settled states they hold. `afterstate_scores` scores them."""
-        floats, ids, leaves, states = self.sim.afterstates(envs, samples, depth, nodes)
+        settled states they hold. `afterstate_scores` scores them. With
+        `rows` off the rows are empty, for `afterstate_scores_given`."""
+        floats, ids, leaves, states = self.sim.afterstates(envs, samples, depth, nodes, rows)
         return floats.reshape(-1, self.layout.n_floats), ids.reshape(-1, self.layout.n_ids), leaves, states
 
     def afterstate_scores(self, values: np.ndarray, win: tuple[float, float, float]) -> tuple[np.ndarray, dict[str, int]]:
@@ -284,6 +286,18 @@ class Envs:
         row `k`'s option token `j` (NaN where there is none), and the
         decisions where a cap kept a sub-decision shut."""
         score, capped = self.sim.afterstate_scores(np.ascontiguousarray(values, dtype=np.float32), win)
+        return score.reshape(-1, self.run_layout.max_options), capped
+
+    def afterstate_runs(self) -> list[dict]:
+        """The distinct settled states of the afterstates built last, as run
+        records (deck, relics, potions, HP, act), in the order
+        `afterstate_scores_given` takes their scores; {} for one without
+        forecast fights."""
+        return [json.loads(r) if r else {} for r in self.sim.afterstate_runs()]
+
+    def afterstate_scores_given(self, scores: np.ndarray) -> tuple[np.ndarray, dict[str, int]]:
+        """`afterstate_scores` from a score per distinct settled state."""
+        score, capped = self.sim.afterstate_scores_given(np.asarray(scores, dtype=np.float64).tolist())
         return score.reshape(-1, self.run_layout.max_options), capped
 
     def step_run(self, envs: list[int], options: np.ndarray) -> list[tuple[int, RunFight]]:
