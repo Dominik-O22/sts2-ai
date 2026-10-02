@@ -83,11 +83,14 @@ DEV = RECORDINGS / "dev"
 @dataclass
 class Loadout:
     """What the run should carry into a job's fights: the exact deck, the
-    setup relics, and at least this much max HP."""
+    setup relics, and at least this much max HP. With `exact`, relics the run
+    carries beyond these come off too, as when a played run's fight is set up
+    to compare the game with the sim on that run's own loadout."""
 
     deck: dict[str, int]
     relics: dict[str, int]
     max_hp: int
+    exact: bool = False
 
 
 # Block, a trickle of damage, and nothing with a fiddly port.
@@ -130,6 +133,8 @@ CARD_BASE = {"STRIKE_IRONCLAD": 3, "DEFEND_IRONCLAD": 3, "BASH": 1, "SHRUG_IT_OF
 
 
 def loadout_for(job: Job) -> Loadout:
+    if job.loadout is not None:
+        return job.loadout
     if job.cards:
         return Loadout({**CARD_BASE, **{c: 2 for c in job.cards}}, STANDARD.relics, 150)
     return POWERED if job.tags & {"hive", "glory"} else STANDARD
@@ -149,7 +154,10 @@ class Run:
             diff = target.deck.get(card, 0) - self.deck[card]
             commands += [f"card {card} Deck"] * diff + [f"remove_card {card} Deck"] * -diff
             self.deck[card] += diff
-        for relic, want in target.relics.items():
+        wanted = dict(target.relics)
+        if target.exact:
+            wanted |= {relic: 0 for relic in self.relics if relic not in target.relics}
+        for relic, want in wanted.items():
             diff = want - self.relics[relic]
             commands += [f"relic add {relic}"] * diff + [f"relic remove {relic}"] * -diff
             self.relics[relic] += diff
@@ -283,6 +291,8 @@ class Job:
     # Cards under test (`cards` jobs): the deck carries two of each, and the
     # job is done once each has been played in a clean recording.
     cards: list[str] = field(default_factory=list)
+    # Overrides the loadout `loadout_for` would pick (queued jobs).
+    loadout: Loadout | None = None
 
     def fights(self) -> list[str]:
         return [s.encounter for s in self.steps if isinstance(s, Fight)]
@@ -714,7 +724,9 @@ def log_result(job: Job, enc: str, ok: bool, line: str, path: Path | None) -> No
 def queued_jobs(jobs: list[Job]) -> list[Job]:
     """Jobs appended to `sts2ai/queue.jsonl` since last time. A line is
     `{"run": "terms"}` for known jobs, or `{"job": {...}}` for a one-off:
-    name, relics, fights, setup, teardown, advice, human."""
+    name, relics, fights, setup, teardown, advice, human, and optionally
+    `loadout` ({"deck": {card: n}, "relics": {relic: n}, "max_hp": n,
+    "exact": true}) to play on a given deck and relic set."""
     queue, pos = GAME_DIR / "queue.jsonl", GAME_DIR / "queue.pos"
     if not queue.exists():
         return []
@@ -730,7 +742,11 @@ def queued_jobs(jobs: list[Job]) -> list[Job]:
             out += [j for j in jobs if j.matches(entry["run"].lower().split())]
         elif (spec := entry.get("job")) is not None:
             steps: list[Step] = [Send(spec.get("setup", []))] + [Fight(e) for e in spec["fights"]]
-            out.append(Job(spec["name"], {"queued"}, steps, spec.get("relics", []), spec.get("teardown", []), spec.get("advice"), spec.get("human", False)))
+            lo = spec.get("loadout")
+            loadout = Loadout(lo["deck"], lo.get("relics", {}), lo.get("max_hp", 80), lo.get("exact", False)) if lo else None
+            job = Job(spec["name"], {"queued"}, steps, spec.get("relics", []), spec.get("teardown", []), spec.get("advice"), spec.get("human", False))
+            job.loadout = loadout
+            out.append(job)
     return out
 
 

@@ -45,6 +45,17 @@ def strip(name: str) -> str:
     return name.split(".", 1)[1]
 
 
+# Runs left out of every fight and run file, with why. A run here played
+# out in a way the game itself does not reproduce.
+QUARANTINED_RUNS = {
+    # Won both act 3 bosses losing -1 and 5 HP with a 15-card deck. A
+    # recording of that deck and its relics against Test Subject replays
+    # clean in the sim (2026-10-03), and a solver that knows the dice finds
+    # no win on any seed: most likely not a fair run.
+    "76561198208432591-1786652850.run": "act 3 bosses no setup of the run can win",
+}
+
+
 def walkable(run: dict) -> bool:
     player = run["players"]
     return len(player) == 1 and player[0]["characterId"] == "CHARACTER.IRONCLAD" and run["buildId"] == BUILD and not run["modifiers"]
@@ -145,7 +156,7 @@ def split_runs(runs_dir: Path = TRACKER, holdout: bool = False, share: float = 0
     """The winners' history files (`PLAYER-TIME.run`) of the players held
     out, or of the others, split as the fights and `sts2ai.imitation`
     split them."""
-    return [p for p in sorted(runs_dir.glob("*.run")) if holdout_player(p.name.rsplit("-", 1)[0], share) == holdout]
+    return [p for p in sorted(runs_dir.glob("*.run")) if p.name not in QUARANTINED_RUNS and holdout_player(p.name.rsplit("-", 1)[0], share) == holdout]
 
 
 def main() -> None:
@@ -163,7 +174,7 @@ def main() -> None:
     runs = 0
     for path in sorted(args.pages.glob("*.json")):
         page = json.loads(path.read_text())
-        if not walkable(page["runDetail"]):
+        if not walkable(page["runDetail"]) or path.stem in QUARANTINED_RUNS:
             continue
         runs += 1
         split = "holdout" if holdout_player(path.name.rsplit("-", 1)[0], args.holdout) else "train"
