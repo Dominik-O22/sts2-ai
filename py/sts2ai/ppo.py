@@ -94,6 +94,11 @@ class Config:
     # loss waits until `search_warmup` are in, so it does not fit a handful.
     search_buffer: int = 16384
     search_warmup: int = 4096
+    # Expert iteration with a stronger teacher than that search: an
+    # `sts2ai.expert` file of the hybrid search's decisions on hard fights,
+    # each a one-hot target in the same cross-entropy, at `expert_coef`.
+    expert: Path | None = None
+    expert_coef: float = 0.5
     # Wait for each iteration's search instead of letting a slow one run
     # on through the next iteration (which then starts none): one search
     # per iteration, at the search's speed.
@@ -271,6 +276,17 @@ class SearchTargets:
         idx = torch.randint(max(len(self), 1), (n,), device=self.floats.device)
         return self.floats[idx], self.ids[idx], self.mask[idx], self.target[idx]
 
+    @classmethod
+    def from_expert(cls, path: Path, layout, device: torch.device) -> SearchTargets:
+        """An `sts2ai.expert` file, its actions as one-hot targets."""
+        d = np.load(path)
+        n = len(d["action"])
+        target = np.zeros((n, layout.n_actions), np.float32)
+        target[np.arange(n), d["action"]] = 1.0
+        out = cls(n, layout, device)
+        out.add(d["floats"], d["ids"].astype(np.int64), d["mask"], target)
+        return out
+
 
 @torch.no_grad()
 @torch.no_grad()
@@ -371,6 +387,15 @@ def train(cfg: Config) -> Policy:
     autocast = torch.autocast(device.type, dtype=torch.bfloat16, enabled=cfg.bf16 and device.type == "cuda")
     roll = Rollout(cfg, envs, device)
     searched = SearchTargets(cfg.search_buffer, envs.layout, device) if cfg.search_states else None
+    expert = SearchTargets.from_expert(cfg.expert, envs.layout, device) if cfg.expert else None
+
+    def target_ce(targets: SearchTargets, n: int) -> Tensor:
+        """Cross-entropy toward `n` rows of `targets`' distributions."""
+        t_floats, t_ids, t_mask, t_target = targets.sample(n)
+        with autocast:
+            t_logits, _ = net(t_floats, t_ids)
+        return -(t_target * torch.log_softmax(masked_logits(t_logits.float(), t_mask), dim=1)).sum(dim=1).mean()
+
     # The search runs in a thread on its own copy of the policy, synced
     # each iteration, while the update trains the original: both mostly
     # wait on the GPU or on Rust, which release the GIL. Its targets land
@@ -491,7 +516,8 @@ def train(cfg: Config) -> Policy:
         # Summed on the GPU and read once after the update: a read per
         # minibatch (or `Categorical`'s argument check) waits for the GPU,
         # and the update stalls whenever the search holds the GPU or CPU.
-        losses = {k: torch.zeros((), device=device) for k in ("policy", "value", "entropy", "clipfrac", "approx_kl", "search", "incoming")}
+        losses = {k: torch.zeros((), device=device) for k in ("policy", "value", "entropy", "clipfrac", "approx_kl", "search", "expert", "incoming")}
+
         n_updates = 0
         for _ in range(cfg.epochs):
             perm = torch.randperm(B, device=device)
@@ -522,15 +548,15 @@ def train(cfg: Config) -> Policy:
                     # Runs before the warmup too, weighing nothing, so its
                     # forward and backward compile in the first iteration
                     # with the rest.
-                    s_floats, s_ids, s_mask, s_target = searched.sample(mb // 8)
-                    with autocast:
-                        s_logits, _ = net(s_floats, s_ids)
-                    logp_all = torch.log_softmax(masked_logits(s_logits.float(), s_mask), dim=1)
-                    ce = -(s_target * logp_all).sum(dim=1).mean()
+                    ce = target_ce(searched, mb // 8)
                     warm = len(searched) >= cfg.search_warmup
                     loss = loss + (cfg.search_coef if warm else 0.0) * ce
                     if warm:
                         losses["search"] += ce.detach()
+                if expert is not None:
+                    ce = target_ce(expert, mb // 8)
+                    loss = loss + cfg.expert_coef * ce
+                    losses["expert"] += ce.detach()
                 opt.zero_grad(set_to_none=True)
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(policy.parameters(), cfg.max_grad_norm)
@@ -573,7 +599,9 @@ def train(cfg: Config) -> Policy:
             print(
                 f"it {it:5d} step {global_step:>10d} floor<={max_floor:2d} win {win:6.1%} "
                 f"reward {summary.get('reward', float('nan')):6.3f} ent {losses['entropy'] / n_updates:5.3f} "
-                f"kl {losses['approx_kl'] / n_updates:6.4f} {sps:8.0f} sps "
+                f"kl {losses['approx_kl'] / n_updates:6.4f} "
+                + (f"expert {losses['expert'] / n_updates:5.3f} " if expert is not None else "")
+                + f"{sps:8.0f} sps "
                 f"(rollout {t_rollout:.2f} s, sim {t_sim:.2f} s, update {t_update:.2f} s)"
             )
         out_of_time = cfg.minutes is not None and time.time() - t0 > cfg.minutes * 60
