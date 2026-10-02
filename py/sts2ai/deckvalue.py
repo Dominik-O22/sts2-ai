@@ -378,7 +378,7 @@ def opening_values(policy: Policy, device: torch.device, jobs: list[FightJob], r
     n = sum(len(job.encounters) for job in jobs) * rolls
     envs = Envs(n)
     starts = envs.sim.queue_fight_jobs([(json.dumps(job.start), job.max_hp, job.encounters, job.seed) for job in jobs], rolls)
-    envs.sim.start_fights(list(range(n)), list(range(n)), envs.floats, envs.ids, envs.mask)
+    envs.sim.start_fights(list(range(n)), list(range(n)), envs.floats, envs.ids, envs.mask)  # an opening already over still reads
     values = np.concatenate(
         [
             policy(torch.from_numpy(envs.floats[i : i + 4096]).to(device), torch.from_numpy(envs.ids[i : i + 4096]).to(device))[1].float().cpu().numpy()

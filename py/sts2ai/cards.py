@@ -173,13 +173,24 @@ def fights_stream(
             ends.update((j, []) for j, _ in batch)
         return bool(batch)
 
+    def ended(e: End) -> Iterator[tuple[int, list[End]]]:
+        j = job_of_env[e.env]
+        job_of_env[e.env] = -1
+        ends[j].append(e)
+        left[j] -= 1
+        if not left[j]:
+            del left[j]
+            yield j, ends.pop(j)
+
     more = load()
     while True:
         free = np.flatnonzero(job_of_env < 0)
         while more and len(free):
             k = min(len(free), len(queued) - cursor)
-            envs.sim.start_fights(free[:k].tolist(), list(range(cursor, cursor + k)), envs.floats, envs.ids, envs.mask)
             job_of_env[free[:k]] = queued[cursor : cursor + k]
+            # A fight can be over as it starts (relics that kill at combat start).
+            for e in envs.sim.start_fights(free[:k].tolist(), list(range(cursor, cursor + k)), envs.floats, envs.ids, envs.mask):
+                yield from ended(End(*e[:-1], None))
             cursor, free = cursor + k, free[k:]
             if cursor == len(queued):
                 more = load()
@@ -195,13 +206,7 @@ def fights_stream(
         actions = np.full(pool, -1)
         actions[rows] = masked_logits(logits.float(), mask).argmax(1).cpu().numpy()
         for e in envs.step(actions):
-            j = job_of_env[e.env]
-            job_of_env[e.env] = -1
-            ends[j].append(e)
-            left[j] -= 1
-            if not left[j]:
-                del left[j]
-                yield j, ends.pop(j)
+            yield from ended(e)
 
 
 def fights_many(policy: Policy, device: torch.device, jobs: list[FightJob], repeats: int) -> list[list[End]]:

@@ -193,7 +193,8 @@ impl VecEnv {
     }
 
     /// Start queued fight `fights[i]` in env `envs[i]` and encode those
-    /// envs' rows (`sim::env::VecEnv::start_fights`).
+    /// envs' rows (`sim::env::VecEnv::start_fights`); returns the fights
+    /// already over as they start, as `step` returns ended ones.
     fn start_fights(
         &mut self,
         py: Python<'_>,
@@ -202,11 +203,11 @@ impl VecEnv {
         mut floats: PyReadwriteArray2<f32>,
         mut ids: PyReadwriteArray2<i64>,
         mut mask: PyReadwriteArray2<bool>,
-    ) -> PyResult<()> {
+    ) -> PyResult<Vec<End>> {
         let starts: Vec<(usize, usize)> = envs.into_iter().zip(fights).collect();
         let (f, i, m) = (floats.as_slice_mut()?, ids.as_slice_mut()?, mask.as_slice_mut()?);
-        py.detach(|| self.inner.start_fights(&starts, f, i, m));
-        Ok(())
+        let ended = py.detach(|| self.inner.start_fights(&starts, f, i, m));
+        Ok(ended.into_iter().map(episode_end).collect())
     }
 
     /// Switch to cycling through fights of the run in `start` (JSON with a
@@ -414,14 +415,14 @@ impl VecEnv {
         let r = rewards.as_slice_mut()?;
         let d = dones.as_slice_mut()?;
         let ends = py.detach(|| self.inner.step(a, f, i, m, r, d));
-        Ok(ends
-            .into_iter()
-            .map(|e| {
-                let (encounter, kind) = (format!("{:?}", e.encounter), format!("{:?}", e.kind));
-                (e.env, e.won, e.hp_frac, e.hp_lost, e.potions_used, e.steps, e.floor, encounter, kind, e.reward, e.run.map(run_fight))
-            })
-            .collect())
+        Ok(ends.into_iter().map(episode_end).collect())
     }
+}
+
+/// An ended fight as the tuple Python's `End` reads.
+fn episode_end(e: sim::env::EpisodeEnd) -> End {
+    let (encounter, kind) = (format!("{:?}", e.encounter), format!("{:?}", e.kind));
+    (e.env, e.won, e.hp_frac, e.hp_lost, e.potions_used, e.steps, e.floor, encounter, kind, e.reward, e.run.map(run_fight))
 }
 
 /// Live view of one real combat: recorder lines in, the sim's state and

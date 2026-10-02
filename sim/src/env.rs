@@ -1058,8 +1058,11 @@ impl VecEnv {
     /// seeded from the fight's seed, so a fight plays the same shuffles in
     /// whichever env it lands, and encode those envs' rows. The caller
     /// keeps an env out of `step` (a negative action) until it starts one.
-    pub fn start_fights(&mut self, starts: &[(usize, usize)], floats: &mut [f32], ids: &mut [i64], mask: &mut [bool]) {
+    /// A fight already over when it starts (start-of-combat relics that
+    /// kill every enemy) comes back as ended, its env free again.
+    pub fn start_fights(&mut self, starts: &[(usize, usize)], floats: &mut [f32], ids: &mut [i64], mask: &mut [bool]) -> Vec<EpisodeEnd> {
         self.check_buffers(floats, ids, mask);
+        let mut ended = vec![];
         for &(env, k) in starts {
             let (setup, seed) = &self.queued[k];
             let s = &mut self.slots[env];
@@ -1067,7 +1070,11 @@ impl VecEnv {
             s.start(setup.clone());
             let row = |w: usize| env * w..(env + 1) * w;
             encode::encode(&s.combat, &mut floats[row(N_FLOATS)], &mut ids[row(N_IDS)], &mut mask[row(N_ACTIONS)]);
+            if s.combat.is_over() {
+                ended.push(s.end(env));
+            }
         }
+        ended
     }
 
     pub fn set_fixed(&mut self, setups: Vec<FightSetup>) {
@@ -2647,7 +2654,7 @@ pub(crate) mod tests {
         let (mut f, mut i, mut m) = (vec![0.0; 3 * N_FLOATS], vec![0; 3 * N_IDS], vec![false; 3 * N_ACTIONS]);
         let (mut r, mut d) = (vec![0.0; 3], vec![false; 3]);
         env.queue_fights(vec![(setup.clone(), 11), (setup, 12)]);
-        env.start_fights(&[(0, 0), (1, 1)], &mut f, &mut i, &mut m);
+        assert!(env.start_fights(&[(0, 0), (1, 1)], &mut f, &mut i, &mut m).is_empty());
         env.step(&[-1, -1, -1], &mut f, &mut i, &mut m, &mut r, &mut d);
         env.start_fights(&[(2, 0)], &mut f, &mut i, &mut m);
         assert_eq!(f[..N_FLOATS], f[2 * N_FLOATS..], "same fight, same opening hand");
