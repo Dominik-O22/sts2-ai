@@ -22,7 +22,7 @@ import torch
 
 from sts2ai.env import Envs
 from sts2ai.evaluate import HOLDOUT_PER_ENCOUNTER
-from sts2ai.model import Policy, load_policy, masked_logits
+from sts2ai.model import Net, for_play, load_policy, masked_logits
 from sts2ai.search import PLAN_MARGIN, openings, rollout, spread
 
 
@@ -43,7 +43,7 @@ def pick(first: np.ndarray, score: np.ndarray, own: int, mean: bool, second: tup
 
 @torch.no_grad()
 def play(
-    policy: Policy,
+    policy: Net,
     device: torch.device,
     copies: int,
     kinds: set[str],
@@ -111,8 +111,7 @@ def main() -> None:
     ap.add_argument("--two-level", action="store_true", help="rank openings by their best second action (search.openings)")
     args = ap.parse_args()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    policy = load_policy(args.checkpoint, device)
-    policy.eval()
+    policy = for_play(load_policy(args.checkpoint, device).eval())
     kinds = set(args.kinds.split(","))
     greedy: dict[str, list[bool]] = defaultdict(list)
     search: dict[str, list[bool]] = defaultdict(list)

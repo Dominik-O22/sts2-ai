@@ -73,7 +73,7 @@ from sts2ai.afterstate import Scorer
 from sts2ai.env import START_POINTS, End, Envs, RunFight, RunLayout
 from sts2ai.forecast import Calibration, Forecaster
 from sts2ai.imitation import Rows
-from sts2ai.model import Policy, load_policy
+from sts2ai.model import Net, for_play, load_policy
 from sts2ai.runmodel import RunPolicy, load_run_policy
 from sts2ai.runtrain import RunLoop
 from sts2ai.setups import TRACKER, sim_floor, split_runs
@@ -213,7 +213,7 @@ def as_setup(start: dict) -> dict:
 
 
 def play(
-    combat: Policy,
+    combat: Net,
     device: torch.device,
     envs: Envs,
     seed: int,
@@ -466,7 +466,7 @@ def main() -> None:
     # drawn from here: unseeded, two plays of one seed differ.
     torch.manual_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    combat = load_policy(args.checkpoint, device, args.old_vocab).eval()
+    combat = for_play(load_policy(args.checkpoint, device, args.old_vocab).eval())
     run_policy, run_ck = load_run_policy(args.run_policy, device) if args.run_policy else (None, {})
     if run_policy is not None:
         run_policy.eval()

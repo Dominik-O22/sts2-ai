@@ -53,7 +53,7 @@ from sts2ai.env import START_POINTS, End, Envs, RunFight, RunLayout
 from sts2ai.exactsearch import Hybrid
 from sts2ai.forecast import Calibration, Forecaster, Read
 from sts2ai.imitation import DECISIONS, Rows, batches, pretrain
-from sts2ai.model import Policy, load_policy, masked_logits
+from sts2ai.model import Net, for_play, load_policy, masked_logits
 from sts2ai.runmodel import RunArch, RunPolicy, load_run_policy, save_run_policy
 from sts2ai.search import choose
 from sts2ai.setups import TRACKER, split_runs
@@ -97,7 +97,7 @@ class RunLoop:
 
     def __init__(
         self,
-        combat: Policy,
+        combat: Net,
         device: torch.device,
         envs: Envs,
         drain: bool = True,
@@ -395,7 +395,7 @@ class Curriculum:
 def train(combat_path: Path, run_dir: Path, cfg: Config, resume: Path | None) -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     torch.manual_seed(cfg.seed)
-    combat = load_policy(combat_path, device).eval()
+    combat = for_play(load_policy(combat_path, device).eval())
     if resume:
         policy, ck = load_run_policy(resume, device)
     else:

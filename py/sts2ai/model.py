@@ -29,6 +29,7 @@ as tokens of card embeddings, choices that attend to the board.
 from __future__ import annotations
 
 import copy
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -580,3 +581,23 @@ def load_policy(path: Path, device: torch.device, old_vocab: Path | None = None)
     policy = build_policy(Layout.load(), checkpoint_arch(ck)).to(device)
     load_state(policy, ck.get("policy", ck), checkpoint_vocab(ck, old_vocab), checkpoint_layout(ck))
     return policy
+
+
+# What play and search call: `(floats, ids) -> (logits, values)`.
+Net = Callable[[Tensor, Tensor], tuple[Tensor, Tensor]]
+
+
+def for_play(policy: Policy) -> Net:
+    """`policy` as play and search run it on the GPU: compiled, matmuls in
+    bfloat16 as training's rollouts run them. At search batch sizes (1k-16k
+    rows) that is 2.7x the rows a second of eager fp32. Batch sizes change
+    every step, hence dynamic; the first calls compile."""
+    if next(policy.parameters()).device.type != "cuda":
+        return policy
+    compiled = torch.compile(policy, dynamic=True)
+
+    def net(floats: Tensor, ids: Tensor) -> tuple[Tensor, Tensor]:
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            return compiled(floats, ids)
+
+    return net
