@@ -78,9 +78,10 @@ def encode(runs: list[dict]) -> dict[str, Tensor]:
 
 class DeckValue(nn.Module):
     """Sets of cards, relics and potions, pooled, plus the numbers, to a
-    value per elite and boss encounter (`ENCOUNTERS`)."""
+    value per elite and boss encounter (`ENCOUNTERS`), or `outputs` other
+    values (`sts2ai.runvalue`)."""
 
-    def __init__(self, card_dim: int = 32, hidden: int = 256):
+    def __init__(self, card_dim: int = 32, hidden: int = 256, outputs: int = len(ENCOUNTERS)):
         super().__init__()
         self.card = nn.Embedding(len(IDS["card"]) + 1, card_dim, padding_idx=0)
         self.upgraded = nn.Embedding(2, card_dim)
@@ -88,7 +89,7 @@ class DeckValue(nn.Module):
         self.card_mlp = nn.Sequential(nn.Linear(card_dim, hidden), nn.ReLU(), nn.Linear(hidden, hidden))
         self.relic = nn.Embedding(len(IDS["relic"]) + 1, 32, padding_idx=0)
         self.potion = nn.Embedding(len(IDS["potion"]) + 1, 16, padding_idx=0)
-        self.head = nn.Sequential(nn.Linear(hidden + 32 + 16 + 8, hidden), nn.ReLU(), nn.Linear(hidden, hidden), nn.ReLU(), nn.Linear(hidden, len(ENCOUNTERS)))
+        self.head = nn.Sequential(nn.Linear(hidden + 32 + 16 + 8, hidden), nn.ReLU(), nn.Linear(hidden, hidden), nn.ReLU(), nn.Linear(hidden, outputs))
 
     def forward(self, x: dict[str, Tensor]) -> Tensor:
         present = (x["cards"] > 0).unsqueeze(-1).float()
@@ -111,6 +112,13 @@ def load(path: Path, device: torch.device) -> DeckValue:
     saved = torch.load(path, map_location=device)
     if saved["encounters"] != ENCOUNTERS:
         raise ValueError(f"{path}: the encounters changed since it was trained; retrain")
+    model = DeckValue().to(device)
+    model.load_state_dict(grown(saved, path))
+    return model.eval()
+
+
+def grown(saved: dict, path: Path) -> dict[str, Tensor]:
+    """A saved net's weights with zero embeddings for the ids added since."""
     state = saved["model"]
     for kind in ("card", "enchant", "relic", "potion"):
         old = saved["vocab"][kind]
@@ -118,9 +126,7 @@ def load(path: Path, device: torch.device) -> DeckValue:
             raise ValueError(f"{path}: the {kind} ids moved since it was trained; retrain")
         weight = state[f"{kind}.weight"]
         state[f"{kind}.weight"] = torch.cat([weight, weight.new_zeros((len(IDS[kind]) - len(old), weight.shape[1]))])
-    model = DeckValue().to(device)
-    model.load_state_dict(state)
-    return model.eval()
+    return state
 
 
 class RunPotential:

@@ -62,13 +62,14 @@ import json
 import sys
 import time
 from collections import Counter, defaultdict
+from collections.abc import Callable
 from pathlib import Path
 from typing import TextIO
 
 import numpy as np
 import torch
 
-from sts2ai import _sim, deckvalue
+from sts2ai import _sim, deckvalue, runvalue
 from sts2ai.afterstate import Scorer
 from sts2ai.env import START_POINTS, End, Envs, RunFight, RunLayout
 from sts2ai.forecast import Calibration, Forecaster
@@ -424,6 +425,17 @@ def report(fights: list[End], runs: list[RunFight], seed: int, last: int, loop: 
     print(f"throughput: {rate} ({seconds:.0f} s, {n} envs{searched})")
 
 
+def state_scorer(args: argparse.Namespace, device: torch.device) -> Callable[[list[dict]], np.ndarray] | None:
+    """What scores afterstates from their run records, if not the forecast."""
+    if args.runvalue:
+        model = runvalue.load(args.runvalue, device)
+        return lambda runs: runvalue.state_scores(model, runs)
+    if args.deckvalue:
+        model = deckvalue.load(args.deckvalue, device)
+        return lambda runs: deckvalue.state_scores(model, runs)
+    return None
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("checkpoint", type=Path, help="combat checkpoint")
@@ -455,6 +467,7 @@ def main() -> None:
     ap.add_argument("--event-table", type=Path, default=None, help="imitation rows (.npz); event choices take winners' most picked option")
     ap.add_argument("--runs-out", type=Path, default=None, help="write each counted run here as a JSON line, for sts2ai.paired")
     ap.add_argument("--deckvalue", type=Path, default=None, help="score afterstates with this deck value network (sts2ai.deckvalue) instead of the forecast")
+    ap.add_argument("--runvalue", type=Path, default=None, help="score afterstates with this run value network (sts2ai.runvalue): the chance to win the run")
     ap.add_argument("--afterstate", type=int, default=0, help="make every decision but a map step by its afterstates, K samples each (needs the forecast)")
     ap.add_argument("--afterstate-depth", type=int, default=3, help="sub-decisions an afterstate opens on the way, at most")
     ap.add_argument("--afterstate-nodes", type=int, default=256, help="branches an afterstate plays per option and sample, at most")
@@ -489,7 +502,7 @@ def main() -> None:
             args.afterstate_depth,
             args.afterstate_nodes,
             frozenset(filter(None, args.afterstate_kinds.split(","))),
-            deckvalue.load(args.deckvalue, device) if args.deckvalue else None,
+            state_scorer(args, device),
         )
         if args.afterstate > 0
         else None
