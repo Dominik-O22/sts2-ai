@@ -1271,6 +1271,13 @@ impl TreeSearch {
     }
 }
 
+/// The share of the enemies' HP a lost fight pays back (`sim::env`), for
+/// the whole process.
+#[pyfunction]
+fn set_loss_damage(w: f32) {
+    sim::env::set_loss_damage(w);
+}
+
 #[pymodule]
 fn _sim(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<VecEnv>()?;
@@ -1278,6 +1285,7 @@ fn _sim(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Forks>()?;
     m.add_class::<TurnPlanner>()?;
     m.add_class::<TreeSearch>()?;
+    m.add_function(wrap_pyfunction!(set_loss_damage, m)?)?;
     m.add_function(wrap_pyfunction!(layout, m)?)?;
     m.add_function(wrap_pyfunction!(run_layout, m)?)?;
     m.add_function(wrap_pyfunction!(run_names, m)?)?;
