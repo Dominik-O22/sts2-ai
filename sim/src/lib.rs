@@ -275,6 +275,23 @@ mod tests {
         assert!(c.player.discard.iter().any(|k| k.uid == 950 && k.upgraded));
     }
 
+    /// Intents show what the move will do now, not on its first use: Multi
+    /// Claw's hits grow by one a use and the Pressure Gun's damage by 5.
+    #[test]
+    fn intents_read_the_counters_their_moves_raise() {
+        use crate::monster::Intent;
+        let mut c = fight(&[one(MonsterId::TestSubject)], 3);
+        let m = &mut c.enemies[0].monster;
+        m.force_to("MULTI_CLAW_MOVE");
+        m.vars.extra_claws = 2;
+        assert!(matches!(m.intents()[..], [Intent::Attack { hits: 5, .. }]), "{:?}", m.intents());
+        let mut w = fight(&[one(MonsterId::WaterfallGiant)], 3);
+        let g = &mut w.enemies[0].monster;
+        g.force_to("PRESSURE_GUN_MOVE");
+        g.vars.pressure_gun_damage = 33;
+        assert!(matches!(g.intents()[..], [Intent::Attack { damage: 33, .. }, ..]), "{:?}", g.intents());
+    }
+
     /// Normality vetoes from hand, so it costs a play without ever being one.
     #[test]
     fn normality_stops_the_fourth_card_each_turn() {
