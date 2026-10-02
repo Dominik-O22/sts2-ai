@@ -264,7 +264,7 @@ fn shown_intents(c: &Combat, i: usize) -> Vec<(i32, u32)> {
 fn intent_into(c: &Combat, enemy: usize, out: &mut [f32]) {
     let (kinds, nums) = out.split_at_mut(N_INTENTS);
     let mut shown = shown_intents(c, enemy).into_iter();
-    for i in c.enemies[enemy].monster.intents() {
+    for i in &c.enemies[enemy].monster.intents() {
         kinds[i.kind()] = 1.0;
         match *i {
             Intent::Attack { .. } => {
@@ -643,7 +643,7 @@ mod tests {
         let (mut c, i, base) = (0..50)
             .find_map(|seed| {
                 let c = generate(&mut rng, 8 + seed % 8, Ascension(10)).combat(seed as u64);
-                let i = c.living_enemies().find(|&i| matches!(c.enemies[i].monster.intents(), [Intent::Attack { hits: 1, .. }]))?;
+                let i = c.living_enemies().find(|&i| matches!(c.enemies[i].monster.intents()[..], [Intent::Attack { hits: 1, .. }]))?;
                 let Intent::Attack { damage, .. } = c.enemies[i].monster.intents()[0] else { unreachable!() };
                 Some((c, i, damage))
             })

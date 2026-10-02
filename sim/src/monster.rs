@@ -3,6 +3,7 @@
 //! ported verbatim from its `GenerateMoveStateMachine`, and each move body
 //! from the matching `*Move` method.
 
+use smallvec::SmallVec;
 use std::sync::Arc;
 
 use crate::effect::{AttackTargets, Effect, Pile};
@@ -548,11 +549,30 @@ impl Monster {
         }
     }
 
-    pub fn intents(&self) -> &[Intent] {
-        match self.next_move.map(|i| &self.states[i]) {
-            Some(State::Move { intents, .. }) => intents,
-            _ => &[],
+    /// The intents the game shows for the next move. Most are fixed per
+    /// move; two read a counter the move itself raises, so the fixed ones
+    /// would show the first use forever: Multi Claw's hits
+    /// (`MultiAttackIntent(() => MultiClawTotalCount)`) and the Pressure
+    /// Gun's damage (`SingleAttackIntent(() => CurrentPressureGunDamage)`).
+    pub fn intents(&self) -> SmallVec<[Intent; 3]> {
+        let mut out: SmallVec<[Intent; 3]> = match self.next_move.map(|i| &self.states[i]) {
+            Some(State::Move { intents, .. }) => intents.iter().copied().collect(),
+            _ => SmallVec::new(),
+        };
+        let live = match (self.id, self.next_move_name()) {
+            (MonsterId::TestSubject, Some("MULTI_CLAW_MOVE")) => Some((None, Some(3 + self.vars.extra_claws as u32))),
+            (MonsterId::WaterfallGiant, Some("PRESSURE_GUN_MOVE")) => Some((Some(self.vars.pressure_gun_damage), None)),
+            _ => None,
+        };
+        if let Some((damage, hits)) = live {
+            for i in &mut out {
+                if let Intent::Attack { damage: d, hits: h } = i {
+                    *d = damage.unwrap_or(*d);
+                    *h = hits.unwrap_or(*h);
+                }
+            }
         }
+        out
     }
 
     pub fn next_move_name(&self) -> Option<&'static str> {
