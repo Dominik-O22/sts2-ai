@@ -28,7 +28,7 @@ import numpy as np
 import torch
 
 from sts2ai.env import Layout
-from sts2ai.model import Policy, masked_logits
+from sts2ai.model import Net, masked_logits
 
 # Actions per player turn searched; a runaway plan is cut after this many
 # per turn.
@@ -49,7 +49,7 @@ SECOND_MIN = 8
 PLAN_MARGIN = 0.02
 
 
-def forward(policy: Policy, device: torch.device, floats: torch.Tensor, ids: torch.Tensor, chunk: int = CHUNK) -> tuple[torch.Tensor, torch.Tensor]:
+def forward(policy: Net, device: torch.device, floats: torch.Tensor, ids: torch.Tensor, chunk: int = CHUNK) -> tuple[torch.Tensor, torch.Tensor]:
     """The policy over a batch of any size, in `chunk`-sized pieces."""
     parts = [
         policy(floats[i : i + chunk].to(device, non_blocking=True), ids[i : i + chunk].to(device, non_blocking=True)) for i in range(0, len(floats), chunk)
@@ -80,7 +80,7 @@ def buffers(n: int, L: Layout) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor
 
 @torch.no_grad()
 def rollout(
-    policy: Policy,
+    policy: Net,
     device: torch.device,
     forks,
     first: np.ndarray,
@@ -188,7 +188,7 @@ def spread(legal: np.ndarray, n: int) -> np.ndarray:
 
 
 @torch.no_grad()
-def choose(policy: Policy, device: torch.device, sim, roots: list[int], mask: np.ndarray, own: np.ndarray, n: int, groups: int, seed: int) -> np.ndarray:
+def choose(policy: Net, device: torch.device, sim, roots: list[int], mask: np.ndarray, own: np.ndarray, n: int, groups: int, seed: int) -> np.ndarray:
     """The pilot's pick (`advise.Session.plan`) at the decisions of many
     fights at once: `n` copies of each env in `roots` of the VecEnv `sim`,
     over `groups` draw-pile shuffles, every legal first action (`mask[r]`)

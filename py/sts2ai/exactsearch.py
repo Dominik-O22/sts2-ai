@@ -38,7 +38,7 @@ import torch
 
 from sts2ai import _sim, search
 from sts2ai.env import End, Envs, Layout
-from sts2ai.model import Policy, load_policy, masked_logits
+from sts2ai.model import Net, for_play, load_policy, masked_logits
 from sts2ai.search import PLAN_MARGIN
 from sts2ai.searcheval import pick
 from sts2ai.setups import EASY_HOLDOUT, HOLDOUT
@@ -73,7 +73,7 @@ class Planner:
         self.overrides = 0
 
     @torch.no_grad()
-    def score_leaves(self, policy: Policy, device: torch.device) -> None:
+    def score_leaves(self, policy: Net, device: torch.device) -> None:
         n = self.inner.n_leaves()
         values = np.empty(n, np.float32)
         start = 0
@@ -84,7 +84,7 @@ class Planner:
             start += k
         self.inner.set_values(values)
 
-    def choose(self, policy: Policy, device: torch.device, roots: list[int], probs: np.ndarray, actions: np.ndarray) -> None:
+    def choose(self, policy: Net, device: torch.device, roots: list[int], probs: np.ndarray, actions: np.ndarray) -> None:
         """Search each of `roots` (reusing a search that already holds its
         state) and replace `actions[i]` by the search's best action when it
         beats the policy's by `PLAN_MARGIN`."""
@@ -129,7 +129,7 @@ class Hybrid:
         self.calls = 0
         self.unreplayed = 0
 
-    def choose(self, policy: Policy, device: torch.device, roots: list[int], probs: np.ndarray, actions: np.ndarray) -> None:
+    def choose(self, policy: Net, device: torch.device, roots: list[int], probs: np.ndarray, actions: np.ndarray) -> None:
         """Replace `actions[i]` for each of `roots` by its committed line's
         action, or pick a line afresh."""
         inner, sim = self.planner.inner, self.envs.sim
@@ -182,7 +182,7 @@ class Hybrid:
         se = d.std(ddof=1) / np.sqrt(m) if m > 1 else 0.0
         return bool(d.mean() > 2 * se)
 
-    def play_lines(self, policy: Policy, device: torch.device, cands: dict) -> tuple[dict, dict]:
+    def play_lines(self, policy: Net, device: torch.device, cands: dict) -> tuple[dict, dict]:
         """Each candidate line's value: exact for one that ends the fight,
         else its playouts (reward on the way plus what they collected)."""
         exact: dict[tuple[int, int], float] = {}
@@ -242,7 +242,7 @@ class Hybrid:
         return out
 
     @torch.no_grad()
-    def play_out(self, policy: Policy, device: torch.device, forks, last: np.ndarray, owners: np.ndarray, per: int) -> np.ndarray:
+    def play_out(self, policy: Net, device: torch.device, forks, last: np.ndarray, owners: np.ndarray, per: int) -> np.ndarray:
         """Play every copy to its fight's end, `per` copies per line: the
         line's last step first, then the search's best action while the
         copy is in a state of the searched turn, greedy after. Returns each
@@ -297,9 +297,7 @@ class Run:
 
 
 @torch.no_grad()
-def play(
-    policy: Policy, device: torch.device, lines: list[str], mode: str, seed: int, copies: int, config: dict[str, int], top: int = 10, race: int = 8
-) -> Run:
+def play(policy: Net, device: torch.device, lines: list[str], mode: str, seed: int, copies: int, config: dict[str, int], top: int = 10, race: int = 8) -> Run:
     """Play each fight in `lines` (setups as `sts2ai.setups` writes them)
     once: `greedy`, `forks` (the current search), `exact`, `hybridP` (the
     hybrid at P playouts per line) or `raceP` (with races of `race`)."""
@@ -422,8 +420,7 @@ def main() -> None:
     args = ap.parse_args()
     search.CHUNK = args.chunk
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    policy = load_policy(args.checkpoint, device)
-    policy.eval()
+    policy = for_play(load_policy(args.checkpoint, device).eval())
     config = {
         "max_states": args.max_states,
         "quiesce_states": args.quiesce_states,

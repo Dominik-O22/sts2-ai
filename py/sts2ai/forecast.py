@@ -33,7 +33,7 @@ import numpy as np
 import torch
 
 from sts2ai.env import RunLayout
-from sts2ai.model import Policy
+from sts2ai.model import Net
 
 
 class Fights(NamedTuple):
@@ -95,7 +95,7 @@ class Forecaster:
     """The combat policy's value head over forecast fights, filled into run
     rows. Without a calibration it only reads (`read`), for logging."""
 
-    def __init__(self, combat: Policy, device: torch.device, calibration: Calibration | None, layout: RunLayout | None = None):
+    def __init__(self, combat: Net, device: torch.device, calibration: Calibration | None, layout: RunLayout | None = None):
         self.combat, self.device, self.calibration = combat, device, calibration
         self.L = layout or RunLayout.load()
         self.autocast = torch.autocast(device.type, dtype=torch.bfloat16, enabled=device.type == "cuda")

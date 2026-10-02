@@ -39,7 +39,7 @@ import torch
 
 from sts2ai.advise import Session, add_search_args, hybrid_of
 from sts2ai.exactsearch import Hybrid
-from sts2ai.model import Policy, load_policy
+from sts2ai.model import Net, for_play, load_policy
 
 DEFAULT_PORT = 47474
 # The mod runs dev console lines written here (scripts/game.sh does the same).
@@ -58,7 +58,7 @@ class Pilot(Session):
     def __init__(
         self,
         conn: socket.socket,
-        policy: Policy,
+        policy: Net,
         device: torch.device,
         search: int = 0,
         groups: int = 4,
@@ -184,8 +184,7 @@ def main() -> None:
     sys.stdout.reconfigure(line_buffering=True)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    policy = load_policy(args.checkpoint, device)
-    policy.eval()
+    policy = for_play(load_policy(args.checkpoint, device).eval())
 
     try:
         conn = socket.create_connection(("127.0.0.1", args.port))

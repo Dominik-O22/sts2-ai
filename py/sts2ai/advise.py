@@ -44,7 +44,7 @@ import torch
 from sts2ai import _sim
 from sts2ai.env import DEFAULT_RECORDINGS, Envs, Layout
 from sts2ai.exactsearch import Hybrid
-from sts2ai.model import Policy, load_policy, masked_logits
+from sts2ai.model import Net, for_play, load_policy, masked_logits
 from sts2ai.search import PLAN_MARGIN, openings, rollout, spread
 
 ALTERNATIVES = 2
@@ -54,7 +54,7 @@ class Session:
     """One recording followed line by line: the sim kept in sync, and the
     policy's pick printed once per decision point."""
 
-    def __init__(self, policy: Policy, device: torch.device, search: int = 0, groups: int = 4, hybrid: Hybrid | None = None):
+    def __init__(self, policy: Net, device: torch.device, search: int = 0, groups: int = 4, hybrid: Hybrid | None = None):
         self.policy = policy
         self.device = device
         self.search = search
@@ -292,8 +292,7 @@ def main() -> None:
     sys.stdout.reconfigure(line_buffering=True)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    policy = load_policy(args.checkpoint, device)
-    policy.eval()
+    policy = for_play(load_policy(args.checkpoint, device).eval())
 
     session = Session(policy, device, args.search, args.groups, hybrid_of(args))
     lines = replay_lines(args.replay, args.delay) if args.replay else live_lines(args.dir, args.poll)
