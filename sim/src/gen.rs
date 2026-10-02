@@ -294,7 +294,10 @@ pub fn run_setups(lines: &str, ids: &Ids, seed: u64) -> Result<Vec<FightSetup>, 
             let int = |k: &str| v[k].as_i64().ok_or_else(|| format!("line {}: no {k}", i + 1));
             let mut setup = FightSetup::run_against(&v["start"], ids, int("hp")? as i32, int("max_hp")? as i32, enc, int("floor")? as u32, &mut rng)
                 .map_err(|e| format!("line {}: {e}", i + 1))?;
-            setup.after = after(enc, setup.asc, v["second"].as_bool().unwrap_or(false));
+            let second = v["second"].as_bool().unwrap_or(false);
+            setup.after = after(enc, setup.asc, second);
+            // The page's room before wins; a boss's is known regardless.
+            prime_tea_sets(&mut setup.relics, v["rest_before"].as_bool().or(rest_before_boss(enc, second)));
             Ok(setup)
         })
         .collect()
@@ -448,6 +451,25 @@ fn roll_carried_state(r: &mut Relic, rng: &mut Rng) {
     if let Some(n) = carried_states(r.id) {
         r.counter = rng.next_int(n) as i32;
     }
+}
+
+/// Venerable Tea Set and its fake prime on entering a rest site
+/// (`VenerableTeaSet.AfterRoomEntered`) and spend it on the next combat, so a
+/// fight after a rest starts them primed and one after anything else spent.
+/// Every act's last row before the boss is rest sites, so a first boss always
+/// finds them primed and the last act's second boss, right after the first,
+/// spent. `None` where the room before is not known.
+fn prime_tea_sets(relics: &mut [Relic], rest_before: Option<bool>) {
+    let Some(primed) = rest_before else { return };
+    for r in relics.iter_mut().filter(|r| matches!(r.id, RelicId::VenerableTeaSet | RelicId::FakeVenerableTeaSet)) {
+        r.counter = primed as i32;
+    }
+}
+
+/// Whether a fight follows a rest site, as far as the encounter alone tells:
+/// bosses do, the last act's second boss does not.
+fn rest_before_boss(encounter: Encounter, second: bool) -> Option<bool> {
+    (encounter.kind() == Kind::Boss).then_some(!second)
 }
 
 /// How many carried states `roll_carried_state` draws from, for the
@@ -735,6 +757,7 @@ pub fn generate_against(rng: &mut Rng, floor: u32, asc: Ascension, encounter: En
         && encounter.act() == crate::encounter::Act::Glory
         && asc.has(AscensionLevel::DoubleBoss)
         && rng.next_int(2) == 0;
+    prime_tea_sets(&mut relics, rest_before_boss(encounter, second));
     // Played runs carry about one potion into an act 1 fight; into a second
     // boss, whatever the first did not drink.
     let odds = if second { 4 } else { 2 };
@@ -781,6 +804,28 @@ pub fn generate_against(rng: &mut Rng, floor: u32, asc: Ascension, encounter: En
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Tea Sets start primed after a rest and spent after anything else:
+    /// a first boss always follows rest sites, a second boss the first, and
+    /// a played run's page says what came before any other fight.
+    #[test]
+    fn tea_sets_prime_after_a_rest() {
+        let ids = Ids::new();
+        let line = |enc: &str, second: bool, rest: Option<bool>| {
+            let rest = rest.map_or(String::new(), |r| format!(r#", "rest_before": {r}"#));
+            format!(
+                r#"{{"start": {{"ascension": 10, "deck": [{{"id": "STRIKE_IRONCLAD", "up": false}}], "relics": ["BURNING_BLOOD", "VENERABLE_TEA_SET", "FAKE_VENERABLE_TEA_SET"], "potions": [null, null], "gold": 0}}, "hp": 50, "max_hp": 80, "encounter": "{enc}", "floor": 48, "second": {second}{rest}}}"#
+            )
+        };
+        let teas = |l: String| -> Vec<i32> {
+            let s = &run_setups(&l, &ids, 1).unwrap()[0];
+            s.relics.iter().filter(|r| matches!(r.id, RelicId::VenerableTeaSet | RelicId::FakeVenerableTeaSet)).map(|r| r.counter).collect()
+        };
+        assert_eq!(teas(line("QUEEN_BOSS", false, None)), [1, 1]);
+        assert_eq!(teas(line("QUEEN_BOSS", true, None)), [0, 0]);
+        assert_eq!(teas(line("KNIGHTS_ELITE", false, Some(true))), [1, 1]);
+        assert_eq!(teas(line("KNIGHTS_ELITE", false, Some(false))), [0, 0]);
+    }
 
     /// Under Double Boss the last act's boss fights are either the first
     /// of the two, fought rested, or the second, fought with what the first
