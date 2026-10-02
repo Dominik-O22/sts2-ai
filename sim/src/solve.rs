@@ -83,6 +83,12 @@ pub fn solve(root: &Combat, cfg: &Config) -> Solution {
                     let key = key_of(&k, true);
                     if k.player.turn > t {
                         next.entry(key).or_insert(Start { combat: k, line: l });
+                        // Next-turn starts pile up to millions of states over a
+                        // wide beam; cut them as they come, by the same ranks.
+                        if next.len() >= 8 * cfg.beam {
+                            let kept = beam(std::mem::take(&mut next).into_values().collect(), base, 2 * cfg.beam);
+                            next = kept.into_iter().map(|s| (key_of(&s.combat, true), s)).collect();
+                        }
                     } else if seen.len() < cfg.turn_states {
                         if seen.insert(key) {
                             stack.push((k, l));
