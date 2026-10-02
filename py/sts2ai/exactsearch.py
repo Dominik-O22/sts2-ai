@@ -38,6 +38,7 @@ import torch
 
 from sts2ai import _sim, search
 from sts2ai.env import End, Envs, Layout
+from sts2ai.mcts import TreeSearch
 from sts2ai.model import Net, for_play, load_policy, masked_logits
 from sts2ai.search import PLAN_MARGIN
 from sts2ai.searcheval import pick
@@ -300,12 +301,14 @@ class Run:
 def play(policy: Net, device: torch.device, lines: list[str], mode: str, seed: int, copies: int, config: dict[str, int], top: int = 10, race: int = 8) -> Run:
     """Play each fight in `lines` (setups as `sts2ai.setups` writes them)
     once: `greedy`, `forks` (the current search), `exact`, `hybridP` (the
-    hybrid at P playouts per line) or `raceP` (with races of `race`)."""
+    hybrid at P playouts per line), `raceP` (with races of `race`) or
+    `mctsN` (the tree search, `sts2ai.mcts`, N simulations a decision)."""
     envs = Envs(len(lines), seed=seed)
     envs.sim.use_setups("\n".join(lines), 1, seed)
     envs.sim.observe(envs.floats, envs.ids, envs.mask)
     planner = Planner(envs, seed=seed, **config) if mode == "exact" else None
     hybrid = None
+    tree = TreeSearch(envs, int(m[1]), seed=seed) if (m := re.fullmatch(r"mcts(\d+)", mode)) else None
     if m := re.fullmatch(r"(hybrid|race)(\d+)", mode):
         hybrid = Hybrid(envs, top, int(m[2]), race if m[1] == "race" else 0, seed, **config)
         planner = hybrid.planner
@@ -334,6 +337,8 @@ def play(policy: Net, device: torch.device, lines: list[str], mode: str, seed: i
                 run.overrides += actions[i] != own
         elif hybrid is not None:
             hybrid.choose(policy, device, roots, masked.softmax(dim=1).cpu().numpy(), actions)
+        elif tree is not None:
+            tree.choose(policy, device, roots, actions)
         elif mode == "exact":
             assert planner is not None
             probs = masked.softmax(dim=1).cpu().numpy()

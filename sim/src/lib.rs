@@ -34,6 +34,7 @@ pub mod forward;
 pub mod gen;
 pub mod history;
 pub mod map;
+pub mod mcts;
 pub mod plan;
 pub mod pools;
 pub mod ids;
