@@ -306,7 +306,8 @@ def play(policy: Net, device: torch.device, lines: list[str], mode: str, seed: i
     `mctsN` (the tree search, `sts2ai.mcts`, N simulations a decision) or
     `mctswN` (the same with progressive widening at chance) or `mctscN`
     (clairvoyant: it reads the fight's real dice, to measure which fights
-    are winnable at all, never to play)."""
+    are winnable at all, never to play), or `pimcK[dD][bB]` (`sim::pimc`, K
+    sampled futures solved D turns deep at beam B per turn plan)."""
     envs = Envs(len(lines), seed=seed)
     envs.sim.use_setups("\n".join(lines), 1, seed)
     envs.sim.observe(envs.floats, envs.ids, envs.mask)
@@ -317,6 +318,9 @@ def play(policy: Net, device: torch.device, lines: list[str], mode: str, seed: i
         if (m := re.fullmatch(r"mcts(w|c|)(\d+)", mode))
         else None
     )
+    pimc = None
+    if m := re.fullmatch(r"pimc(\d+)(?:d(\d+))?(?:b(\d+))?", mode):
+        pimc = _sim.Pimc(envs.n, samples=int(m[1]), depth=int(m[2] or 2), beam=int(m[3] or 30), seed=seed)
     if m := re.fullmatch(r"(hybrid|race)(\d+)", mode):
         hybrid = Hybrid(envs, top, int(m[2]), race if m[1] == "race" else 0, seed, **config)
         planner = hybrid.planner
@@ -347,6 +351,10 @@ def play(policy: Net, device: torch.device, lines: list[str], mode: str, seed: i
             hybrid.choose(policy, device, roots, masked.softmax(dim=1).cpu().numpy(), actions)
         elif tree is not None:
             tree.choose(policy, device, roots, actions)
+        elif pimc is not None:
+            for i, a in zip(roots, pimc.choose(envs.sim, roots)):
+                if a >= 0:
+                    actions[i] = a
         elif mode == "exact":
             assert planner is not None
             probs = masked.softmax(dim=1).cpu().numpy()

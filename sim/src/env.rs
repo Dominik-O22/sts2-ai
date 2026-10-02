@@ -305,6 +305,11 @@ pub(crate) fn enemy_hp_taken(c: &Combat) -> f32 {
 }
 
 impl Baseline {
+    /// The player's max HP when the fight (or search) began.
+    pub fn max_hp(&self) -> i32 {
+        self.max_hp
+    }
+
     pub fn of(c: &Combat) -> Self {
         Self { taken: enemy_hp_taken(c), hp: c.player.creature.hp, max_hp: c.player.creature.max_hp, potions: potions_held(c) }
     }

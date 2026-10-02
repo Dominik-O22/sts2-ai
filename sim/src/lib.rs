@@ -35,6 +35,7 @@ pub mod gen;
 pub mod history;
 pub mod map;
 pub mod mcts;
+pub mod pimc;
 pub mod solve;
 pub mod plan;
 pub mod pools;

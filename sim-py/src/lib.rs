@@ -1293,6 +1293,61 @@ impl TreeSearch {
     }
 }
 
+/// The sampled-future turn planner (`sim::pimc`), one plan per env, as a
+/// candidate teacher. It reads only what the player knows.
+#[pyclass]
+struct Pimc {
+    cfg: sim::pimc::Config,
+    /// Each env's plan and how far it has been followed.
+    plans: Vec<Option<(sim::pimc::Plan, usize)>>,
+}
+
+impl Pimc {
+    /// Whether env `i`'s plan still holds in state `c`: the last step went
+    /// where the plan expected and its next step is legal.
+    fn follows(&self, c: &sim::combat::Combat, i: usize) -> bool {
+        let Some((p, pos)) = &self.plans[i] else { return false };
+        *pos > 0 && *pos < p.line.len() && sim::turnsearch::state_key(c) == p.keys[*pos - 1] && c.legal_actions().contains(&p.line[*pos])
+    }
+}
+
+#[pymethods]
+impl Pimc {
+    #[new]
+    #[pyo3(signature = (n, samples=8, candidates=12, turn_states=1000, depth=2, beam=30, seed=0))]
+    fn new(n: usize, samples: usize, candidates: usize, turn_states: usize, depth: u32, beam: usize, seed: u64) -> Self {
+        Self { cfg: sim::pimc::Config { samples, candidates, turn_states, depth, beam, seed, peek: false }, plans: vec![None; n] }
+    }
+
+    /// The action index for each of `envs`: the next step of its plan while
+    /// the fight shows what the plan expects, else the first of a new plan
+    /// (made for all such envs in parallel). -1 where there is no plan.
+    fn choose(&mut self, py: Python<'_>, env: PyRef<'_, VecEnv>, envs: Vec<usize>) -> Vec<i64> {
+        use rayon::prelude::*;
+        let inner = &env.inner;
+        let need: Vec<usize> = envs.iter().copied().filter(|&i| !self.follows(inner.combat(i), i)).collect();
+        let roots: Vec<(&sim::combat::Combat, Baseline)> = need.iter().map(|&i| (inner.combat(i), inner.base(i))).collect();
+        let cfg = self.cfg;
+        let fresh: Vec<Option<sim::pimc::Plan>> = py.detach(|| roots.par_iter().map(|&(c, b)| sim::pimc::plan(c, b, &cfg)).collect());
+        for (&i, p) in need.iter().zip(fresh) {
+            self.plans[i] = p.map(|p| (p, 0));
+        }
+        envs.iter()
+            .map(|&i| {
+                let c = inner.combat(i);
+                match &mut self.plans[i] {
+                    Some((p, pos)) if *pos < p.line.len() => {
+                        let a = p.line[*pos];
+                        *pos += 1;
+                        sim::turnsearch::index(c, a).map_or(-1, |x| x as i64)
+                    }
+                    _ => -1,
+                }
+            })
+            .collect()
+    }
+}
+
 /// The share of the enemies' HP a lost fight pays back (`sim::env`), for
 /// the whole process.
 #[pyfunction]
@@ -1307,6 +1362,7 @@ fn _sim(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Forks>()?;
     m.add_class::<TurnPlanner>()?;
     m.add_class::<TreeSearch>()?;
+    m.add_class::<Pimc>()?;
     m.add_function(wrap_pyfunction!(set_loss_damage, m)?)?;
     m.add_function(wrap_pyfunction!(layout, m)?)?;
     m.add_function(wrap_pyfunction!(run_layout, m)?)?;

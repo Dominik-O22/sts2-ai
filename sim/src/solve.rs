@@ -42,6 +42,19 @@ pub struct Solution {
     pub states: u64,
     /// A turn start's enumeration hit `turn_states`.
     pub capped: bool,
+    /// Without a win: the best shaped potential among the turn starts the
+    /// search reached at `max_turns`, negative infinity when every line lost.
+    pub best: f32,
+    /// The same for `race`: the enemies' HP taken plus the player's HP left.
+    pub best_race: f32,
+}
+
+/// How a race stands: the share of the enemies' HP taken plus the share of
+/// the player's HP left (of the fight's starting max). The shaped potential
+/// prices HP at a tenth in boss fights, so a planner scoring by it races
+/// and dies; here staying alive counts as much as hitting.
+pub fn race(c: &Combat, base: Baseline) -> f32 {
+    enemy_hp_taken(c) + c.player.creature.hp.max(0) as f32 / base.max_hp().max(1) as f32
 }
 
 struct Start {
@@ -55,8 +68,13 @@ fn ranks(c: &Combat, base: Baseline) -> [f32; 3] {
 }
 
 pub fn solve(root: &Combat, cfg: &Config) -> Solution {
-    let base = Baseline::of(root);
-    let mut out = Solution::default();
+    solve_with(root, Baseline::of(root), cfg)
+}
+
+/// `solve` with rewards shaped against `base`, the fight's start, so the
+/// frontier scores of searches from different states compare.
+pub fn solve_with(root: &Combat, base: Baseline, cfg: &Config) -> Solution {
+    let mut out = Solution { best: f32::NEG_INFINITY, best_race: f32::NEG_INFINITY, ..Solution::default() };
     let mut frontier = vec![Start { combat: Box::new(root.clone()), line: vec![] }];
     for turn in 0..cfg.max_turns {
         out.turns = turn + 1;
@@ -100,28 +118,36 @@ pub fn solve(root: &Combat, cfg: &Config) -> Solution {
             }
         }
         if next.is_empty() {
-            break;
+            return out;
         }
         frontier = beam(next.into_values().collect(), base, cfg.beam);
     }
+    out.best = frontier.iter().map(|s| potential(&s.combat, base)).fold(f32::NEG_INFINITY, f32::max);
+    out.best_race = frontier.iter().map(|s| race(&s.combat, base)).fold(f32::NEG_INFINITY, f32::max);
     out
 }
 
 /// The union of the best `width / 3` by each rank key.
-fn beam(mut starts: Vec<Start>, base: Baseline, width: usize) -> Vec<Start> {
+fn beam(starts: Vec<Start>, base: Baseline, width: usize) -> Vec<Start> {
     if starts.len() <= width {
         return starts;
     }
-    let keys: Vec<[f32; 3]> = starts.iter().map(|s| ranks(&s.combat, base)).collect();
-    let mut keep = vec![false; starts.len()];
+    let keep = rank_union(starts.iter().map(|s| &*s.combat).collect(), base, width);
+    let mut keep = keep.into_iter().peekable();
+    starts.into_iter().enumerate().filter_map(|(i, s)| (keep.next_if_eq(&i).is_some()).then_some(s)).collect()
+}
+
+/// Indices, ascending, of the union of the best `width / 3` (at least one)
+/// of `states` by each rank key.
+pub(crate) fn rank_union(states: Vec<&Combat>, base: Baseline, width: usize) -> Vec<usize> {
+    let keys: Vec<[f32; 3]> = states.iter().map(|c| ranks(c, base)).collect();
+    let mut keep = vec![false; states.len()];
     for r in 0..3 {
-        let mut idx: Vec<usize> = (0..starts.len()).collect();
+        let mut idx: Vec<usize> = (0..states.len()).collect();
         idx.sort_by(|&a, &b| keys[b][r].total_cmp(&keys[a][r]));
-        idx.iter().take(width / 3).for_each(|&i| keep[i] = true);
+        idx.iter().take((width / 3).max(1)).for_each(|&i| keep[i] = true);
     }
-    let mut k = keep.into_iter();
-    starts.retain(|_| k.next().unwrap());
-    starts
+    (0..states.len()).filter(|&i| keep[i]).collect()
 }
 
 /// Whether `line` played from `root` wins: the check a found line must pass.
