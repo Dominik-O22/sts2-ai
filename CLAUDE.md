@@ -100,6 +100,18 @@ combat checkpoint and search settings drift, and at a 4% win rate 2,048 runs
 only separate differences of about a point. An interval that spans zero is
 noise; say so rather than reading a trend into it.
 
+## Judging a combat checkpoint
+
+`uv run python -m sts2ai.bench NEW.pt --base OLD.pt` plays both on about
+8,850 held-out elite and boss fights (winners', sts2.fun players', and the
+clone's own on fresh seeds) from the same seeds and reports per-fight
+differences by act and kind; greedy at 8 seeds takes minutes and resolves
+about 0.3 points. Greedy is the screen, not the verdict: the pilot searches,
+and an act 3 boss specialist gained 3 points greedy and nothing with the
+hybrid on top. Before calling a checkpoint better, run `--mode hybrid32
+--groups "a3 boss"` (or the groups it targets), then a paired `ab.sh` on
+fresh seeds for the run-level number.
+
 Long jobs (evals, training) run as their own systemd units, never as plain
 children of the session: `ab.sh` puts each arm in a capped scope, and a
 job that must outlive the session starts with `systemd-run --user
