@@ -126,7 +126,7 @@ pub(crate) fn key_of(c: &Combat, clairvoyant: bool) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     c.player.draw.iter().for_each(|k| k.uid.hash(&mut h));
-    format!("{:?}", c.rngs).hash(&mut h);
+    c.rngs.hash(&mut h);
     mix(key, h.finish())
 }
 
@@ -398,5 +398,36 @@ mod tests {
             }
         }
         assert!(t.turns_deep() <= 1, "unlimited widening went {} turns deep", t.turns_deep());
+    }
+
+    /// The clairvoyant key tells apart what the player cannot: the draw
+    /// order and where each dice stream stands. The same state built twice
+    /// keys the same.
+    #[test]
+    fn clairvoyant_key_sees_draw_order_and_dice() {
+        use crate::rng::{CombatRngs, Rng};
+        let c = nibbit(&[CardId::StrikeIronclad, CardId::Bash], 30);
+        assert_eq!(key_of(&c, true), key_of(&nibbit(&[CardId::StrikeIronclad, CardId::Bash], 30), true));
+        let mut swapped = c.clone();
+        let n = swapped.player.draw.len();
+        swapped.player.draw.swap(0, n - 1);
+        assert_eq!(key_of(&swapped, false), key_of(&c, false));
+        assert_ne!(key_of(&swapped, true), key_of(&c, true));
+        let streams: [fn(&mut CombatRngs) -> &mut Rng; 8] = [
+            |r| &mut r.shuffle,
+            |r| &mut r.monster_ai,
+            |r| &mut r.targets,
+            |r| &mut r.niche,
+            |r| &mut r.card_generation,
+            |r| &mut r.card_selection,
+            |r| &mut r.energy_costs,
+            |r| &mut r.potion_generation,
+        ];
+        for (i, stream) in streams.iter().enumerate() {
+            let mut k = c.clone();
+            stream(&mut k.rngs).next_u64();
+            assert_eq!(key_of(&k, false), key_of(&c, false), "stream {i}");
+            assert_ne!(key_of(&k, true), key_of(&c, true), "stream {i}");
+        }
     }
 }
