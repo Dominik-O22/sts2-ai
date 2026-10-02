@@ -1178,12 +1178,106 @@ fn encounter_brief(name: &str, asc: u8) -> PyResult<Vec<(String, Vec<(String, i3
         .collect())
 }
 
+/// Tree searches over whole fights (`sim::mcts`), one per env, run in
+/// lockstep: each `descend` takes one simulation in every listed env and
+/// writes the states they reached for the network, `expand` takes its read.
+#[pyclass]
+struct TreeSearch {
+    cfg: sim::mcts::Config,
+    trees: Vec<Option<sim::mcts::Tree>>,
+    /// Envs whose last `descend` left a leaf, in row order.
+    waiting: Vec<usize>,
+}
+
+#[pymethods]
+impl TreeSearch {
+    #[new]
+    #[pyo3(signature = (n, c_puct=1.25, widen=1.0, widen_exp=0.5, max_depth=200, seed=0))]
+    fn new(n: usize, c_puct: f32, widen: f32, widen_exp: f32, max_depth: u32, seed: u64) -> Self {
+        let cfg = sim::mcts::Config { c_puct, widen, widen_exp, max_depth, seed };
+        Self { cfg, trees: (0..n).map(|_| None).collect(), waiting: vec![] }
+    }
+
+    /// Start a fresh search from each of `envs`' current states.
+    fn start(&mut self, env: PyRef<'_, VecEnv>, envs: Vec<usize>) {
+        for i in envs {
+            self.trees[i] = Some(sim::mcts::Tree::new(env.inner.combat(i), env.inner.base(i), self.cfg));
+        }
+    }
+
+    /// One simulation in each of `envs`, in parallel. The states that need
+    /// the network go into the buffers' first rows; returns their envs in
+    /// row order (fewer than `envs` when simulations ended the fight).
+    fn descend(
+        &mut self,
+        py: Python<'_>,
+        envs: Vec<usize>,
+        mut floats: PyReadwriteArray2<f32>,
+        mut ids: PyReadwriteArray2<i64>,
+        mut mask: PyReadwriteArray2<bool>,
+    ) -> PyResult<Vec<usize>> {
+        use rayon::prelude::*;
+        let (f, i, m) = (floats.as_slice_mut()?, ids.as_slice_mut()?, mask.as_slice_mut()?);
+        let mut wanted = vec![false; self.trees.len()];
+        envs.iter().for_each(|&e| wanted[e] = true);
+        let waiting: Vec<usize> = py.detach(|| {
+            self.trees
+                .par_iter_mut()
+                .enumerate()
+                .filter(|(e, t)| wanted[*e] && t.is_some())
+                .filter_map(|(e, t)| t.as_mut().unwrap().descend().then_some(e))
+                .collect()
+        });
+        if waiting.len() * N_FLOATS > f.len() {
+            return Err(pyo3::exceptions::PyValueError::new_err("buffers too small for the envs"));
+        }
+        let leaves: Vec<&sim::combat::Combat> = waiting.iter().map(|&e| self.trees[e].as_ref().unwrap().leaf().unwrap()).collect();
+        py.detach(|| sim::turnsearch::encode_all(&leaves, f, i, m));
+        self.waiting = waiting.clone();
+        Ok(waiting)
+    }
+
+    /// The network's read of the last `descend`'s leaves, row for row:
+    /// `priors [rows, N_ACTIONS]` (probabilities) and `values [rows]`.
+    fn expand(&mut self, priors: PyReadonlyArray2<f32>, values: PyReadonlyArray1<f32>) -> PyResult<()> {
+        let (p, v) = (priors.as_slice()?, values.as_slice()?);
+        if v.len() != self.waiting.len() {
+            return Err(pyo3::exceptions::PyValueError::new_err("one value per waiting leaf"));
+        }
+        for (row, &e) in self.waiting.iter().enumerate() {
+            self.trees[e].as_mut().unwrap().expand(&p[row * N_ACTIONS..][..N_ACTIONS], v[row]);
+        }
+        self.waiting.clear();
+        Ok(())
+    }
+
+    /// (action index, visits, mean return) for env `i`'s root actions.
+    fn root_stats(&self, i: usize) -> Vec<(usize, u32, f32)> {
+        self.trees[i].as_ref().map_or(vec![], |t| t.root_stats())
+    }
+
+    /// Env `i`'s most visited root action.
+    fn best_action(&self, i: usize) -> Option<usize> {
+        self.trees[i].as_ref()?.best_action()
+    }
+
+    fn n_nodes(&self, i: usize) -> usize {
+        self.trees[i].as_ref().map_or(0, |t| t.n_nodes())
+    }
+
+    /// Player turns past the root's that env `i`'s tree reaches.
+    fn turns_deep(&self, i: usize) -> u32 {
+        self.trees[i].as_ref().map_or(0, |t| t.turns_deep())
+    }
+}
+
 #[pymodule]
 fn _sim(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<VecEnv>()?;
     m.add_class::<Advisor>()?;
     m.add_class::<Forks>()?;
     m.add_class::<TurnPlanner>()?;
+    m.add_class::<TreeSearch>()?;
     m.add_function(wrap_pyfunction!(layout, m)?)?;
     m.add_function(wrap_pyfunction!(run_layout, m)?)?;
     m.add_function(wrap_pyfunction!(run_names, m)?)?;
