@@ -35,7 +35,8 @@ pub struct Config {
     /// Exploration weight in PUCT.
     pub c_puct: f32,
     /// Distinct outcomes an action may have: `widen * visits^widen_exp`,
-    /// at least one.
+    /// at least one. Off (infinite) by default: on held-out act 3 bosses
+    /// widening at 1 searched worse than none (74.8% vs 77.5% won).
     pub widen: f32,
     pub widen_exp: f32,
     /// Steps a simulation may take before its state is scored as a leaf.
@@ -45,7 +46,7 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        Self { c_puct: 1.25, widen: 1.0, widen_exp: 0.5, max_depth: 200, seed: 0 }
+        Self { c_puct: 1.25, widen: f32::INFINITY, widen_exp: 0.5, max_depth: 200, seed: 0 }
     }
 }
 
@@ -332,8 +333,17 @@ mod tests {
         let enemies = [EnemySpec { id: MonsterId::Nibbit, flags: Flags { is_alone: true, ..Default::default() } }];
         let mut c = Combat::new(&deck, 80, 80, 3, &enemies, Ascension(10), 7);
         c.enemies[0].creature.hp = 300;
-        assert!(search(&c, 400, 5).turns_deep() >= 2, "the tree stayed within {} turns", search(&c, 400, 5).turns_deep());
-        let mut t = Tree::new(&c, Baseline::of(&c), Config { widen: 1e9, seed: 5, ..Config::default() });
+        let widened = |widen| {
+            let mut t = Tree::new(&c, Baseline::of(&c), Config { widen, seed: 5, ..Config::default() });
+            for _ in 0..400 {
+                if t.descend() {
+                    t.expand(&[1.0 / N_ACTIONS as f32; N_ACTIONS], 0.0);
+                }
+            }
+            t.turns_deep()
+        };
+        assert!(widened(1.0) >= 2, "the widened tree stayed within {} turns", widened(1.0));
+        let mut t = Tree::new(&c, Baseline::of(&c), Config { seed: 5, ..Config::default() });
         for _ in 0..400 {
             if t.descend() {
                 t.expand(&[1.0 / N_ACTIONS as f32; N_ACTIONS], 0.0);

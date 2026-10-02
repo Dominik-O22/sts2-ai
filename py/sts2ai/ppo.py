@@ -95,10 +95,14 @@ class Config:
     search_buffer: int = 16384
     search_warmup: int = 4096
     # Expert iteration with a stronger teacher than that search: an
-    # `sts2ai.expert` file of the hybrid search's decisions on hard fights,
-    # each a one-hot target in the same cross-entropy, at `expert_coef`.
+    # `sts2ai.expert` file of a search's targets on hard fights (the tree
+    # search's visit distributions), in the same cross-entropy, at
+    # `expert_coef`, `expert_rows` rows a minibatch. The file is fixed, so
+    # rows a minibatch sets how many times the run sees each: at 512 a
+    # 45k-row file was memorized within 300 iterations.
     expert: Path | None = None
     expert_coef: float = 0.5
+    expert_rows: int = 32
     # Wait for each iteration's search instead of letting a slow one run
     # on through the next iteration (which then starts none): one search
     # per iteration, at the search's speed.
@@ -278,13 +282,10 @@ class SearchTargets:
 
     @classmethod
     def from_expert(cls, path: Path, layout, device: torch.device) -> SearchTargets:
-        """An `sts2ai.expert` file, its actions as one-hot targets."""
+        """An `sts2ai.expert` file's targets."""
         d = np.load(path)
-        n = len(d["action"])
-        target = np.zeros((n, layout.n_actions), np.float32)
-        target[np.arange(n), d["action"]] = 1.0
-        out = cls(n, layout, device)
-        out.add(d["floats"], d["ids"].astype(np.int64), d["mask"], target)
+        out = cls(len(d["action"]), layout, device)
+        out.add(d["floats"], d["ids"].astype(np.int64), d["mask"], d["target"])
         return out
 
 
@@ -554,7 +555,7 @@ def train(cfg: Config) -> Policy:
                     if warm:
                         losses["search"] += ce.detach()
                 if expert is not None:
-                    ce = target_ce(expert, mb // 8)
+                    ce = target_ce(expert, cfg.expert_rows)
                     loss = loss + cfg.expert_coef * ce
                     losses["expert"] += ce.detach()
                 opt.zero_grad(set_to_none=True)

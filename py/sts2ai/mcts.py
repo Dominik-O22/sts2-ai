@@ -4,9 +4,15 @@ the network in one batch across every fight searched.
 
 `exactsearch.play`, and with it `sts2ai.bench` and the probes, runs it as
 mode `mctsN`: N simulations per decision, the most visited action played.
+Widening at chance is off by default: on the 350 held-out act 3 boss fights
+256 simulations won 77.5% without it and 74.8% with `widen=1`, a tree that
+goes deeper through a few sampled next hands judging worse than one that
+samples a new hand each time and lets the value head take it from there.
 """
 
 from __future__ import annotations
+
+import math
 
 import numpy as np
 import torch
@@ -19,7 +25,7 @@ from sts2ai.model import Net, masked_logits
 class TreeSearch:
     """`sims` simulations per decision for the fights of an `Envs`."""
 
-    def __init__(self, envs: Envs, sims: int, c_puct: float = 1.25, widen: float = 1.0, seed: int = 0):
+    def __init__(self, envs: Envs, sims: int, c_puct: float = 1.25, widen: float = math.inf, seed: int = 0):
         self.envs, self.sims = envs, sims
         self.inner = _sim.TreeSearch(envs.n, c_puct=c_puct, widen=widen, seed=seed)
         # Turns past the decision the trees reached, summed, and decisions.
@@ -28,6 +34,13 @@ class TreeSearch:
         self.floats = torch.zeros((envs.n, L.n_floats), pin_memory=pin)
         self.ids = torch.zeros((envs.n, L.n_ids), dtype=torch.int64, pin_memory=pin)
         self.mask = torch.zeros((envs.n, L.n_actions), dtype=torch.bool, pin_memory=pin)
+
+    def visits(self, i: int) -> np.ndarray:
+        """Env `i`'s root visit counts over the action space, after `choose`."""
+        out = np.zeros(self.mask.shape[1], np.float32)
+        for a, n, _ in self.inner.root_stats(i):
+            out[a] = n
+        return out
 
     @torch.no_grad()
     def choose(self, net: Net, device: torch.device, roots: list[int], actions: np.ndarray) -> None:
