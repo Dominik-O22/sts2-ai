@@ -258,6 +258,22 @@ mod tests {
         assert_eq!(c.player.creature.power_amount(PowerId::Frail), 1);
     }
 
+    /// `CardPileCmd.Add` to a full hand lands in the discard instead, and
+    /// Aggression upgrades the card either way (`AggressionPower`).
+    #[test]
+    fn aggression_past_a_full_hand_leaves_the_rest_in_discard() {
+        use crate::card::Card;
+        let mut c = fight(&[one(MonsterId::Nibbit)], 5);
+        c.player.hand.clear();
+        c.player.draw.clear();
+        c.player.discard = (0..14).map(|uid| Card::new(930 + uid, ids::CardId::StrikeIronclad, false)).collect();
+        c.player.creature.powers.push(Power::new(PowerId::Aggression, 14));
+        c.step(Action::EndTurn);
+        assert_eq!(c.player.hand.len(), combat::MAX_HAND);
+        assert_eq!(c.player.discard.len(), 4);
+        assert!(c.player.hand.iter().chain(&c.player.discard).all(|k| k.upgraded));
+    }
+
     /// Normality vetoes from hand, so it costs a play without ever being one.
     #[test]
     fn normality_stops_the_fourth_card_each_turn() {

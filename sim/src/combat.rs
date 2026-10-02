@@ -1861,7 +1861,8 @@ impl Combat {
                         if card.upgradable() {
                             card.upgraded = true;
                         }
-                        self.player.hand.push(card);
+                        // A full hand sends it back to the discard (`CardPileCmd.Add`).
+                        self.put_card(card, Pile::Hand);
                     }
                 }
             }
