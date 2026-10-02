@@ -930,6 +930,8 @@ impl Slot {
             if matches!(setup.encounter.kind(), Kind::Elite | Kind::Boss) {
                 let mut start = setup.run_json();
                 start["act"] = (run.run.state.act as u32).into();
+                // Joins the record to its run's outcome (`runplay --runs-out`).
+                start["seed"] = run.seed.into();
                 log.push(start.to_string());
             }
         }
