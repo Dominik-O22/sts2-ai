@@ -220,8 +220,21 @@ fn potion_value(c: &Combat) -> f32 {
 /// value head read a fight as lost the policy stopped trying (it ended turns
 /// with Defends in hand against Aeonglass), and search, which scores lines
 /// by the same rewards and value, tied every option there. The best loss
-/// still pays -0.8, far under any win.
-const LOSS_DAMAGE: f32 = 0.2;
+/// still pays -0.8, far under any win. At 0.2 a turn of damage on a 500 HP
+/// boss still pays about 0.02, under the value head's noise, so the weight
+/// is a process-wide setting (`set_loss_damage`, `ppo.Config.loss_damage`)
+/// while that is tested; the f32's bits, 0.2 by default.
+static LOSS_DAMAGE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x3E4C_CCCD);
+
+/// Set the share of the enemies' HP a loss pays back, for every fight and
+/// search in the process. Below 0.5 every win still beats every loss.
+pub fn set_loss_damage(w: f32) {
+    LOSS_DAMAGE.store(w.to_bits(), std::sync::atomic::Ordering::Relaxed);
+}
+
+fn loss_damage() -> f32 {
+    f32::from_bits(LOSS_DAMAGE.load(std::sync::atomic::Ordering::Relaxed))
+}
 
 /// Stopgap terminal reward (DESIGN.md, Decision engine): a win is worth 1
 /// plus the HP fraction kept at `hp_weight`, the max HP gained or lost at
@@ -238,7 +251,7 @@ pub fn terminal_reward(c: &Combat, base: Baseline) -> f32 {
             let max = (c.player.creature.max_hp - base.max_hp) as f32 / start_max;
             1.0 + hp_weight(c) * hp + max_hp_value(c) * max + potion_value(c) * potions_held(c) as f32
         }
-        _ => -1.0 + LOSS_DAMAGE * enemy_hp_taken(c).min(1.0),
+        _ => -1.0 + loss_damage() * enemy_hp_taken(c).min(1.0),
     }
 }
 
@@ -287,7 +300,7 @@ pub struct Baseline {
 /// full HP would otherwise make its killing blow cost reward, and the
 /// policy learned to leave the Test Subject at 21 HP rather than kill it.
 /// It can pass 1 in a fight with revives or summons.
-fn enemy_hp_taken(c: &Combat) -> f32 {
+pub(crate) fn enemy_hp_taken(c: &Combat) -> f32 {
     c.stats.enemy_hp_lost as f32 / c.stats.enemy_start_hp.max(1) as f32
 }
 

@@ -122,6 +122,27 @@ impl VecEnv {
         Forks { inner: InnerForks::of(&roots, &bases, n, groups, seed, depth) }
     }
 
+    /// Solve each of `envs`' fights from its current state with its real
+    /// future known (`sim::solve`, a measuring instrument: it reads the
+    /// dice), in parallel. Per env: (a win found and replayed, turns
+    /// searched, states, whether a turn's enumeration was capped).
+    #[pyo3(signature = (envs, beam=300, turn_states=3000, max_turns=40))]
+    fn solve(&self, py: Python<'_>, envs: Vec<usize>, beam: usize, turn_states: usize, max_turns: u32) -> Vec<(bool, u32, u64, bool)> {
+        use rayon::prelude::*;
+        let cfg = sim::solve::Config { beam, turn_states, max_turns };
+        let roots: Vec<&sim::combat::Combat> = envs.iter().map(|&i| self.inner.combat(i)).collect();
+        py.detach(|| {
+            roots
+                .par_iter()
+                .map(|&root| {
+                    let s = sim::solve::solve(root, &cfg);
+                    let won = s.line.as_ref().is_some_and(|l| sim::solve::replays(root, l));
+                    (won, s.turns, s.states, s.capped)
+                })
+                .collect()
+        })
+    }
+
     /// (encounter, kind) of env `i`'s current fight.
     fn fight(&self, i: usize) -> (String, String) {
         let s = self.inner.setup(i);
@@ -1192,9 +1213,10 @@ struct TreeSearch {
 #[pymethods]
 impl TreeSearch {
     #[new]
-    #[pyo3(signature = (n, c_puct=1.25, widen=1.0, widen_exp=0.5, max_depth=200, seed=0))]
-    fn new(n: usize, c_puct: f32, widen: f32, widen_exp: f32, max_depth: u32, seed: u64) -> Self {
-        let cfg = sim::mcts::Config { c_puct, widen, widen_exp, max_depth, seed };
+    #[pyo3(signature = (n, c_puct=1.25, widen=f32::INFINITY, widen_exp=0.5, max_depth=200, seed=0, clairvoyant=false))]
+    #[allow(clippy::too_many_arguments)]
+    fn new(n: usize, c_puct: f32, widen: f32, widen_exp: f32, max_depth: u32, seed: u64, clairvoyant: bool) -> Self {
+        let cfg = sim::mcts::Config { c_puct, widen, widen_exp, max_depth, seed, clairvoyant };
         Self { cfg, trees: (0..n).map(|_| None).collect(), waiting: vec![] }
     }
 
@@ -1271,6 +1293,13 @@ impl TreeSearch {
     }
 }
 
+/// The share of the enemies' HP a lost fight pays back (`sim::env`), for
+/// the whole process.
+#[pyfunction]
+fn set_loss_damage(w: f32) {
+    sim::env::set_loss_damage(w);
+}
+
 #[pymodule]
 fn _sim(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<VecEnv>()?;
@@ -1278,6 +1307,7 @@ fn _sim(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Forks>()?;
     m.add_class::<TurnPlanner>()?;
     m.add_class::<TreeSearch>()?;
+    m.add_function(wrap_pyfunction!(set_loss_damage, m)?)?;
     m.add_function(wrap_pyfunction!(layout, m)?)?;
     m.add_function(wrap_pyfunction!(run_layout, m)?)?;
     m.add_function(wrap_pyfunction!(run_names, m)?)?;

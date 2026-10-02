@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import random
 import re
 import time
@@ -302,13 +303,20 @@ def play(policy: Net, device: torch.device, lines: list[str], mode: str, seed: i
     """Play each fight in `lines` (setups as `sts2ai.setups` writes them)
     once: `greedy`, `forks` (the current search), `exact`, `hybridP` (the
     hybrid at P playouts per line), `raceP` (with races of `race`) or
-    `mctsN` (the tree search, `sts2ai.mcts`, N simulations a decision)."""
+    `mctsN` (the tree search, `sts2ai.mcts`, N simulations a decision) or
+    `mctswN` (the same with progressive widening at chance) or `mctscN`
+    (clairvoyant: it reads the fight's real dice, to measure which fights
+    are winnable at all, never to play)."""
     envs = Envs(len(lines), seed=seed)
     envs.sim.use_setups("\n".join(lines), 1, seed)
     envs.sim.observe(envs.floats, envs.ids, envs.mask)
     planner = Planner(envs, seed=seed, **config) if mode == "exact" else None
     hybrid = None
-    tree = TreeSearch(envs, int(m[1]), seed=seed) if (m := re.fullmatch(r"mcts(\d+)", mode)) else None
+    tree = (
+        TreeSearch(envs, int(m[2]), widen=1.0 if m[1] == "w" else math.inf, seed=seed, clairvoyant=m[1] == "c")
+        if (m := re.fullmatch(r"mcts(w|c|)(\d+)", mode))
+        else None
+    )
     if m := re.fullmatch(r"(hybrid|race)(\d+)", mode):
         hybrid = Hybrid(envs, top, int(m[2]), race if m[1] == "race" else 0, seed, **config)
         planner = hybrid.planner

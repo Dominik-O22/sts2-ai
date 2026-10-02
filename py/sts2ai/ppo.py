@@ -22,6 +22,7 @@ import torch
 from torch import Tensor
 from torch.utils.tensorboard import SummaryWriter
 
+from sts2ai import _sim
 from sts2ai.env import ASCENSION, DEFAULT_RECORDINGS, End, Envs, has_recordings
 from sts2ai.evaluate import easy, evaluate
 from sts2ai.model import Arch, Policy, build_policy, checkpoint_arch, checkpoint_layout, checkpoint_vocab, load_state, masked_logits, warm_start
@@ -103,6 +104,10 @@ class Config:
     expert: Path | None = None
     expert_coef: float = 0.5
     expert_rows: int = 32
+    # The share of the enemies' HP a lost fight pays back (`sim::env`
+    # terminal_reward). At 0.2 a turn of damage in a lost boss fight pays
+    # about 0.02, under the value head's noise, so lost fights are flat.
+    loss_damage: float = 0.2
     # Wait for each iteration's search instead of letting a slow one run
     # on through the next iteration (which then starts none): one search
     # per iteration, at the search's speed.
@@ -370,6 +375,7 @@ def save_checkpoint(path: Path, policy: Policy, opt: torch.optim.Optimizer, it: 
 def train(cfg: Config) -> Policy:
     torch.manual_seed(cfg.seed)
     np.random.seed(cfg.seed)
+    _sim.set_loss_damage(cfg.loss_damage)
     device = torch.device(cfg.device)
     envs = Envs(cfg.envs, seed=cfg.seed, max_floor=cfg.floor_start)
     if cfg.real_setups:

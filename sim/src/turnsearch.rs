@@ -36,16 +36,21 @@ use std::fmt::Write as _;
 use std::time::Instant;
 
 use rayon::prelude::*;
+use smallvec::SmallVec;
 
 use crate::card::Card;
-use crate::combat::{Action, Combat};
+use crate::enchant::Enchantment;
+use crate::combat::{self, Action, After, Combat, Creature, Enemy, Pending, PlayerCombat, RoomKind};
+use crate::effect::{CardFilter, Picked, Pile, Then};
 use crate::encode::{self, N_ACTIONS};
 use crate::env::{potential, step_reward, Baseline};
-use crate::ids::PowerId;
-use crate::potion::Target as PotionTarget;
-use crate::relic::RelicId;
+use crate::ids::{MonsterId, PowerId};
+use crate::monster::{Flags, Monster, Vars};
+use crate::potion::{PotionId, Target as PotionTarget};
+use crate::power::Power;
+use crate::relic::{Relic, RelicId};
 use crate::rng::{CombatRngs, Rng};
-use crate::types::CardType;
+use crate::types::{CardType, CreatureRef, Side};
 
 #[derive(Clone, Copy, Debug)]
 pub struct Config {
@@ -221,8 +226,8 @@ fn mix(a: u64, b: u64) -> u64 {
 /// they were rolled nothing.
 const PROBE: u64 = 0x5EA2_C4ED;
 
-/// FxHash-style hasher that also takes `Debug` output, so whole structs
-/// hash without listing their fields (a field added later is covered).
+/// FxHash-style hasher. It also takes `Debug` text, which only the
+/// per-action sample seeds use: `state_key` hashes field by field.
 #[derive(Default)]
 struct Fx(u64);
 
@@ -247,13 +252,291 @@ impl std::fmt::Write for Fx {
     }
 }
 
-/// Everything about a card but its uid.
+/// Everything about a card but its uid. Hashed field by field, about 40x
+/// faster than its Debug text (the solver keys every state it reaches);
+/// `Card` and `Enchantment` are destructured whole, so a field added to
+/// either is a compile error here until it is hashed.
 fn card_fp(k: &Card) -> u64 {
-    let mut k = k.clone();
-    k.uid = 0;
+    let Card {
+        uid: _,
+        id,
+        upgraded,
+        cost_this_turn,
+        cost_this_combat,
+        captured_x,
+        exhaust_on_next_play,
+        extra_damage,
+        ethereal_added,
+        replay,
+        smogged,
+        enchantment,
+        retain_added,
+        dupe,
+        affliction,
+        dampened,
+    } = k;
     let mut h = Fx::default();
-    let _ = write!(h, "{k:?}");
+    let flags = [*upgraded, *exhaust_on_next_play, *ethereal_added, *smogged, *retain_added, *dupe, *dampened];
+    h.word(*id as u64);
+    h.word(flags.iter().enumerate().fold(0, |acc, (i, &f)| acc | (f as u64) << i));
+    for cost in [cost_this_turn, cost_this_combat] {
+        h.word(cost.map_or(u64::MAX, |c| c as u32 as u64));
+    }
+    h.word(*captured_x as u32 as u64 | (*replay as u64) << 32);
+    h.word(extra_damage.to_bits());
+    match enchantment {
+        Some(Enchantment { id, amount, disabled, data }) => {
+            h.word(*id as u64 | (*disabled as u64) << 32);
+            h.word(*amount as u32 as u64 | (*data as u32 as u64) << 32);
+        }
+        None => h.word(u64::MAX),
+    }
+    h.word(affliction.map_or(0, |a| a as u64 + 1));
     h.finish()
+}
+
+/// A part of the state that `state_key` hashes field by field. Each impl
+/// destructures its type whole, so a field added later is a compile error
+/// here until it is hashed or deliberately left out.
+trait Fp {
+    fn fp(&self, h: &mut Fx);
+}
+
+// Casting an enum that carries a payload is a compile error, so these stay
+// fieldless or move to a `match`.
+macro_rules! fp_as_word {
+    ($($t:ty),*) => {
+        $(impl Fp for $t {
+            fn fp(&self, h: &mut Fx) {
+                h.word(*self as u64);
+            }
+        })*
+    };
+}
+
+fp_as_word!(bool, u8, i32, u32, i64, usize, u64, Side, combat::Outcome, RoomKind, After, PotionId, MonsterId, PowerId, RelicId, CardType, Pile, Picked);
+
+impl<T: Fp> Fp for Option<T> {
+    fn fp(&self, h: &mut Fx) {
+        match self {
+            Some(x) => {
+                h.word(1);
+                x.fp(h);
+            }
+            None => h.word(0),
+        }
+    }
+}
+
+impl<T: Fp> Fp for [T] {
+    fn fp(&self, h: &mut Fx) {
+        h.word(self.len() as u64);
+        self.iter().for_each(|x| x.fp(h));
+    }
+}
+
+impl<T: Fp> Fp for Vec<T> {
+    fn fp(&self, h: &mut Fx) {
+        self[..].fp(h);
+    }
+}
+
+impl<T: Fp + ?Sized> Fp for &T {
+    fn fp(&self, h: &mut Fx) {
+        (**self).fp(h);
+    }
+}
+
+impl Fp for str {
+    fn fp(&self, h: &mut Fx) {
+        h.word(self.len() as u64);
+        for chunk in self.as_bytes().chunks(8) {
+            let mut b = [0u8; 8];
+            b[..chunk.len()].copy_from_slice(chunk);
+            h.word(u64::from_le_bytes(b));
+        }
+    }
+}
+
+impl Fp for CreatureRef {
+    fn fp(&self, h: &mut Fx) {
+        match *self {
+            CreatureRef::Player => h.word(0),
+            CreatureRef::Enemy(i) => h.word(1 + i as u64),
+        }
+    }
+}
+
+impl Fp for CardFilter {
+    fn fp(&self, h: &mut Fx) {
+        match *self {
+            CardFilter::Any => h.word(0),
+            CardFilter::Type(t) => {
+                h.word(1);
+                t.fp(h);
+            }
+            CardFilter::NotType(t) => {
+                h.word(2);
+                t.fp(h);
+            }
+            CardFilter::PlayableAttack => h.word(3),
+            CardFilter::CostsEnergy => h.word(4),
+            CardFilter::AttackOrPower => h.word(5),
+        }
+    }
+}
+
+impl Fp for Then {
+    fn fp(&self, h: &mut Fx) {
+        match *self {
+            Then::Exhaust => h.word(0),
+            Then::Upgrade => h.word(1),
+            Then::MoveTo(pile) => {
+                h.word(2);
+                pile.fp(h);
+            }
+            Then::FreeThisCombat => h.word(3),
+            Then::ToHandFreeThisTurn => h.word(4),
+            Then::TakeOffer => h.word(5),
+            Then::ExhaustMany => h.word(6),
+            Then::DiscardThenDraw { picked } => {
+                h.word(7);
+                picked.fp(h);
+            }
+            Then::CloneToHand { copies } => {
+                h.word(8);
+                copies.fp(h);
+            }
+            Then::ToHandMany { left } => {
+                h.word(9);
+                left.fp(h);
+            }
+            Then::Select { from, filter, left, optional, done } => {
+                h.word(10);
+                from.fp(h);
+                filter.fp(h);
+                left.fp(h);
+                optional.fp(h);
+                done.fp(h);
+            }
+            Then::TransformPick { left } => {
+                h.word(11);
+                left.fp(h);
+            }
+        }
+    }
+}
+
+impl Fp for Power {
+    fn fp(&self, h: &mut Fx) {
+        let Power { id, amount, skip_next_tick, data, applier } = self;
+        id.fp(h);
+        amount.fp(h);
+        skip_next_tick.fp(h);
+        data.fp(h);
+        applier.fp(h);
+    }
+}
+
+impl Fp for Creature {
+    fn fp(&self, h: &mut Fx) {
+        let Creature { hp, max_hp, block, powers } = self;
+        hp.fp(h);
+        max_hp.fp(h);
+        block.fp(h);
+        // The list only: the id set beside it is derived from it.
+        powers[..].fp(h);
+    }
+}
+
+impl Fp for Flags {
+    fn fp(&self, h: &mut Fx) {
+        let Flags { is_front, is_alone, middle, starts_with_dance, start_stunned, slot, starter_move, hp_reduction, scream_first, stock } = self;
+        for b in [is_front, is_alone, middle, starts_with_dance, start_stunned, scream_first] {
+            b.fp(h);
+        }
+        for x in [slot, starter_move, hp_reduction] {
+            x.fp(h);
+        }
+        stock.fp(h);
+    }
+}
+
+impl Fp for Vars {
+    fn fp(&self, h: &mut Fx) {
+        let Vars {
+            turns_until_summonable,
+            call_for_backup_count,
+            pressure_gun_damage,
+            steam_eruption_damage,
+            off_balance,
+            curses_given,
+            stock,
+            beetle_charged,
+            amalgam_died,
+            respawns,
+            extra_claws,
+            wither_upgrades,
+            extra_strength,
+            own_dex,
+            last_spawned,
+        } = self;
+        for x in [
+            turns_until_summonable,
+            call_for_backup_count,
+            pressure_gun_damage,
+            steam_eruption_damage,
+            curses_given,
+            stock,
+            respawns,
+            extra_claws,
+            wither_upgrades,
+            extra_strength,
+            own_dex,
+        ] {
+            x.fp(h);
+        }
+        for b in [off_balance, beetle_charged, amalgam_died] {
+            b.fp(h);
+        }
+        last_spawned.fp(h);
+    }
+}
+
+impl Fp for Monster {
+    fn fp(&self, h: &mut Fx) {
+        // The private rest is the move graph and the place in it: of that,
+        // only the next move is known.
+        let Monster { id, flags, vars, next_move, spawned_this_turn, .. } = self;
+        id.fp(h);
+        flags.fp(h);
+        vars.fp(h);
+        next_move.fp(h);
+        self.next_move_name().fp(h);
+        spawned_this_turn.fp(h);
+    }
+}
+
+impl Fp for Enemy {
+    fn fp(&self, h: &mut Fx) {
+        let Enemy { creature, monster, slot, reviving, escaped } = self;
+        creature.fp(h);
+        monster.fp(h);
+        slot.fp(h);
+        reviving.fp(h);
+        escaped.fp(h);
+    }
+}
+
+impl Fp for Relic {
+    fn fp(&self, h: &mut Fx) {
+        let Relic { id, counter, combat_counter, scratch, used } = self;
+        id.fp(h);
+        counter.fp(h);
+        combat_counter.fp(h);
+        scratch.fp(h);
+        used.fp(h);
+    }
 }
 
 /// The state as the player can know it: two states with one key play the
@@ -265,6 +548,170 @@ fn card_fp(k: &Card) -> u64 {
 /// choice is open (the card in play and the choice stand for it), and the
 /// monsters' move-graph position beyond the next move.
 pub fn state_key(c: &Combat) -> u64 {
+    // The private rest is the effect queue, the uid counter and the setup flag.
+    let Combat {
+        player,
+        enemies,
+        order,
+        round,
+        side,
+        asc: _,
+        gold,
+        rngs: _,
+        outcome,
+        pending,
+        stats,
+        relics,
+        room,
+        after,
+        potions,
+        script: _,
+        shuffle_log: _,
+        ..
+    } = c;
+    let PlayerCombat { creature, hand, draw, discard, exhaust, play, offer, energy, base_max_energy, turn } = player;
+    let mut h = Fx::default();
+    // A uid as the card it names, the same for two copies alike.
+    let canon = |uid: u32| -> u32 {
+        c.find_card(uid).or_else(|| offer.iter().find(|k| k.uid == uid)).map_or(uid | 1 << 31, |k| card_fp(k) as u32 & !(1 << 31))
+    };
+    let uids = |h: &mut Fx, list: &[u32]| {
+        let mut v: SmallVec<[u32; 16]> = list.iter().map(|&u| canon(u)).collect();
+        v.sort_unstable();
+        v[..].fp(h);
+    };
+    creature.fp(&mut h);
+    for x in [energy, base_max_energy] {
+        x.fp(&mut h);
+    }
+    for x in [turn, round] {
+        x.fp(&mut h);
+    }
+    gold.fp(&mut h);
+    for pile in [hand, draw, discard, exhaust, play, offer] {
+        let mut fps: SmallVec<[u64; 64]> = pile.iter().map(card_fp).collect();
+        fps.sort_unstable();
+        fps[..].fp(&mut h);
+    }
+    enemies.fp(&mut h);
+    order.fp(&mut h);
+    side.fp(&mut h);
+    outcome.fp(&mut h);
+    relics[..].fp(&mut h);
+    potions.fp(&mut h);
+    after.fp(&mut h);
+    room.fp(&mut h);
+    match pending {
+        Some(Pending { options, then, can_skip }) => {
+            h.word(1);
+            uids(&mut h, options);
+            then.fp(&mut h);
+            can_skip.fp(&mut h);
+        }
+        None => h.word(0),
+    }
+    let combat::Stats {
+        enemy_hp_lost,
+        enemy_start_hp,
+        player_start_hp,
+        start_potions,
+        skittish_pending,
+        exhausted_this_turn,
+        hp_lost_this_turn,
+        unblocked_hits_taken,
+        block_plays_this_turn,
+        rupture_pending,
+        cards_played_this_turn,
+        skill_played_this_turn,
+        manual_plays_this_turn,
+        last_card,
+        last_turn_card,
+        offer_free,
+        extra_turn,
+        deck_size,
+        offer_disintegration,
+        wounds_pending,
+        bound_played,
+        rebound,
+        attack_skill_plays_this_turn,
+        nostalgia_top,
+        strangle_pending,
+        hatchets_played,
+        hatchets_played_last_turn,
+        selected,
+        card_plays_finished,
+        finished_this_turn,
+        finished_last_turn,
+        transform_picks,
+        // Read in the effect that set them.
+        last_drawn: _,
+        card_dealt: _,
+        last_card_hit: _,
+        last_block_gained: _,
+        // Only the replay reads these.
+        random_draw_inserts: _,
+        transformed: _,
+        transform_carried: _,
+        procured_potions: _,
+        random_choice: _,
+        gem_pick: _,
+        cracked: _,
+        hp_rerolled: _,
+    } = stats;
+    for x in [enemy_hp_lost, enemy_start_hp] {
+        x.fp(&mut h);
+    }
+    for x in [player_start_hp, rupture_pending, offer_disintegration] {
+        x.fp(&mut h);
+    }
+    for x in [
+        start_potions,
+        exhausted_this_turn,
+        unblocked_hits_taken,
+        cards_played_this_turn,
+        manual_plays_this_turn,
+        deck_size,
+        wounds_pending,
+        attack_skill_plays_this_turn,
+        card_plays_finished,
+    ] {
+        x.fp(&mut h);
+    }
+    for b in [hp_lost_this_turn, skill_played_this_turn, offer_free, extra_turn, bound_played] {
+        b.fp(&mut h);
+    }
+    skittish_pending.fp(&mut h);
+    // Only History Course replays the last card.
+    let history = relics.has(RelicId::HistoryCourse);
+    for k in [last_card, last_turn_card] {
+        k.as_ref().filter(|_| history).map(card_fp).fp(&mut h);
+    }
+    for list in [
+        &block_plays_this_turn[..],
+        &finished_this_turn[..],
+        &finished_last_turn[..],
+        &hatchets_played[..],
+        &hatchets_played_last_turn[..],
+        &rebound[..],
+        &nostalgia_top[..],
+        &selected[..],
+        &transform_picks[..],
+    ] {
+        uids(&mut h, list);
+    }
+    h.word(strangle_pending.len() as u64);
+    for &(uid, enemy, amount) in strangle_pending {
+        canon(uid).fp(&mut h);
+        enemy.fp(&mut h);
+        amount.fp(&mut h);
+    }
+    h.finish()
+}
+
+/// The Debug-text key `state_key` replaced, kept to prove the two split
+/// states the same way.
+#[cfg(test)]
+fn state_key_debug(c: &Combat) -> u64 {
     let mut h = Fx::default();
     let canon = |uid: u32| -> u32 {
         c.find_card(uid).or_else(|| c.player.offer.iter().find(|k| k.uid == uid)).map_or(uid | 1 << 31, |k| card_fp(k) as u32 & !(1 << 31))
@@ -1097,5 +1544,106 @@ mod tests {
             assert_eq!(root_values(a, &c), root_values(b, &other));
         }
         assert!(drawn > 0 && sampled > 0, "the roots never drew ({drawn}) or rolled dice ({sampled}) mid-turn");
+    }
+
+    const SETUP_FILES: [&str; 3] = ["runs/act3boss/holdout.jsonl", "runs/act3boss/winners.jsonl", ".local/share/SlayTheSpire2/sts2ai/tracker/setups/holdout.jsonl"];
+
+    /// The played-run fight files present here: the repo's under the repo
+    /// root, the tracker's under the home directory.
+    fn setup_files() -> Vec<std::path::PathBuf> {
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let home = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default());
+        SETUP_FILES.iter().map(|f| if f.starts_with("runs/") { repo.join(f) } else { home.join(f) }).filter(|p| p.exists()).collect()
+    }
+
+    /// Every state random play reaches in the fights of `files`, and from
+    /// each, two cards played in both orders: `f` sees all of them, the
+    /// two orders' ends as `f(x, Some(true))` then `f(y, Some(false))`.
+    fn sample_states(files: &[std::path::PathBuf], mut f: impl FnMut(&Combat, Option<bool>)) {
+        let ids = crate::replay::Ids::new();
+        let mut rng = Rng::new(0x5A3E);
+        let play = |c: &Combat, cards: [(u32, Option<usize>); 2]| -> Option<Combat> {
+            let mut k = c.clone();
+            for (uid, target) in cards {
+                let hand_idx = k.player.hand.iter().position(|x| x.uid == uid)?;
+                let a = Action::PlayCard { hand_idx, target };
+                if !k.legal_actions().contains(&a) {
+                    return None;
+                }
+                k.step(a);
+            }
+            Some(k)
+        };
+        for path in files {
+            let fights = crate::gen::run_setups(&std::fs::read_to_string(path).unwrap(), &ids, 1).unwrap();
+            for (i, setup) in fights.iter().enumerate() {
+                let mut c = setup.combat(i as u64);
+                for _ in 0..80 {
+                    if c.is_over() {
+                        break;
+                    }
+                    f(&c, None);
+                    let acts = c.legal_actions();
+                    let plays: Vec<(u32, Option<usize>)> = acts
+                        .iter()
+                        .filter_map(|&a| match a {
+                            Action::PlayCard { hand_idx, target } => Some((c.player.hand[hand_idx].uid, target)),
+                            _ => None,
+                        })
+                        .collect();
+                    if plays.len() >= 2 {
+                        let (a, b) = (plays[rng.next_int(plays.len())], plays[rng.next_int(plays.len())]);
+                        if a.0 != b.0 {
+                            if let (Some(x), Some(y)) = (play(&c, [a, b]), play(&c, [b, a])) {
+                                f(&x, Some(true));
+                                f(&y, Some(false));
+                            }
+                        }
+                    }
+                    c.step(acts[rng.next_int(acts.len())]);
+                }
+            }
+        }
+    }
+
+    /// The field-by-field key splits states exactly as the Debug-text key
+    /// did: over states from real fights, each old key maps to one new key
+    /// and each new key to one old key.
+    #[test]
+    fn state_key_splits_states_like_the_debug_key() {
+        let files = setup_files();
+        if files.is_empty() {
+            eprintln!("no played-run fight files: skipped");
+            return;
+        }
+        let (mut old_to_new, mut new_to_old) = (HashMap::new(), HashMap::new());
+        let (mut n, mut pending, mut history, mut uid_lists, mut orders, mut met) = (0, 0, 0, 0, 0, 0);
+        let mut first = 0;
+        sample_states(&files, |c, order| {
+            let (old, new) = (state_key_debug(c), state_key(c));
+            assert_eq!(*old_to_new.entry(old).or_insert(new), new, "state {n}: one old key, two new ones");
+            assert_eq!(*new_to_old.entry(new).or_insert(old), old, "state {n}: one new key, two old ones");
+            match order {
+                Some(true) => first = old,
+                Some(false) => {
+                    orders += 1;
+                    met += (first == old) as usize;
+                }
+                None => {}
+            }
+            let s = &c.stats;
+            pending += c.pending.is_some() as usize;
+            history += (c.has_relic(RelicId::HistoryCourse) && s.last_card.is_some()) as usize;
+            uid_lists += (!s.finished_this_turn.is_empty() || !s.block_plays_this_turn.is_empty() || !s.hatchets_played.is_empty() || !s.selected.is_empty()) as usize;
+            n += 1;
+        });
+        eprintln!(
+            "{n} states from {files:?}: {} keys, {pending} with a choice open, {history} with History Course's card, {uid_lists} with uid lists, {met} of {orders} order pairs met",
+            old_to_new.len()
+        );
+        if files.len() == SETUP_FILES.len() {
+            assert!(n >= 100_000, "only {n} states");
+        }
+        assert!(met > 0 && met < orders, "the order pairs never met, or always did: {met} of {orders}");
     }
 }

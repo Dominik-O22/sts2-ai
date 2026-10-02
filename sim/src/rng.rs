@@ -3,7 +3,7 @@
 //! Simulator). What we keep is the split into named streams, so replay
 //! injection can override one stream without disturbing the others.
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Rng {
     s: [u64; 4],
 }
@@ -67,7 +67,7 @@ impl Rng {
 }
 
 /// The subset of `RunRngType` streams that combat consumes.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct CombatRngs {
     pub shuffle: Rng,
     pub monster_ai: Rng,

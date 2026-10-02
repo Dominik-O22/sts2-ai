@@ -42,11 +42,16 @@ pub struct Config {
     /// Steps a simulation may take before its state is scored as a leaf.
     pub max_depth: u32,
     pub seed: u64,
+    /// A measuring instrument, never for play: simulations keep the fight's
+    /// real draw order and dice, so the fight is a puzzle with one future,
+    /// and a win the search finds proves that fight on that seed winnable.
+    /// Nodes are then keyed by the hidden state too.
+    pub clairvoyant: bool,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Self { c_puct: 1.25, widen: f32::INFINITY, widen_exp: 0.5, max_depth: 200, seed: 0 }
+        Self { c_puct: 1.25, widen: f32::INFINITY, widen_exp: 0.5, max_depth: 200, seed: 0, clairvoyant: false }
     }
 }
 
@@ -101,10 +106,28 @@ fn mix(a: u64, b: u64) -> u64 {
     z ^ (z >> 31)
 }
 
-fn sorted(c: &Combat) -> Box<Combat> {
+/// `c` as a node holds it: the draw pile sorted, unless the search sees
+/// the real one.
+fn stored(c: &Combat, clairvoyant: bool) -> Box<Combat> {
     let mut c = Box::new(c.clone());
-    c.player.draw.sort_by_key(|k| k.uid);
+    if !clairvoyant {
+        c.player.draw.sort_by_key(|k| k.uid);
+    }
     c
+}
+
+/// The node key: what the player can tell apart, plus, for a clairvoyant
+/// search, the draw order and dice.
+pub(crate) fn key_of(c: &Combat, clairvoyant: bool) -> u64 {
+    let key = state_key(c);
+    if !clairvoyant {
+        return key;
+    }
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    c.player.draw.iter().for_each(|k| k.uid.hash(&mut h));
+    c.rngs.hash(&mut h);
+    mix(key, h.finish())
 }
 
 impl Tree {
@@ -112,7 +135,7 @@ impl Tree {
     /// seed mixes in the root's key, so one visible state searches the same
     /// whatever its hidden draw order and dice.
     pub fn new(root: &Combat, base: Baseline, cfg: Config) -> Self {
-        let state = sorted(root);
+        let state = stored(root, cfg.clairvoyant);
         let cfg = Config { seed: mix(cfg.seed, state_key(&state)), ..cfg };
         let scratch = state.clone();
         let root = Node { state, value: 0.0, visits: 0, edges: vec![], expanded: false };
@@ -162,9 +185,11 @@ impl Tree {
             let n = &self.nodes[node as usize];
             let index = n.edges[edge as usize].action;
             self.scratch.clone_from(&n.state);
-            let world = mix(seed, depth as u64);
-            Rng::new(world).shuffle(&mut self.scratch.player.draw);
-            self.scratch.rngs = CombatRngs::new(world ^ 0xD1CE);
+            if !self.cfg.clairvoyant {
+                let world = mix(seed, depth as u64);
+                Rng::new(world).shuffle(&mut self.scratch.player.draw);
+                self.scratch.rngs = CombatRngs::new(world ^ 0xD1CE);
+            }
             let Some(action) = encode::decode(&self.scratch, index as usize) else {
                 break;
             };
@@ -177,14 +202,14 @@ impl Tree {
                 self.backup(&path, 0.0);
                 return false;
             }
-            let key = state_key(&self.scratch);
+            let key = key_of(&self.scratch, self.cfg.clairvoyant);
             let e = &self.nodes[node as usize].edges[edge as usize];
             let room = (self.cfg.widen * (e.visits as f32 + 1.0).powf(self.cfg.widen_exp)).ceil().max(1.0) as usize;
             let next = match e.children.iter().position(|ch| ch.key == key) {
                 Some(k) => k,
                 None if e.children.len() < room => {
                     let child = self.nodes.len() as u32;
-                    let state = sorted(&self.scratch);
+                    let state = stored(&self.scratch, self.cfg.clairvoyant);
                     self.nodes.push(Node { state, value: 0.0, visits: 0, edges: vec![], expanded: false });
                     let e = &mut self.nodes[node as usize].edges[edge as usize];
                     e.children.push(Child { key, node: child, reward, count: 0 });
@@ -323,6 +348,29 @@ mod tests {
         assert_eq!(ta.n_nodes(), tb.n_nodes());
     }
 
+    /// A clairvoyant search sees the fight's one future: the line it picks,
+    /// played in the real fight with the real dice, ends as the search said.
+    #[test]
+    fn clairvoyant_lines_replay_in_the_real_fight() {
+        let mut c = nibbit(&[CardId::StrikeIronclad, CardId::DefendIronclad, CardId::Bash], 40);
+        let base = Baseline::of(&c);
+        let cfg = Config { seed: 9, clairvoyant: true, ..Config::default() };
+        for _ in 0..60 {
+            if c.is_over() {
+                break;
+            }
+            let mut t = Tree::new(&c, base, cfg);
+            for _ in 0..300 {
+                if t.descend() {
+                    t.expand(&[1.0 / N_ACTIONS as f32; N_ACTIONS], 0.0);
+                }
+            }
+            let a = encode::decode(&c, t.best_action().unwrap()).unwrap();
+            c.step(a);
+        }
+        assert!(c.is_over() && c.outcome == Some(crate::combat::Outcome::Won), "{:?}", c.outcome);
+    }
+
     /// Widening at chance lets the tree past the next hand: without it
     /// every end of turn reaches a fresh leaf and the tree stays in one turn.
     #[test]
@@ -350,5 +398,36 @@ mod tests {
             }
         }
         assert!(t.turns_deep() <= 1, "unlimited widening went {} turns deep", t.turns_deep());
+    }
+
+    /// The clairvoyant key tells apart what the player cannot: the draw
+    /// order and where each dice stream stands. The same state built twice
+    /// keys the same.
+    #[test]
+    fn clairvoyant_key_sees_draw_order_and_dice() {
+        use crate::rng::{CombatRngs, Rng};
+        let c = nibbit(&[CardId::StrikeIronclad, CardId::Bash], 30);
+        assert_eq!(key_of(&c, true), key_of(&nibbit(&[CardId::StrikeIronclad, CardId::Bash], 30), true));
+        let mut swapped = c.clone();
+        let n = swapped.player.draw.len();
+        swapped.player.draw.swap(0, n - 1);
+        assert_eq!(key_of(&swapped, false), key_of(&c, false));
+        assert_ne!(key_of(&swapped, true), key_of(&c, true));
+        let streams: [fn(&mut CombatRngs) -> &mut Rng; 8] = [
+            |r| &mut r.shuffle,
+            |r| &mut r.monster_ai,
+            |r| &mut r.targets,
+            |r| &mut r.niche,
+            |r| &mut r.card_generation,
+            |r| &mut r.card_selection,
+            |r| &mut r.energy_costs,
+            |r| &mut r.potion_generation,
+        ];
+        for (i, stream) in streams.iter().enumerate() {
+            let mut k = c.clone();
+            stream(&mut k.rngs).next_u64();
+            assert_eq!(key_of(&k, false), key_of(&c, false), "stream {i}");
+            assert_ne!(key_of(&k, true), key_of(&c, true), "stream {i}");
+        }
     }
 }
