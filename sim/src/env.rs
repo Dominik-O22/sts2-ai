@@ -300,7 +300,7 @@ pub struct Baseline {
 /// full HP would otherwise make its killing blow cost reward, and the
 /// policy learned to leave the Test Subject at 21 HP rather than kill it.
 /// It can pass 1 in a fight with revives or summons.
-fn enemy_hp_taken(c: &Combat) -> f32 {
+pub(crate) fn enemy_hp_taken(c: &Combat) -> f32 {
     c.stats.enemy_hp_lost as f32 / c.stats.enemy_start_hp.max(1) as f32
 }
 

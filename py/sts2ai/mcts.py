@@ -25,9 +25,12 @@ from sts2ai.model import Net, masked_logits
 class TreeSearch:
     """`sims` simulations per decision for the fights of an `Envs`."""
 
-    def __init__(self, envs: Envs, sims: int, c_puct: float = 1.25, widen: float = math.inf, seed: int = 0):
+    def __init__(self, envs: Envs, sims: int, c_puct: float = 1.25, widen: float = math.inf, seed: int = 0, clairvoyant: bool = False):
         self.envs, self.sims = envs, sims
-        self.inner = _sim.TreeSearch(envs.n, c_puct=c_puct, widen=widen, seed=seed)
+        # Clairvoyant searches read the fight's real draw order and dice: a
+        # measuring instrument for which fights are winnable at all, never
+        # for play or training (no hidden information).
+        self.inner = _sim.TreeSearch(envs.n, c_puct=c_puct, widen=widen, seed=seed, clairvoyant=clairvoyant)
         # Turns past the decision the trees reached, summed, and decisions.
         self.depth, self.searched = 0, 0
         L, pin = envs.layout, torch.cuda.is_available()
