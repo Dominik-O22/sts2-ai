@@ -258,20 +258,19 @@ mod tests {
         assert_eq!(c.player.creature.power_amount(PowerId::Frail), 1);
     }
 
-    /// `CardPileCmd.Add` to a full hand lands in the discard instead, and
-    /// Aggression upgrades the card either way (`AggressionPower`).
+    /// Runic Pyramid keeps a full hand, so Aggression's pull is an add to a
+    /// full hand: `CardPileCmd.Add` leaves it in the discard, upgraded
+    /// (`AggressionPower`). Unchecked, the hand grew a card a turn.
     #[test]
-    fn aggression_past_a_full_hand_leaves_the_rest_in_discard() {
+    fn aggression_into_a_kept_full_hand_stays_in_discard() {
         use crate::card::Card;
-        let mut c = fight(&[one(MonsterId::Nibbit)], 5);
-        c.player.hand.clear();
-        c.player.draw.clear();
-        c.player.discard = (0..14).map(|uid| Card::new(930 + uid, ids::CardId::StrikeIronclad, false)).collect();
-        c.player.creature.powers.push(Power::new(PowerId::Aggression, 14));
+        let mut c = with_relics(&[Relic::new(RelicId::RunicPyramid)], &[one(MonsterId::Nibbit)], 5);
+        c.player.hand = (0..10).map(|uid| Card::new(930 + uid, ids::CardId::DefendIronclad, false)).collect();
+        c.player.discard = vec![Card::new(950, ids::CardId::StrikeIronclad, false)];
+        c.player.creature.powers.push(Power::new(PowerId::Aggression, 1));
         c.step(Action::EndTurn);
         assert_eq!(c.player.hand.len(), combat::MAX_HAND);
-        assert_eq!(c.player.discard.len(), 4);
-        assert!(c.player.hand.iter().chain(&c.player.discard).all(|k| k.upgraded));
+        assert!(c.player.discard.iter().any(|k| k.uid == 950 && k.upgraded));
     }
 
     /// Normality vetoes from hand, so it costs a play without ever being one.
