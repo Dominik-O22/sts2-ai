@@ -7,7 +7,8 @@
 One line per fight: the run as it stood when the fight began (`start`:
 deck, relics, potions, gold, ascension), `hp` and `max_hp`, the
 `encounter`, the `floor` in the generator's numbering (`game_floor` is the
-page's), whether it is the last act's `second` boss, and the HP and max HP
+page's), whether it is the last act's `second` boss, whether the room
+before was a rest site (`rest_before`), and the HP and max HP
 the winner lost in it (`winner_hp_lost`, `winner_max_hp_lost`). Elite and
 boss fights go to `train.jsonl` and `holdout.jsonl`, weak and normal ones
 to `easy-train.jsonl` and `easy-holdout.jsonl`. A page lists the final
@@ -126,6 +127,8 @@ def fights(page: dict, kinds: tuple[str, ...]) -> list[dict]:
                 "encounter": strip(model),
                 "floor": sim_floor(f["floor"], boss),
                 "second": boss and f["floor"] == 49,
+                # Venerable Tea Set primes on entering a rest site (`gen::prime_tea_sets`).
+                "rest_before": before.get("mapPointType") == "rest_site",
                 "game_floor": f["floor"],
                 # HP in minus HP out, after Burning Blood and any healing,
                 # as `End.hp_lost` counts it for the model.
