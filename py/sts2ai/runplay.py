@@ -68,7 +68,7 @@ from typing import TextIO
 import numpy as np
 import torch
 
-from sts2ai import _sim
+from sts2ai import _sim, deckvalue
 from sts2ai.afterstate import Scorer
 from sts2ai.env import START_POINTS, End, Envs, RunFight, RunLayout
 from sts2ai.forecast import Calibration, Forecaster
@@ -454,6 +454,7 @@ def main() -> None:
     ap.add_argument("--elite-gate", type=float, default=0.0, help="pass up elites whose forecast win chance is under this")
     ap.add_argument("--event-table", type=Path, default=None, help="imitation rows (.npz); event choices take winners' most picked option")
     ap.add_argument("--runs-out", type=Path, default=None, help="write each counted run here as a JSON line, for sts2ai.paired")
+    ap.add_argument("--deckvalue", type=Path, default=None, help="score afterstates with this deck value network (sts2ai.deckvalue) instead of the forecast")
     ap.add_argument("--afterstate", type=int, default=0, help="make every decision but a map step by its afterstates, K samples each (needs the forecast)")
     ap.add_argument("--afterstate-depth", type=int, default=3, help="sub-decisions an afterstate opens on the way, at most")
     ap.add_argument("--afterstate-nodes", type=int, default=256, help="branches an afterstate plays per option and sample, at most")
@@ -481,7 +482,15 @@ def main() -> None:
     fights_out = args.fights_out.open("w") if args.fights_out else None
     event_table = EventTable(Rows.load(args.event_table), RunLayout.load()) if args.event_table else None
     afterstate = (
-        Scorer(envs, forecast, args.afterstate, args.afterstate_depth, args.afterstate_nodes, frozenset(filter(None, args.afterstate_kinds.split(","))))
+        Scorer(
+            envs,
+            forecast,
+            args.afterstate,
+            args.afterstate_depth,
+            args.afterstate_nodes,
+            frozenset(filter(None, args.afterstate_kinds.split(","))),
+            deckvalue.load(args.deckvalue, device) if args.deckvalue else None,
+        )
         if args.afterstate > 0
         else None
     )
