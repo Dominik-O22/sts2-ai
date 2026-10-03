@@ -105,9 +105,11 @@ noise; say so rather than reading a trend into it.
 
 `uv run python -m sts2ai.bench NEW.pt --base OLD.pt` plays both on about
 8,850 held-out elite and boss fights (winners', sts2.fun players', and the
-clone's own on fresh seeds) from the same seeds and reports per-fight
-differences by act and kind; greedy at 8 seeds takes minutes and resolves
-about 0.3 points. Greedy is the screen, and enough for a training recipe
+clone's own on fresh seeds) and 4,800 weak and normal ones (winners' and
+sts2.fun players') from the same seeds, and reports per-fight differences
+in wins and HP lost by act and kind; greedy at 8 seeds takes minutes and
+resolves about 0.3 points. HP lost on the easy fights is the number that
+compounds over a run; check it on every change. Greedy is the screen, and enough for a training recipe
 change (epochs, lr, data mix). `--mode hybrid32` is the verdict for a
 change that could just teach greedy what the pilot's search already does
 (an act 3 boss specialist gained 3 points greedy and nothing with the

@@ -16,7 +16,12 @@ Sets: `winners`, the elite and boss fights of held-out winners' runs
 (`setups.HOLDOUT`, players split from training); `sts2fun`, the same from
 held-out sts2.fun players, losses included; `ours`, the elite and
 boss fights of 1,024 clone runs with gen8-as on seeds 500000+, which no
-training fight came from (`runplay --fights-out`, then `--make-ours`).
+training fight came from (`runplay --fights-out`, then `--make-ours`);
+`winners-easy` and `sts2fun-easy`, the weak and normal fights of the same
+held-out runs, which everyone wins, so their number is the HP lost. Every
+set reports HP lost per fight (net of healing, all of it on a loss) beside
+the win rate. The pilot plays easy fights greedy, so greedy is their
+verdict too.
 Results are cached per checkpoint, set, mode and seed in runs/bench/cache,
 so a base plays once.
 
@@ -45,11 +50,17 @@ import torch
 
 from sts2ai.exactsearch import play
 from sts2ai.model import Net, for_play, load_policy
-from sts2ai.setups import HOLDOUT
+from sts2ai.setups import EASY_HOLDOUT, HOLDOUT
 from sts2ai.sts2fun import DIR as STS2FUN
 
 ROOT = Path(__file__).resolve().parents[2] / "runs" / "bench"
-SETS = {"winners": HOLDOUT, "sts2fun": STS2FUN / "setups" / "holdout.jsonl", "ours": ROOT / "ours.jsonl"}
+SETS = {
+    "winners": HOLDOUT,
+    "sts2fun": STS2FUN / "setups" / "holdout.jsonl",
+    "ours": ROOT / "ours.jsonl",
+    "winners-easy": EASY_HOLDOUT,
+    "sts2fun-easy": STS2FUN / "setups" / "easy-holdout.jsonl",
+}
 HARD = ("_ELITE", "_BOSS")
 # `exactsearch`'s defaults, as the pilot runs the hybrid, and fights per
 # batch: its trees and playouts for every fight at once outgrow memory.
@@ -74,17 +85,22 @@ def hard_lines(path: Path) -> list[str]:
     return [line for line in path.read_text().splitlines() if line.strip() and json.loads(line)["encounter"].endswith(HARD)]
 
 
+def set_lines(name: str) -> list[str]:
+    path = SETS[name]
+    return [line for line in path.read_text().splitlines() if line.strip()] if name.endswith("-easy") else hard_lines(path)
+
+
 def group(line: dict) -> str:
     """`a<act> <kind>`: acts are 17 floors long, as `runplay` counts them."""
     act = 1 + (line["floor"] > 17) + (line["floor"] > 33)
-    return f"a{act} {'boss' if line['encounter'].endswith('_BOSS') else 'elite'}"
+    return f"a{act} {line['encounter'].rsplit('_', 1)[-1].lower()}"
 
 
 def cache_key(checkpoint: Path, lines: list[str], mode: str, seed: int) -> Path:
     st = checkpoint.resolve().stat()
     h = hashlib.sha1(f"{checkpoint.resolve()}:{st.st_mtime_ns}:{st.st_size}".encode())
     h.update("\n".join(lines).encode())
-    return ROOT / "cache" / f"{h.hexdigest()[:16]}-{mode}-{seed}.npy"
+    return ROOT / "cache" / f"{h.hexdigest()[:16]}-{mode}-{seed}-hp.npy"
 
 
 def results(checkpoint: Path, net: Net | None, device: torch.device, lines: list[str], mode: str, seed: int) -> tuple[np.ndarray, Net | None]:
@@ -95,38 +111,43 @@ def results(checkpoint: Path, net: Net | None, device: torch.device, lines: list
         return np.load(path), net
     if net is None:
         net = for_play(load_policy(checkpoint, device).eval())
-    out = np.zeros((len(lines), 2), np.float32)
+    out = np.zeros((len(lines), 3), np.float32)
     chunk = len(lines) if mode == "greedy" else CHUNK
     for start in range(0, len(lines), chunk):
         run = play(net, device, lines[start : start + chunk], mode, seed, 256, SEARCH)
         for k, e in run.ends.items():
-            out[start + k] = (e.won, e.reward)
+            # `hp_lost` is a share of the max HP the fight ended at, which
+            # the start HP over the start share recovers.
+            start_hp = json.loads(lines[start + k])["hp"]
+            out[start + k] = (e.won, e.reward, e.hp_lost * start_hp / (e.hp_frac + e.hp_lost))
     path.parent.mkdir(parents=True, exist_ok=True)
     np.save(path, out)
     return out, net
 
 
-def interval(d: np.ndarray) -> str:
+def interval(d: np.ndarray, fmt: str = "+.3f") -> str:
     half = 1.96 * d.std(ddof=1) / np.sqrt(len(d)) if len(d) > 1 else float("nan")
-    return f"{d.mean():+.3f} [{d.mean() - half:+.3f}, {d.mean() + half:+.3f}]"
+    return f"{d.mean():{fmt}} [{d.mean() - half:{fmt}}, {d.mean() + half:{fmt}}]"
 
 
 def report(name: str, lines: list[str], a: np.ndarray, b: np.ndarray | None) -> None:
-    """`a`, `b`: [fights, seeds, (won, reward)]."""
+    """`a`, `b`: [fights, seeds, (won, reward, HP lost)]."""
     groups = defaultdict(list)
     for i, line in enumerate(lines):
         groups[group(json.loads(line))].append(i)
     print(f"== {name}: {len(lines)} fights x {a.shape[1]} seeds")
-    head = f"{'':10s} {'n':>5s} {'won':>6s}"
-    print(head + (f" {'base':>6s}  {'won diff [95%]':>26s}  {'reward diff [95%]':>26s}" if b is not None else f"  {'reward':>7s}"))
+    head = f"{'':10s} {'n':>5s} {'won':>6s} {'HP lost':>7s}"
+    if b is not None:
+        head += f" {'base':>6s} {'base':>7s}  {'won diff [95%]':>26s}  {'HP lost diff [95%]':>20s}  {'reward diff [95%]':>26s}"
+    print(head)
     for g, idx in [("all", list(range(len(lines))))] + sorted(groups.items()):
         fa = a[idx].mean(axis=1)
-        row = f"{g:10s} {len(idx):5d} {fa[:, 0].mean():6.1%}"
-        if b is None:
-            print(row + f"  {fa[:, 1].mean():7.3f}")
-            continue
-        fb = b[idx].mean(axis=1)
-        print(row + f" {fb[:, 0].mean():6.1%}  {interval(fa[:, 0] - fb[:, 0]):>26s}  {interval(fa[:, 1] - fb[:, 1]):>26s}")
+        row = f"{g:10s} {len(idx):5d} {fa[:, 0].mean():6.1%} {fa[:, 2].mean():7.1f}"
+        if b is not None:
+            fb = b[idx].mean(axis=1)
+            d = fa - fb
+            row += f" {fb[:, 0].mean():6.1%} {fb[:, 2].mean():7.1f}  {interval(d[:, 0]):>26s}  {interval(d[:, 2], '+.1f'):>20s}  {interval(d[:, 1]):>26s}"
+        print(row)
 
 
 def main() -> None:
@@ -135,7 +156,7 @@ def main() -> None:
     ap.add_argument("--base", type=Path, default=None, help="checkpoint to compare against, fight by fight")
     ap.add_argument("--mode", default="greedy", help="greedy, or hybridP: the pilot's search with P playouts a line (hybrid32)")
     ap.add_argument("--seeds", type=int, default=None, help="8 greedy, 1 with the hybrid")
-    ap.add_argument("--sets", default="winners,sts2fun,ours")
+    ap.add_argument("--sets", default=",".join(SETS))
     ap.add_argument("--groups", default=None, help="only these act and kind groups, comma separated (`a3 boss,a1 boss`); every boss with the hybrid")
     ap.add_argument("--fights", type=int, default=None, help="a fixed sample of this many fights a set; every fight greedy, 300 with the hybrid")
     ap.add_argument("--make-ours", type=Path, default=None, help="write the `ours` set from a `runplay --fights-out` file and exit")
@@ -155,10 +176,12 @@ def main() -> None:
     checkpoints = [args.checkpoint, *([args.base] if args.base else [])]
     nets: dict[Path, Net] = {}
     for name in args.sets.split(","):
-        lines = hard_lines(SETS[name])
+        lines = set_lines(name)
         if args.groups:
             lines = [line for line in lines if group(json.loads(line)) in args.groups.split(",")]
         lines = sample(lines, args.fights)
+        if not lines:
+            continue
         per = {}
         for ck in checkpoints:
             rows = []
