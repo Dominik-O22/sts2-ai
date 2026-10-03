@@ -49,6 +49,10 @@ class Layout:
     i_choices: int
     i_moves: int
     i_enchants: int
+    i_choice_enchants: int
+    i_piles: int
+    i_pile_enchants: int
+    i_resumes: int
     move_vocab: int
     enchant_vocab: int
     global_len: int
@@ -56,11 +60,15 @@ class Layout:
     f_hand: int
     hand_feats: int
     f_piles: int
+    max_pile_rows: int
+    card_feats: int
+    pile_feats: int
     f_enemies: int
     enemy_base: int
     intent_nums: int
     enemy_feats: int
     f_relics: int
+    relic_feats: int
     f_potions: int
     f_choices: int
     choice_feats: int

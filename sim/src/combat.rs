@@ -79,6 +79,7 @@ impl Clone for PlayerCombat {
             energy: self.energy,
             base_max_energy: self.base_max_energy,
             turn: self.turn,
+            known_top: self.known_top,
         }
         .with_play(&self.play)
     }
@@ -94,6 +95,7 @@ impl Clone for PlayerCombat {
         self.energy = src.energy;
         self.base_max_energy = src.base_max_energy;
         self.turn = src.turn;
+        self.known_top = src.known_top;
     }
 }
 
@@ -101,6 +103,13 @@ impl PlayerCombat {
     fn with_play(mut self, play: &[Card]) -> Self {
         self.play.extend_from_slice(play);
         self
+    }
+
+    /// The draw pile below the cards the player put on top: the part whose
+    /// order nobody knows, which a search may shuffle.
+    pub fn unseen_draw(&mut self) -> &mut [Card] {
+        let known = self.known_top.min(self.draw.len());
+        &mut self.draw[known..]
     }
 }
 
@@ -123,6 +132,10 @@ pub struct PlayerCombat {
     pub base_max_energy: i32,
     /// `PlayerCombatState.TurnNumber`, starts at 1.
     pub turn: u32,
+    /// How many cards on top of the draw pile the player put there, and so
+    /// knows the place of (Headbutt, Warcry). A shuffle or a card slipped in
+    /// at random forgets them.
+    pub known_top: usize,
 }
 
 #[derive(Debug)]
@@ -630,6 +643,7 @@ impl Combat {
                 energy: 0,
                 base_max_energy: max_energy,
                 turn: 1,
+                known_top: 0,
             },
             enemies: Vec::with_capacity(enemies.len()),
             order: vec![],
@@ -1618,6 +1632,7 @@ impl Combat {
                 let p = &mut self.player;
                 p.discard.append(&mut p.draw);
                 std::mem::swap(&mut p.draw, &mut p.discard);
+                p.known_top = 0;
                 shuffle_cards(&mut p.draw, &mut self.script, &mut self.rngs.shuffle, &mut self.shuffle_log);
                 apply_shuffle_order(&mut p.draw, false);
                 let subs = self.after_shuffle();
@@ -1758,6 +1773,7 @@ impl Combat {
                         self.push_front_all(subs);
                     } else if self.stats.rebound.contains(&uid) || nostalgia.is_some() {
                         self.player.draw.insert(0, card);
+                        self.player.known_top += 1;
                     } else {
                         self.player.discard.push(card);
                     }
@@ -1805,6 +1821,7 @@ impl Combat {
                         break;
                     }
                     let card = self.player.draw.remove(0);
+                    self.player.known_top = self.player.known_top.saturating_sub(1);
                     taken.push(card.uid);
                     self.player.play.push(card);
                 }
@@ -2821,6 +2838,7 @@ impl Combat {
             // empty draw pile's buffer the discard pile.
             let p = &mut self.player;
             std::mem::swap(&mut p.draw, &mut p.discard);
+            p.known_top = 0;
             shuffle_cards(&mut p.draw, &mut self.script, &mut self.rngs.shuffle, &mut self.shuffle_log);
             apply_shuffle_order(&mut p.draw, false);
             return true;
@@ -2861,6 +2879,7 @@ impl Combat {
             return out;
         }
         let mut card = self.player.draw.remove(0);
+        self.player.known_top = self.player.known_top.saturating_sub(1);
         let uid = card.uid;
         let void = card.id == CardId::Void;
         let strike = card.has_tag(Tag::Strike);
@@ -2904,7 +2923,11 @@ impl Combat {
     /// so the search order is free: the card in play first, as in `find_card`.
     pub(crate) fn take_card(&mut self, uid: u32) -> Option<Card> {
         let p = &mut self.player;
-        for pile in [&mut p.play, &mut p.hand, &mut p.discard, &mut p.draw, &mut p.exhaust] {
+        if let Some(i) = p.draw.iter().position(|c| c.uid == uid) {
+            p.known_top -= (i < p.known_top) as usize;
+            return Some(p.draw.remove(i));
+        }
+        for pile in [&mut p.play, &mut p.hand, &mut p.discard, &mut p.exhaust] {
             if let Some(i) = pile.iter().position(|c| c.uid == uid) {
                 return Some(pile.remove(i));
             }
@@ -2921,11 +2944,15 @@ impl Combat {
                     self.player.discard.push(card);
                 }
             }
-            Pile::DrawTop => self.player.draw.insert(0, card),
+            Pile::DrawTop => {
+                self.player.draw.insert(0, card);
+                self.player.known_top += 1;
+            }
             Pile::DrawBottom => self.player.draw.push(card),
             Pile::DrawRandom => {
                 let at = self.rngs.card_generation.next_int(self.player.draw.len() + 1);
                 self.player.draw.insert(at, card);
+                self.player.known_top = 0;
                 self.stats.random_draw_inserts += 1;
             }
             Pile::Discard => self.player.discard.push(card),

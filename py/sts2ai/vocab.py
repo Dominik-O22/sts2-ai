@@ -52,10 +52,10 @@ def layout_for(v: Vocab, base: Layout) -> Layout:
     n_cards, n_powers, n_relics, n_intents = (len(v.get(k, [])) for k in ("card", "power", "relic", "intent"))
     f_hand = base.global_len + n_powers
     f_piles = f_hand + base.max_hand * base.hand_feats
-    f_enemies = f_piles + 3 * 2 * n_cards
+    f_enemies = f_piles + base.max_pile_rows * base.pile_feats
     enemy_feats = base.enemy_base + n_intents + base.intent_nums + n_powers
     f_relics = f_enemies + base.max_enemies * enemy_feats
-    f_potions = f_relics + 2 * n_relics
+    f_potions = f_relics + base.relic_feats * n_relics
     f_choices = f_potions + base.max_potions
     return replace(
         base,
@@ -88,13 +88,11 @@ def float_segments(L: Layout) -> Segments:
         ("player_powers", L.n_powers, "power"),
         ("hand", L.max_hand * L.hand_feats, None),
     ]
-    for pile in ("draw", "discard", "exhaust"):
-        segs.append((f"pile_{pile}", 2 * L.n_cards, "card2"))
+    segs.append(("piles", L.max_pile_rows * L.pile_feats, None))
     for i in range(L.max_enemies):
         segs.extend((f"enemy{i}_{name}", n, kind) for name, n, kind in enemy_segments(L))
+    segs += [(f"relics_{name}", L.n_relics, "relic") for name in ("hot", "counter", "combat_counter", "used")[: L.relic_feats]]
     segs += [
-        ("relics_hot", L.n_relics, "relic"),
-        ("relics_counter", L.n_relics, "relic"),
         ("potions", L.max_potions, None),
         ("choices", L.max_choices * L.choice_feats, None),
     ]
@@ -141,11 +139,6 @@ def column_map(old_v: Vocab, new_v: Vocab, old_segs: Segments, new_segs: Segment
             assert n == new_len[name], f"fixed segment {name} changed size"
             src += range(a, a + n)
             dst += range(b, b + n)
-        elif kind == "card2":
-            index = {c: i for i, c in enumerate(new_v["card"])}
-            for i, c in enumerate(old_v["card"]):
-                src += [a + 2 * i, a + 2 * i + 1]
-                dst += [b + 2 * index[c], b + 2 * index[c] + 1]
         else:
             index = {c: i for i, c in enumerate(new_v.get(kind, []))}
             src += [a + i for i in range(len(old_v.get(kind, [])))]

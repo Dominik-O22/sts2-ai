@@ -569,7 +569,7 @@ pub fn state_key(c: &Combat) -> u64 {
         shuffle_log: _,
         ..
     } = c;
-    let PlayerCombat { creature, hand, draw, discard, exhaust, play, offer, energy, base_max_energy, turn } = player;
+    let PlayerCombat { creature, hand, draw, discard, exhaust, play, offer, energy, base_max_energy, turn, known_top } = player;
     let mut h = Fx::default();
     // A uid as the card it names, the same for two copies alike.
     let canon = |uid: u32| -> u32 {
@@ -588,7 +588,10 @@ pub fn state_key(c: &Combat) -> u64 {
         x.fp(&mut h);
     }
     gold.fp(&mut h);
-    for pile in [hand, draw, discard, exhaust, play, offer] {
+    // The known top of the draw pile in order, every pile else as a multiset.
+    let known = (*known_top).min(draw.len());
+    draw[..known].iter().map(card_fp).collect::<SmallVec<[u64; 4]>>()[..].fp(&mut h);
+    for pile in [hand, &draw[known..], discard, exhaust, play, offer] {
         let mut fps: SmallVec<[u64; 64]> = pile.iter().map(card_fp).collect();
         fps.sort_unstable();
         fps[..].fp(&mut h);
@@ -787,7 +790,7 @@ fn state_key_debug(c: &Combat) -> u64 {
 /// The draw pile in a fixed order by content: what a player who knows the
 /// pile as a multiset would write down.
 fn sort_draw(c: &mut Combat) {
-    c.player.draw.sort_by_cached_key(|k| (card_fp(k), k.uid));
+    c.player.unseen_draw().sort_by_cached_key(|k| (card_fp(k), k.uid));
 }
 
 /// How many cards a step took off the top of the draw pile whose uids,
@@ -944,7 +947,7 @@ impl Builder<'_> {
         let mut k = c.clone();
         if shuffle {
             sort_draw(&mut k);
-            Rng::new(seed).shuffle(&mut k.player.draw);
+            Rng::new(seed).shuffle(k.player.unseen_draw());
         }
         k.rngs = CombatRngs::new(seed ^ 0xD1CE);
         k.step(a);
@@ -989,6 +992,11 @@ impl Builder<'_> {
     /// there are more than `draw_cap`, or a set drew some other count or
     /// rolled dice (a draw that depends on what it drew).
     fn enumerate(&self, c: &Combat, a: Action, m: usize) -> Option<Vec<(f64, Combat)>> {
+        // Cards the player put on top come first and in order; the multiset
+        // count below does not model that.
+        if c.player.known_top > 0 {
+            return None;
+        }
         let mut draw: Vec<(u64, Card)> = c.player.draw.iter().map(|k| (card_fp(k), k.clone())).collect();
         draw.sort_by_key(|(f, k)| (*f, k.uid));
         let mut kinds: Vec<(usize, usize)> = vec![];

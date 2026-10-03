@@ -111,7 +111,7 @@ fn mix(a: u64, b: u64) -> u64 {
 fn stored(c: &Combat, clairvoyant: bool) -> Box<Combat> {
     let mut c = Box::new(c.clone());
     if !clairvoyant {
-        c.player.draw.sort_by_key(|k| k.uid);
+        c.player.unseen_draw().sort_by_key(|k| k.uid);
     }
     c
 }
@@ -187,7 +187,7 @@ impl Tree {
             self.scratch.clone_from(&n.state);
             if !self.cfg.clairvoyant {
                 let world = mix(seed, depth as u64);
-                Rng::new(world).shuffle(&mut self.scratch.player.draw);
+                Rng::new(world).shuffle(self.scratch.player.unseen_draw());
                 self.scratch.rngs = CombatRngs::new(world ^ 0xD1CE);
             }
             let Some(action) = encode::decode(&self.scratch, index as usize) else {
