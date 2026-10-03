@@ -241,6 +241,8 @@ class Arch:
     # An auxiliary head predicting the damage the player takes this enemy
     # turn (`forward_incoming`), trained beside the policy.
     incoming: bool = False
+    # `attn` only: the feed-forward width as a multiple of `hidden`.
+    ffn: int = 4
 
 
 class Policy(nn.Module):
@@ -373,12 +375,13 @@ class SlotAttention(Policy):
         piles: bool = False,
         choice_attn: bool = False,
         incoming: bool = False,
+        ffn: int = 4,
     ):
         super().__init__()
         L = layout
         assert L.targets == L.max_enemies + 1
         self.layout = L
-        self.arch = Arch("attn", hidden, depth, pointer, piles, choice_attn, incoming)
+        self.arch = Arch("attn", hidden, depth, pointer, piles, choice_attn, incoming, ffn)
         d = hidden
         self.card = nn.Embedding(L.card_vocab, card_dim, padding_idx=0)
         self.monster = nn.Embedding(L.monster_vocab, monster_dim, padding_idx=0)
@@ -397,7 +400,7 @@ class SlotAttention(Policy):
         self.enemy_in = nn.Linear(enemy_dim, d)
         self.potion_in = nn.Linear(potion_dim + 1, d)
         self.choice_in = nn.Linear(card_dim + enchant_dim + L.choice_feats, d)
-        self.encoder = Encoder(EncoderLayer(d, heads, 4 * d), depth, d)
+        self.encoder = Encoder(EncoderLayer(d, heads, ffn * d), depth, d)
         if piles:
             # A pile's token: each of its rows (a card as `card_feats`
             # describes it, and how many) through `pile_row`, averaged over
@@ -519,7 +522,9 @@ def build_policy(layout: Layout, arch: Arch) -> Policy:
     if arch.kind == "slots":
         return SlotMLP(layout, hidden=arch.hidden, depth=arch.depth)
     if arch.kind == "attn":
-        return SlotAttention(layout, arch.hidden, arch.depth, pointer=arch.pointer, piles=arch.piles, choice_attn=arch.choice_attn, incoming=arch.incoming)
+        return SlotAttention(
+            layout, arch.hidden, arch.depth, pointer=arch.pointer, piles=arch.piles, choice_attn=arch.choice_attn, incoming=arch.incoming, ffn=arch.ffn
+        )
     raise ValueError(f"unknown architecture {arch.kind!r}: slots or attn")
 
 
