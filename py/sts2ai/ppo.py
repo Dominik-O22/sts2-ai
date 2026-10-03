@@ -145,6 +145,7 @@ class Config:
     pointer: bool = False
     piles: bool = False
     choice_attn: bool = False
+    ffn: int = 4
     # The incoming-damage head (`model.Arch.incoming`) and its loss's weight:
     # every decision of a turn learns the damage that turn's enemy phase
     # dealt, a thirtieth of the HP, as mean squared error.
@@ -388,7 +389,7 @@ def train(cfg: Config) -> Policy:
         for (path, share), n in zip(pools, sizes):
             print(f"{n} played runs' fights from {path.name} for {share:.0%} of the resets")
     ck = torch.load(cfg.resume, map_location=device) if cfg.resume else None
-    arch = checkpoint_arch(ck) if ck else Arch(cfg.arch, cfg.hidden, cfg.depth, cfg.pointer, cfg.piles, cfg.choice_attn, cfg.incoming)
+    arch = checkpoint_arch(ck) if ck else Arch(cfg.arch, cfg.hidden, cfg.depth, cfg.pointer, cfg.piles, cfg.choice_attn, cfg.incoming, cfg.ffn)
     policy = build_policy(envs.layout, arch).to(device)
     opt = torch.optim.AdamW(policy.parameters(), lr=cfg.lr, eps=1e-5, weight_decay=cfg.weight_decay)
     # `net` is what runs; `policy` keeps the plain module for checkpoints.
