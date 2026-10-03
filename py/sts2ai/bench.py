@@ -18,11 +18,18 @@ held-out sts2.fun players, losses included; `ours`, the elite and
 boss fights of 1,024 clone runs with gen8-as on seeds 500000+, which no
 training fight came from (`runplay --fights-out`, then `--make-ours`).
 Results are cached per checkpoint, set, mode and seed in runs/bench/cache,
-so a base plays once. Greedy over every set and 8 seeds takes minutes and
-resolves about 0.3 points overall; the hybrid (`--mode hybrid32`, what the
-pilot plays) takes about 2.5 hours a seed over all of it, so run it on
-`--groups`. A greedy gain need not survive the search: an act 3 boss
-specialist gained 3 points greedy and none with the hybrid.
+so a base plays once.
+
+Two tiers. Greedy (the default) plays every fight on 8 seeds in minutes
+and resolves about 0.3 points overall: the screen for any change. The
+hybrid (`--mode hybrid32`, the pilot's search) runs a turn search and
+hundreds of playouts to the fight's end at every decision, about 1.7 s a
+boss fight, so it defaults to the verdict preset: one seed on a fixed
+sample of `--fights 300` boss fights per set, about 25 minutes a new
+checkpoint and some 3 points of resolution. Use it for changes that could
+just teach greedy what the search already does: an act 3 boss specialist
+gained 3 points greedy and none with the hybrid. Every fight on 8 seeds
+would take about 7 hours a checkpoint.
 """
 
 from __future__ import annotations
@@ -48,6 +55,19 @@ HARD = ("_ELITE", "_BOSS")
 # batch: its trees and playouts for every fight at once outgrow memory.
 SEARCH = {"max_states": 500, "quiesce_states": 1000, "end_samples": 8, "samples": 4, "draw_cap": 32}
 CHUNK = 350
+
+
+# The hybrid's defaults (module docstring).
+VERDICT = {"seeds": 1, "groups": "a1 boss,a2 boss,a3 boss", "fights": 300}
+
+
+def sample(lines: list[str], n: int) -> list[str]:
+    """A fixed `n` of `lines` in their order, the same every run, so the
+    base's results stay cached."""
+    if n <= 0 or n >= len(lines):
+        return lines
+    keep = np.sort(np.random.default_rng(0).choice(len(lines), n, replace=False))
+    return [lines[i] for i in keep]
 
 
 def hard_lines(path: Path) -> list[str]:
@@ -114,9 +134,10 @@ def main() -> None:
     ap.add_argument("checkpoint", type=Path, nargs="?")
     ap.add_argument("--base", type=Path, default=None, help="checkpoint to compare against, fight by fight")
     ap.add_argument("--mode", default="greedy", help="greedy, or hybridP: the pilot's search with P playouts a line (hybrid32)")
-    ap.add_argument("--seeds", type=int, default=8)
+    ap.add_argument("--seeds", type=int, default=None, help="8 greedy, 1 with the hybrid")
     ap.add_argument("--sets", default="winners,sts2fun,ours")
-    ap.add_argument("--groups", default="", help="only these act and kind groups, comma separated (`a3 boss,a1 boss`): the hybrid on every fight takes hours")
+    ap.add_argument("--groups", default=None, help="only these act and kind groups, comma separated (`a3 boss,a1 boss`); every boss with the hybrid")
+    ap.add_argument("--fights", type=int, default=None, help="a fixed sample of this many fights a set; every fight greedy, 300 with the hybrid")
     ap.add_argument("--make-ours", type=Path, default=None, help="write the `ours` set from a `runplay --fights-out` file and exit")
     args = ap.parse_args()
     if args.make_ours:
@@ -126,6 +147,10 @@ def main() -> None:
         return
     if args.checkpoint is None:
         ap.error("a checkpoint is needed")
+    preset = VERDICT if args.mode != "greedy" else {"seeds": 8, "groups": "", "fights": 0}
+    for k, v in preset.items():
+        if getattr(args, k) is None:
+            setattr(args, k, v)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     checkpoints = [args.checkpoint, *([args.base] if args.base else [])]
     nets: dict[Path, Net] = {}
@@ -133,6 +158,7 @@ def main() -> None:
         lines = hard_lines(SETS[name])
         if args.groups:
             lines = [line for line in lines if group(json.loads(line)) in args.groups.split(",")]
+        lines = sample(lines, args.fights)
         per = {}
         for ck in checkpoints:
             rows = []
