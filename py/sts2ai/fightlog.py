@@ -24,7 +24,7 @@ POWER_NAMES = {0: "Str", 1: "Dex", 2: "Vuln", 3: "Weak", 4: "Frail", 33: "Slippe
 
 
 def powers(vec: np.ndarray) -> str:
-    return " ".join(f"{POWER_NAMES.get(i, f'p{i}')}={round(v * 10)}" for i, v in enumerate(vec) if v != 0)
+    return " ".join(f"{POWER_NAMES.get(i, f'p{i}')}={round(np.sinh(v) * 10)}" for i, v in enumerate(vec) if v != 0)
 
 
 def describe_state(L: Layout, f: np.ndarray, ids: np.ndarray, cards: list[str], monsters: list[str], enchants: list[str], intents: list[str]) -> str:

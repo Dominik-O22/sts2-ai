@@ -3,16 +3,19 @@
 //! `N_IDS` vocabulary ids for embeddings, and every legal `Action` maps to
 //! one of `N_ACTIONS` indices with a mask over the rest.
 //!
-//! Hand and choice slots are shown sorted by (id, upgraded, cost), so the
-//! policy sees a multiset, not the game's hand order. `decode` applies the
-//! same sort to map a slot back to the real hand index.
+//! Every card the policy sees, in hand, offered by a choice or lying in a
+//! pile, is described by the same `card_feats`. Hand and choice slots are
+//! sorted by that description, so the policy sees a multiset, not the game's
+//! hand order; `decode` applies the same sort to map a slot back to the real
+//! hand index. Piles are rows of (pile, description, count), so a 160-card
+//! deck fits as well as a 12-card one.
 //!
 //! Enemy slots follow the game's order, but nothing the player does depends
 //! on where an enemy stands, so the policy treats them as a set. Target 0
 //! of every play and potion action is "no target"; the enemy slots follow,
 //! so growing `MAX_ENEMIES` appends targets rather than moving them.
 
-use crate::card::Card;
+use crate::card::{Affliction, Card};
 use crate::combat::{Action, Combat, RoomKind};
 use crate::effect::{Picked, Pile, Then};
 use crate::enchant::ALL as ALL_ENCHANTMENTS;
@@ -56,18 +59,27 @@ pub const N_ACTIONS: usize = A_SKIP + 1;
 // Float feature layout.
 pub const F_GLOBAL: usize = 0;
 /// Scalars, then a one-hot of the pending choice's kind (`THEN_KINDS`).
-pub const GLOBAL_LEN: usize = 24 + THEN_KINDS;
+pub const GLOBAL_LEN: usize = 25 + THEN_KINDS;
 const THEN_KINDS: usize = 10;
 pub const F_PLAYER_POWERS: usize = F_GLOBAL + GLOBAL_LEN;
 pub const F_HAND: usize = F_PLAYER_POWERS + N_POWERS;
-/// Per hand slot: present, upgraded, cost, X cost, playable, exhausts
-/// next, extra damage, enchantment amount, enchantment spent. The
-/// enchantment itself is an id (`I_ENCHANTS`).
-pub const HAND_FEATS: usize = 9;
+/// Per card, wherever it is (`card_feats`): present, upgraded, cost, X cost,
+/// playable now (hand only), cost resets at turn end, extra damage,
+/// enchantment amount, enchantment spent, Ethereal added, Retain added,
+/// replays, smogged, dampened, then the affliction one-hot (Galvanized,
+/// Hexed, Bound). The card and its enchantment are ids.
+pub const CARD_FEATS: usize = 17;
+pub const HAND_FEATS: usize = CARD_FEATS;
 pub const F_PILES: usize = F_HAND + MAX_HAND * HAND_FEATS;
-/// Draw, discard, exhaust: counts per (card, upgraded).
-pub const PILE_LEN: usize = N_CARDS * 2;
-pub const F_ENEMIES: usize = F_PILES + 3 * PILE_LEN;
+/// Distinct (pile, card) rows. Decks hold at most about 40 distinct cards,
+/// and a card spread over three piles takes a row in each; rows past this
+/// drop from the end, the exhaust pile first.
+pub const MAX_PILE_ROWS: usize = 64;
+/// Per pile row: `card_feats`, then how many copies, which pile (draw,
+/// discard, exhaust), and for a card the player put on top of the draw
+/// pile, its place from the top.
+pub const PILE_FEATS: usize = CARD_FEATS + 5;
+pub const F_ENEMIES: usize = F_PILES + MAX_PILE_ROWS * PILE_FEATS;
 /// Per enemy slot: creature fields, a one-hot over intent kinds, the
 /// intent numbers, then powers. The kinds are a vocabulary (`INTENT_KINDS`)
 /// so a new one is an append, like a new power.
@@ -76,9 +88,12 @@ pub const ENEMY_BASE: usize = 7;
 pub const INTENT_NUMS: usize = 5;
 pub const ENEMY_FEATS: usize = ENEMY_BASE + N_INTENTS + INTENT_NUMS + N_POWERS;
 pub const F_RELICS: usize = F_ENEMIES + MAX_ENEMIES * ENEMY_FEATS;
-pub const F_POTIONS: usize = F_RELICS + 2 * N_RELICS;
+/// Per relic, each a block of `N_RELICS`: held, counter, per-combat
+/// counter, used this combat.
+pub const RELIC_FEATS: usize = 4;
+pub const F_POTIONS: usize = F_RELICS + RELIC_FEATS * N_RELICS;
 pub const F_CHOICES: usize = F_POTIONS + MAX_POTIONS;
-pub const CHOICE_FEATS: usize = 3;
+pub const CHOICE_FEATS: usize = CARD_FEATS;
 pub const N_FLOATS: usize = F_CHOICES + MAX_CHOICES * CHOICE_FEATS;
 
 // Id layout.
@@ -90,7 +105,13 @@ pub const I_CHOICES: usize = I_POTIONS + MAX_POTIONS;
 pub const I_MOVES: usize = I_CHOICES + MAX_CHOICES;
 /// Each hand slot's enchantment, by `ALL_ENCHANTMENTS` index; 0 for none.
 pub const I_ENCHANTS: usize = I_MOVES + MAX_ENEMIES;
-pub const N_IDS: usize = I_ENCHANTS + MAX_HAND;
+pub const I_CHOICE_ENCHANTS: usize = I_ENCHANTS + MAX_HAND;
+/// Each pile row's card and enchantment.
+pub const I_PILES: usize = I_CHOICE_ENCHANTS + MAX_CHOICES;
+pub const I_PILE_ENCHANTS: usize = I_PILES + MAX_PILE_ROWS;
+/// The move a stunned enemy goes back to, when the stun names one.
+pub const I_RESUMES: usize = I_PILE_ENCHANTS + MAX_PILE_ROWS;
+pub const N_IDS: usize = I_RESUMES + MAX_ENEMIES;
 
 /// Move embedding vocabulary; 0 is the pad. Not a const: the names come
 /// from the monster graphs.
@@ -124,24 +145,47 @@ fn then_kind(then: Then) -> usize {
     }
 }
 
-/// Sort key that makes hand and choice slots order-free.
-/// Everything the observation shows about a card, so two hand positions
-/// that look alike really are alike. Three copies of one card carrying
-/// different enchantments sort apart, and the same way every turn.
-/// `extra_damage` is never negative, so its bits order like the number.
-fn card_key(c: &Combat, k: &Card) -> (usize, bool, i32, usize, i32, i32, bool, u64, bool) {
-    let e = k.enchantment;
-    (
-        k.id as usize,
-        k.upgraded,
-        c.cost(k),
-        e.map_or(0, |e| e.id as usize + 1),
-        e.map_or(0, |e| e.amount),
-        e.map_or(0, |e| e.data),
-        e.is_some_and(|e| e.disabled),
-        k.extra_damage.to_bits(),
-        k.exhaust_on_next_play,
-    )
+/// What the player sees on a card, wherever it lies; slot 4 (playable now)
+/// is the hand's to fill. `Card::captured_x`, `exhaust_on_next_play` and
+/// `dupe` only live while a card is being played, so no decision sees them.
+fn card_feats(c: &Combat, k: &Card) -> [f32; CARD_FEATS] {
+    let mut f = [0.0; CARD_FEATS];
+    f[0] = 1.0;
+    f[1] = k.upgraded as u8 as f32;
+    f[2] = c.cost(k) as f32 / 3.0;
+    f[3] = k.def().x_cost as u8 as f32;
+    f[5] = k.cost_this_turn.is_some() as u8 as f32;
+    // Flat extra damage the card carries: Rampage's growth, Aeonglass's
+    // Wither upgrades and Momentum's banked amount are the same thing to a
+    // policy.
+    f[6] = (k.extra_damage as f32 + k.enchantment.map_or(0, |e| e.data) as f32) / 10.0;
+    if let Some(e) = &k.enchantment {
+        f[7] = e.amount as f32 / 3.0;
+        f[8] = e.disabled as u8 as f32;
+    }
+    f[9] = k.ethereal_added as u8 as f32;
+    f[10] = k.retain_added as u8 as f32;
+    f[11] = k.replay as f32 / 2.0;
+    f[12] = k.smogged as u8 as f32;
+    f[13] = k.dampened as u8 as f32;
+    if let Some(a) = k.affliction {
+        f[14 + match a {
+            Affliction::Galvanized => 0,
+            Affliction::Hexed => 1,
+            Affliction::Bound => 2,
+        }] = 1.0;
+    }
+    f
+}
+
+/// Sort key that makes hand, choice and pile slots order-free: everything
+/// the observation shows about a card, so two cards that look alike really
+/// are alike. Three copies of one card carrying different enchantments sort
+/// apart, and the same way every turn.
+type CardKey = (usize, usize, [u32; CARD_FEATS]);
+
+fn card_key(c: &Combat, k: &Card) -> CardKey {
+    (k.id as usize, k.enchantment.map_or(0, |e| e.id as usize + 1), card_feats(c, k).map(f32::to_bits))
 }
 
 /// Hand indices in slot order.
@@ -234,10 +278,11 @@ fn mask_in(c: &Combat, hand: &[usize], choices: &[(u32, &Card)], out: &mut [bool
     }
 }
 
-/// Each power as the number its icon shows, a tenth of it.
+/// Each power as the number its icon shows, a tenth of it, compressed past
+/// ten so large amounts (Plow's 150 against 160) still read apart.
 fn powers_into(c: &Combat, r: CreatureRef, out: &mut [f32]) {
     for p in &c.creature(r).powers {
-        out[p.id as usize] = (p.display_amount() as f32 / 10.0).clamp(-10.0, 10.0);
+        out[p.id as usize] = (p.display_amount() as f32 / 10.0).asinh();
     }
 }
 
@@ -327,40 +372,36 @@ pub fn encode(c: &Combat, floats: &mut [f32], ids: &mut [i64], mask_out: &mut [b
     // cost so far; without these the value head had to guess it.
     g[22] = c.stats.player_start_hp as f32 / 100.0;
     g[23] = c.stats.start_potions as f32 / MAX_POTIONS as f32;
+    // Chains of Binding lets one Bound card through a turn.
+    g[24] = c.stats.bound_played as u8 as f32;
     if let Some(p) = &c.pending {
-        g[24 + then_kind(p.then)] = 1.0;
+        g[25 + then_kind(p.then)] = 1.0;
     }
 
     powers_into(c, CreatureRef::Player, &mut floats[F_PLAYER_POWERS..F_HAND]);
 
     let hand = hand_order(c);
     let choices = choice_order(c);
+    mask_in(c, &hand, &choices, mask_out);
     for (slot, &i) in hand.iter().enumerate().take(MAX_HAND) {
         let k = &p.hand[i];
-        let cost = c.cost(k);
         let f = &mut floats[F_HAND + slot * HAND_FEATS..][..HAND_FEATS];
-        f[0] = 1.0;
-        f[1] = k.upgraded as u8 as f32;
-        f[2] = cost as f32 / 3.0;
-        f[3] = k.def().x_cost as u8 as f32;
-        f[4] = (cost >= 0 && cost <= p.energy) as u8 as f32;
-        f[5] = k.exhaust_on_next_play as u8 as f32;
-        // Flat extra damage the card carries: Rampage's growth and
-        // Momentum's banked amount are the same thing to a policy.
-        f[6] = (k.extra_damage as f32 + k.enchantment.map_or(0, |e| e.data) as f32) / 10.0;
-        if let Some(e) = &k.enchantment {
-            f[7] = e.amount as f32 / 3.0;
-            f[8] = e.disabled as u8 as f32;
-            ids[I_ENCHANTS + slot] = e.id as i64 + 1;
-        }
+        f.copy_from_slice(&card_feats(c, k));
+        f[4] = mask_out[A_PLAY + slot * TARGETS..][..TARGETS].contains(&true) as u8 as f32;
         ids[I_HAND + slot] = k.id as i64 + 1;
+        ids[I_ENCHANTS + slot] = k.enchantment.map_or(0, |e| e.id as i64 + 1);
     }
 
-    for (n, pile) in [&p.draw, &p.discard, &p.exhaust].into_iter().enumerate() {
-        let f = &mut floats[F_PILES + n * PILE_LEN..][..PILE_LEN];
-        for k in pile {
-            f[k.id as usize * 2 + k.upgraded as usize] += 1.0;
+    for (row, (pile, key, k, n)) in pile_rows(c).into_iter().enumerate().take(MAX_PILE_ROWS) {
+        let f = &mut floats[F_PILES + row * PILE_FEATS..][..PILE_FEATS];
+        f[..CARD_FEATS].copy_from_slice(&key.2.map(f32::from_bits));
+        f[CARD_FEATS] = n as f32 / 10.0;
+        f[CARD_FEATS + 1 + pile.min(2)] = 1.0;
+        if let Some(top) = pile.checked_sub(3) {
+            f[CARD_FEATS + 4] = (top + 1) as f32 / 10.0;
         }
+        ids[I_PILES + row] = k.id as i64 + 1;
+        ids[I_PILE_ENCHANTS + row] = key.1 as i64;
     }
 
     for (slot, &i) in enemy_slots(c).iter().enumerate() {
@@ -377,11 +418,17 @@ pub fn encode(c: &Combat, floats: &mut [f32], ids: &mut [i64], mask_out: &mut [b
         powers_into(c, CreatureRef::Enemy(i), &mut f[ENEMY_BASE + N_INTENTS + INTENT_NUMS..]);
         ids[I_ENEMIES + slot] = e.monster.id as i64 + 1;
         ids[I_MOVES + slot] = e.monster.next_move_name().and_then(monster::move_index).map_or(0, |m| m as i64 + 1);
+        ids[I_RESUMES + slot] = e.monster.resume_move_name().and_then(monster::move_index).map_or(0, |m| m as i64 + 1);
     }
 
+    // `Relic::scratch` holds a card uid for the length of one play, nothing
+    // a decision sees.
     for r in &c.relics {
-        floats[F_RELICS + r.id as usize] = 1.0;
-        floats[F_RELICS + N_RELICS + r.id as usize] = r.counter as f32 / 10.0;
+        let i = F_RELICS + r.id as usize;
+        floats[i] = 1.0;
+        floats[i + N_RELICS] = r.counter as f32 / 10.0;
+        floats[i + 2 * N_RELICS] = r.combat_counter as f32 / 10.0;
+        floats[i + 3 * N_RELICS] = r.used as u8 as f32;
     }
 
     for (slot, id) in c.potions.iter().enumerate().take(MAX_POTIONS) {
@@ -392,14 +439,30 @@ pub fn encode(c: &Combat, floats: &mut [f32], ids: &mut [i64], mask_out: &mut [b
     }
 
     for (slot, (_, k)) in choices.iter().enumerate() {
-        let f = &mut floats[F_CHOICES + slot * CHOICE_FEATS..][..CHOICE_FEATS];
-        f[0] = 1.0;
-        f[1] = k.upgraded as u8 as f32;
-        f[2] = c.cost(k) as f32 / 3.0;
+        floats[F_CHOICES + slot * CHOICE_FEATS..][..CHOICE_FEATS].copy_from_slice(&card_feats(c, k));
         ids[I_CHOICES + slot] = k.id as i64 + 1;
+        ids[I_CHOICE_ENCHANTS + slot] = k.enchantment.map_or(0, |e| e.id as i64 + 1);
     }
+}
 
-    mask_in(c, &hand, &choices, mask_out);
+/// The piles as (pile, key, a card, copies), pile 0 to 2 being draw,
+/// discard and exhaust and 3 + n the card n places from the top of the draw
+/// pile that the player put there. Known cards come first, then the rest
+/// of each pile grouped by key, so a truncated list loses exhaust rows.
+fn pile_rows(c: &Combat) -> Vec<(usize, CardKey, &Card, u32)> {
+    let p = &c.player;
+    let known = p.known_top.min(p.draw.len());
+    let piles = [&p.draw[known..], &p.discard[..], &p.exhaust[..]];
+    let mut rows: Vec<(usize, CardKey, &Card, u32)> = p.draw[..known].iter().enumerate().map(|(n, k)| (3 + n, card_key(c, k), k, 1)).collect();
+    rows.extend(piles.into_iter().enumerate().flat_map(|(pile, cards)| cards.iter().map(move |k| (pile, card_key(c, k), k, 1))));
+    let rank = |pile: usize| if pile >= 3 { pile - 3 } else { MAX_PILE_ROWS + pile };
+    rows.sort_unstable_by(|a, b| (rank(a.0), &a.1).cmp(&(rank(b.0), &b.1)));
+    rows.dedup_by(|b, a| {
+        let same = a.0 == b.0 && a.1 == b.1;
+        a.3 += same as u32;
+        same
+    });
+    rows
 }
 
 /// Names for the Python side: card ids by vocabulary index.
@@ -622,13 +685,13 @@ mod tests {
         let (mut floats, mut ids, mut m) = (vec![0.0; N_FLOATS], vec![0; N_IDS], vec![false; N_ACTIONS]);
         let shown = |floats: &[f32]| floats[F_ENEMIES + ENEMY_BASE + N_INTENTS + INTENT_NUMS + PowerId::WitheringPresence as usize];
         encode(&c, &mut floats, &mut ids, &mut m);
-        assert_eq!(shown(&floats), 0.6);
+        assert_eq!(shown(&floats), 0.6f32.asinh());
         for _ in 0..2 {
             let play = c.legal_actions().into_iter().find(|a| matches!(a, Action::PlayCard { .. })).expect("a playable card");
             c.step(play);
         }
         encode(&c, &mut floats, &mut ids, &mut m);
-        assert_eq!(shown(&floats), 0.4);
+        assert_eq!(shown(&floats), 0.4f32.asinh());
     }
 
     /// An attack intent reads as the game shows it: the enemy's Strength
@@ -658,6 +721,65 @@ mod tests {
         encode(&c, &mut floats, &mut ids, &mut m);
         assert_eq!(hit(&floats), ((base + 3) as f64 * 1.5) as i32);
         assert!(floats[F_GLOBAL + 21] >= hit(&floats) as f32 / 50.0 - 1e-6, "unblocked incoming counts it");
+    }
+
+    /// A Bound Strike offered beside a plain one is a second option, not a
+    /// duplicate, and the hand shows which is Bound.
+    #[test]
+    fn afflicted_copies_stay_apart() {
+        use crate::combat::Pending;
+        let mut rng = Rng::new(3);
+        let mut c = generate(&mut rng, 8, Ascension(10)).combat(1);
+        c.player.hand.clear();
+        let mut bound = Card::new(102, CardId::StrikeIronclad, false);
+        bound.affliction = Some(Affliction::Bound);
+        c.player.hand.extend([Card::new(101, CardId::StrikeIronclad, false), bound]);
+        let (mut floats, mut ids, mut m) = (vec![0.0; N_FLOATS], vec![0; N_IDS], vec![false; N_ACTIONS]);
+        encode(&c, &mut floats, &mut ids, &mut m);
+        let bound_flags: Vec<f32> = (0..2).map(|slot| floats[F_HAND + slot * HAND_FEATS + 16]).collect();
+        assert_eq!(bound_flags, vec![0.0, 1.0]);
+        c.pending = Some(Pending { options: vec![101, 102], then: Then::Exhaust, can_skip: false });
+        assert_eq!(choice_order(&c).len(), 2);
+    }
+
+    /// Piles are rows of (pile, card, copies): two fresh Withers share a
+    /// row, and one that Aeonglass has sharpened gets its own.
+    #[test]
+    fn pile_rows_group_cards_that_look_alike() {
+        let mut rng = Rng::new(3);
+        let mut c = generate(&mut rng, 8, Ascension(10)).combat(1);
+        c.player.draw.clear();
+        c.player.discard.clear();
+        c.player.exhaust.clear();
+        let mut sharp = Card::new(203, CardId::Wither, false);
+        sharp.extra_damage = 3.0;
+        c.player.draw.extend([Card::new(201, CardId::Wither, false), sharp, Card::new(202, CardId::Wither, false)]);
+        let (mut floats, mut ids, mut m) = (vec![0.0; N_FLOATS], vec![0; N_IDS], vec![false; N_ACTIONS]);
+        encode(&c, &mut floats, &mut ids, &mut m);
+        let row = |r: usize| &floats[F_PILES + r * PILE_FEATS..][..PILE_FEATS];
+        let rows: Vec<(f32, f32, f32)> = (0..3).map(|r| (row(r)[6], row(r)[CARD_FEATS], row(r)[CARD_FEATS + 1])).collect();
+        assert_eq!(rows, vec![(0.0, 0.2, 1.0), (0.3, 0.1, 1.0), (0.0, 0.0, 0.0)]);
+        assert_eq!(ids[I_PILES..I_PILES + 3], [CardId::Wither as i64 + 1, CardId::Wither as i64 + 1, 0]);
+    }
+
+    /// A card put on top of the draw pile shows in its place until it is
+    /// drawn; one shuffled in at random makes the top unknown again.
+    #[test]
+    fn the_known_top_of_the_draw_pile_shows() {
+        let mut rng = Rng::new(3);
+        let mut c = generate(&mut rng, 8, Ascension(10)).combat(1);
+        let (mut floats, mut ids, mut m) = (vec![0.0; N_FLOATS], vec![0; N_IDS], vec![false; N_ACTIONS]);
+        let top = |c: &Combat, floats: &mut Vec<f32>, ids: &mut Vec<i64>, m: &mut Vec<bool>| {
+            encode(c, floats, ids, m);
+            (floats[F_PILES + CARD_FEATS + 4], ids[I_PILES])
+        };
+        c.put_card(Card::new(301, CardId::Bash, true), Pile::DrawTop);
+        assert_eq!(top(&c, &mut floats, &mut ids, &mut m), (0.1, CardId::Bash as i64 + 1));
+        c.put_card(Card::new(302, CardId::Wound, false), Pile::DrawRandom);
+        assert_eq!(top(&c, &mut floats, &mut ids, &mut m).0, 0.0);
+        c.put_card(Card::new(303, CardId::Bash, true), Pile::DrawTop);
+        c.take_card(c.player.draw[0].uid);
+        assert_eq!(c.player.known_top, 0);
     }
 
     #[test]

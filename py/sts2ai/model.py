@@ -53,6 +53,10 @@ SHAPE_FIELDS = (
     "global_len",
     "enemy_base",
     "intent_nums",
+    "card_feats",
+    "max_pile_rows",
+    "pile_feats",
+    "relic_feats",
 )
 
 
@@ -384,25 +388,23 @@ class SlotAttention(Policy):
         # Named like `SlotMLP`'s so `vocab.remap_state` moves their input
         # columns when a vocabulary grows: `enemy` as the enemy encoder,
         # `glob` as the torso with no embeddings after the floats.
-        self.enemy = nn.Sequential(nn.Linear(monster_dim + move_dim + L.enemy_feats, enemy_dim), nn.ReLU(), nn.Linear(enemy_dim, enemy_dim), nn.ReLU())
+        # The enemy's next move, then the move a stun hands back to.
+        self.enemy = nn.Sequential(nn.Linear(monster_dim + 2 * move_dim + L.enemy_feats, enemy_dim), nn.ReLU(), nn.Linear(enemy_dim, enemy_dim), nn.ReLU())
         self.glob = nn.Linear(L.n_floats - L.max_enemies * L.enemy_feats, d)
         # One projection per token kind; their biases tell the kinds apart.
         # Choices are not tokens (module docstring).
         self.hand_in = nn.Linear(card_dim + enchant_dim + L.hand_feats, d)
         self.enemy_in = nn.Linear(enemy_dim, d)
         self.potion_in = nn.Linear(potion_dim + 1, d)
-        self.choice_in = nn.Linear(card_dim + L.choice_feats, d)
+        self.choice_in = nn.Linear(card_dim + enchant_dim + L.choice_feats, d)
         self.encoder = Encoder(EncoderLayer(d, heads, 4 * d), depth, d)
         if piles:
-            # A pile's token: the mean embedding of its cards (an upgraded
-            # copy shifted by `pile_up`) and its size, then which pile it is.
-            # Zero at the start, so a warm start from a network without
-            # them only gains three blank tokens.
-            self.pile_up = nn.Parameter(torch.zeros(card_dim))
-            self.pile_in = nn.Linear(card_dim + 1, d)
+            # A pile's token: each of its rows (a card as `card_feats`
+            # describes it, and how many) through `pile_row`, averaged over
+            # the pile's cards, with the pile's size, then which pile it is.
+            self.pile_row = nn.Sequential(nn.Linear(card_dim + enchant_dim + L.pile_feats, d), nn.ReLU())
+            self.pile_in = nn.Linear(d + 1, d)
             self.pile_kind = nn.Parameter(torch.zeros(3, d))
-            nn.init.zeros_(self.pile_in.weight)
-            nn.init.zeros_(self.pile_in.bias)
         if choice_attn:
             self.choice_norm = nn.LayerNorm(d)
             self.choice_attn = Attention(d, heads)
@@ -461,11 +463,16 @@ class SlotAttention(Policy):
 
         enemies = self.enemy(
             torch.cat(
-                [self.monster(ids[:, L.i_enemies : L.i_enemies + E]), self.move(ids[:, L.i_moves : L.i_moves + E]), enemy_floats],
+                [
+                    self.monster(ids[:, L.i_enemies : L.i_enemies + E]),
+                    self.move(ids[:, L.i_moves : L.i_moves + E]),
+                    self.move(ids[:, L.i_resumes : L.i_resumes + E]),
+                    enemy_floats,
+                ],
                 dim=2,
             )
         )
-        choices = self.choice_in(torch.cat([self.card(choice_ids), choice_feats], dim=2))
+        choices = self.choice_in(torch.cat([self.card(choice_ids), self.enchant(ids[:, L.i_choice_enchants : L.i_choice_enchants + C]), choice_feats], dim=2))
         offered = (choice_ids != 0).unsqueeze(2)
         glob = self.glob(torch.cat([floats[:, : L.f_enemies], floats[:, L.f_relics :]], dim=1))
         glob = glob + (choices * offered).sum(1) / offered.sum(1).clamp(min=1)
@@ -476,7 +483,7 @@ class SlotAttention(Policy):
                 self.enemy_in(enemies),
                 self.potion_in(torch.cat([self.potion(potion_ids), potion_feats], dim=2)),
             ]
-            + ([self.pile_tokens(floats)] if self.arch.piles else []),
+            + ([self.pile_tokens(floats, ids)] if self.arch.piles else []),
             dim=1,
         )
         x = self.encoder(tokens, keep, used)
@@ -493,14 +500,18 @@ class SlotAttention(Policy):
         logits = torch.cat([play, use, end_skip[:, :1], choose, end_skip[:, 1:]], dim=1)
         return logits, g
 
-    def pile_tokens(self, floats: Tensor) -> Tensor:
-        """`[B, 3, d]`: the draw, discard and exhaust piles, from their
-        counts per (card, upgraded) through the card embedding."""
+    def pile_tokens(self, floats: Tensor, ids: Tensor) -> Tensor:
+        """`[B, 3, d]`: the draw, discard and exhaust piles, from their rows
+        (`sim::encode::pile_rows`). A known top card is a draw pile row."""
         L = self.layout
-        counts = floats[:, L.f_piles : L.f_piles + 3 * 2 * L.n_cards].view(-1, 3, L.n_cards, 2)
-        cards = self.card.weight[1:].to(counts.dtype)
-        summed = counts[..., 0] @ cards + counts[..., 1] @ (cards + self.pile_up.to(counts.dtype))
-        size = counts.sum(dim=(2, 3)).unsqueeze(2)
+        R, F = L.max_pile_rows, L.pile_feats
+        rows = floats[:, L.f_piles : L.f_piles + R * F].view(-1, R, F)
+        cards = torch.cat([self.card(ids[:, L.i_piles : L.i_piles + R]), self.enchant(ids[:, L.i_pile_enchants : L.i_pile_enchants + R]), rows], dim=2)
+        # Copies per row, put in its pile's column: `[B, R, 3]`.
+        n = L.card_feats
+        weight = rows[:, :, n : n + 1] * 10 * rows[:, :, n + 1 : n + 4]
+        size = weight.sum(1).unsqueeze(2)
+        summed = weight.transpose(1, 2) @ self.pile_row(cards)
         return self.pile_in(torch.cat([summed / size.clamp(min=1), size / 10], dim=2)) + self.pile_kind
 
 

@@ -38,11 +38,16 @@ maturin from `sim-py/` into the package `sts2ai._sim`.
   become the held-out set. Encounters from both act 1 variants (Overgrowth
   and Underdocks) are drawn from one pool: each fight is independent, so
   there is nothing to gain from keeping them apart.
-- `sim/src/encode.rs`: the fixed observation and action space. Hand and
-  choice slots are sorted by (card, upgraded, cost) so the policy sees a
-  multiset; each hand slot carries its card id, its enchantment id, and
-  the enchantment's amount and spent flag. Draw, discard, and exhaust
-  piles are count vectors over (card, upgraded). Enemies sit in the
+- `sim/src/encode.rs`: the fixed observation and action space. Every
+  card, in hand, offered by a choice or in a pile, is its card id, its
+  enchantment id and `card_feats`: upgrade, cost, enchantment state, extra
+  damage, added keywords, replays, Smog, Dampen and the act 3 afflictions.
+  Hand and choice slots are sorted by that description so the policy sees
+  a multiset, and hand slots add whether the card can be played now. The
+  draw, discard and exhaust piles are up to 64 rows of (pile, card,
+  copies); cards the player put on top of the draw pile (Headbutt) get a
+  row each with their place. Before gen10 piles were count vectors over
+  (card, upgraded). Enemies sit in the
   game's slot order but nothing reads the order: each slot has its
   creature fields, a one-hot over intent kinds (a vocabulary, so act 2
   kinds append), the intent numbers, and powers. An attack's numbers are
@@ -159,8 +164,8 @@ plays copies one more player turn: 86.7%, at twice the cost.
 The copies judge a first action by how the policy would finish the turn.
 `sim::turnsearch` walks every line to the end of the turn instead, over
 distinct states: a transposition table keyed on what the player can know
-(`state_key`: piles as multisets, cards by content not uid, no draw order,
-no dice) merges identical cards and commuting plays. A state is worth its
+(`state_key`: piles as multisets, cards by content not uid, no draw order
+beyond the cards the player put on top, no dice) merges identical cards and commuting plays. A state is worth its
 best action, an action the expectation over its outcomes of the shaped
 reward on the way plus the value head where the next turn starts.
 

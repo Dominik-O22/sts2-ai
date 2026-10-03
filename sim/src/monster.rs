@@ -579,6 +579,16 @@ impl Monster {
         self.next_move.map(|i| self.states[i].name())
     }
 
+    /// The move a stun hands back to: for a plain stun the one it
+    /// interrupted, which the player saw queued. `None` when the follow-up
+    /// is a roll, which nobody sees until it happens.
+    pub fn resume_move_name(&self) -> Option<&'static str> {
+        match &self.states[self.next_move?] {
+            State::Move { name: "STUNNED", follow_up: Some(f), .. } => Some(self.states[*f].name()).filter(|n| !n.is_empty()),
+            _ => None,
+        }
+    }
+
     /// `MonsterMoveStateMachine.RollMove` via `FindNextMoveState`.
     pub fn roll_move(&mut self, rng: &mut Rng, ctx: RollCtx) -> usize {
         if self.can_transition_away() && !(!self.performed_first && self.states[self.current].is_move()) {
