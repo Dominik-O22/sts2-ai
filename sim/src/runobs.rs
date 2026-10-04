@@ -718,6 +718,24 @@ pub const FORECAST_ROLLS: usize = 4;
 /// reading.
 pub fn forecast_fights(run: &RunState) -> Vec<FightSetup> {
     let plan = &run.plan.acts[run.act];
+    let elites = crate::encounter::ALL.iter().copied().filter(|e| e.kind() == Kind::Elite && e.act() == plan.act);
+    rolled(run, elites.chain([plan.boss]).chain(plan.second_boss).collect())
+}
+
+/// The next act's elites and bosses, all of each, pooled the way
+/// `forecast_fights` pools the elites: the map does not show the next
+/// act's boss until the act begins. Against the player as they stand, so
+/// a pick that only pays off later still shows. Empty in the last act.
+pub fn lookahead_fights(run: &RunState) -> Vec<FightSetup> {
+    let Some(next) = run.plan.acts.get(run.act + 1) else { return Vec::new() };
+    let hard = |e: &Encounter| matches!(e.kind(), Kind::Elite | Kind::Boss) && e.act() == next.act;
+    rolled(run, crate::encounter::ALL.iter().copied().filter(hard).collect())
+}
+
+/// `encounters` against `run`'s player, `FORECAST_ROLLS` openings each,
+/// with the cards, relics, enchantments and potions the sim lacks left
+/// out; empty when one cannot be built.
+fn rolled(run: &RunState, encounters: Vec<Encounter>) -> Vec<FightSetup> {
     let mut player = run.clone();
     player.deck.retain(|c| sim_card(&c.id).is_some_and(|id| !crate::card::UNSUPPORTED_CARDS.iter().any(|(u, _)| *u == id)));
     for card in &mut player.deck {
@@ -731,14 +749,11 @@ pub fn forecast_fights(run: &RunState) -> Vec<FightSetup> {
             *slot = None;
         }
     }
-    let run = &player;
-    let elites = crate::encounter::ALL.iter().copied().filter(|e| e.kind() == Kind::Elite && e.act() == plan.act);
-    let encounters: Vec<Encounter> = elites.chain([plan.boss]).chain(plan.second_boss).collect();
     let mut out = Vec::with_capacity(encounters.len() * FORECAST_ROLLS);
     for encounter in encounters {
         for roll in 0..FORECAST_ROLLS {
             let enemies = encounter.monsters(&mut Rng::new(0xF0CA_57 + roll as u64));
-            match run.fight_setup(encounter, enemies) {
+            match player.fight_setup(encounter, enemies) {
                 Ok(setup) => out.push(setup),
                 Err(_) => return Vec::new(),
             }
@@ -837,6 +852,23 @@ mod tests {
         let mut c = visible("SEEDA");
         c.hp -= 1;
         assert_ne!(observe(&a, Decision::Card(&offers)), observe(&c, Decision::Card(&offers)), "HP is visible");
+    }
+
+    /// The next act's forecast holds every elite and boss that act can
+    /// hold, whichever boss the run's plan rolled, so two runs whose plans
+    /// differ look ahead to the same fights; the last act has none.
+    #[test]
+    fn the_lookahead_reads_no_hidden_information() {
+        let (a, b) = (visible("SEEDA"), visible("SEEDB"));
+        let fights = lookahead_fights(&a);
+        assert_eq!(fights, lookahead_fights(&b));
+        let next = a.plan.acts[1].act;
+        let hard: Vec<Encounter> = crate::encounter::ALL.iter().copied().filter(|e| matches!(e.kind(), Kind::Elite | Kind::Boss) && e.act() == next).collect();
+        assert_eq!(fights.len(), hard.len() * FORECAST_ROLLS);
+        assert!(hard.iter().all(|e| fights.iter().any(|f| f.encounter == *e)), "every elite and boss of the next act");
+        let mut last = a.clone();
+        last.act = last.plan.acts.len() - 1;
+        assert!(lookahead_fights(&last).is_empty());
     }
 
     /// The forecast fights are the act's elites as a pool and its boss,

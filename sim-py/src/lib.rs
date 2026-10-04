@@ -88,6 +88,11 @@ impl VecEnv {
         self.inner.set_restart_frac(frac);
     }
 
+    /// Weight of the next act's elites and bosses in afterstate scores.
+    fn set_lookahead(&mut self, weight: f32) {
+        self.inner.set_lookahead(weight);
+    }
+
     /// Curriculum: floors generated fights are drawn from.
     fn set_floors(&mut self, min: u32, max: u32) {
         self.inner.set_floors(min, max);
