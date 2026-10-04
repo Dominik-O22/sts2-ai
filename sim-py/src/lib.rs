@@ -143,6 +143,35 @@ impl VecEnv {
         })
     }
 
+    /// `solve`'s winning line from each of `envs`' current state, replayed
+    /// on its own copy: per step the observation (floats, ids) and the
+    /// action's index, or `None` when no win was found. Clairvoyant: a
+    /// measuring instrument, never a policy.
+    #[pyo3(signature = (envs, beam=300, turn_states=3000, max_turns=40))]
+    #[allow(clippy::type_complexity)]
+    fn solve_trace(&self, py: Python<'_>, envs: Vec<usize>, beam: usize, turn_states: usize, max_turns: u32) -> Vec<Option<Vec<(Vec<f32>, Vec<i64>, usize)>>> {
+        use rayon::prelude::*;
+        let cfg = sim::solve::Config { beam, turn_states, max_turns };
+        let roots: Vec<&sim::combat::Combat> = envs.iter().map(|&i| self.inner.combat(i)).collect();
+        py.detach(|| {
+            roots
+                .par_iter()
+                .map(|&root| {
+                    let line = sim::solve::solve(root, &cfg).line?;
+                    let mut c = root.clone();
+                    let (mut floats, mut ids, mut mask) = (vec![0.0; N_FLOATS], vec![0; N_IDS], vec![false; N_ACTIONS]);
+                    let mut out = Vec::with_capacity(line.len());
+                    for a in line {
+                        encode(&c, &mut floats, &mut ids, &mut mask);
+                        out.push((floats.clone(), ids.clone(), index_of(&c, &hand_order(&c), &choice_order(&c), a)?));
+                        c.step(a);
+                    }
+                    Some(out)
+                })
+                .collect()
+        })
+    }
+
     /// (encounter, kind) of env `i`'s current fight.
     fn fight(&self, i: usize) -> (String, String) {
         let s = self.inner.setup(i);
