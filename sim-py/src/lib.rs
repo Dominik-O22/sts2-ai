@@ -28,8 +28,8 @@ struct VecEnv {
     inner: Inner,
 }
 
-/// One finished fight: (env, won, hp_frac, hp_lost, potions_used, steps, floor, encounter, kind, reward, run).
-type End = (usize, bool, f32, f32, u32, u32, u32, String, String, f32, Option<RunFight>);
+/// One finished fight: (env, won, hp_frac, hp_lost, potions_used, steps, floor, encounter, kind, reward, restart, run).
+type End = (usize, bool, f32, f32, u32, u32, u32, String, String, f32, bool, Option<RunFight>);
 
 /// A run fight's place in its run: (seed index, act, floor, deck size, how
 /// the run ended with it: "won", "died", "stuck: <why>", or None; where the
@@ -70,7 +70,7 @@ impl VecEnv {
     #[new]
     #[pyo3(signature = (n, seed=0, asc=10, min_floor=1, max_floor=LAST_FLOOR, max_steps=500, hard_frac=0.0))]
     fn new(n: usize, seed: u64, asc: u8, min_floor: u32, max_floor: u32, max_steps: u32, hard_frac: f32) -> Self {
-        let cfg = EnvConfig { asc: Ascension(asc), min_floor, max_floor, max_steps, hard_frac };
+        let cfg = EnvConfig { asc: Ascension(asc), min_floor, max_floor, max_steps, hard_frac, restart_frac: 0.0 };
         Self { inner: Inner::new(n, seed, cfg) }
     }
 
@@ -81,6 +81,11 @@ impl VecEnv {
     /// Curriculum: fraction of resets forced onto an elite or boss.
     fn set_hard_frac(&mut self, frac: f32) {
         self.inner.set_hard_frac(frac);
+    }
+
+    /// Fraction of resets that resume a kept elite or boss turn start.
+    fn set_restart_frac(&mut self, frac: f32) {
+        self.inner.set_restart_frac(frac);
     }
 
     /// Curriculum: floors generated fights are drawn from.
@@ -472,7 +477,7 @@ impl VecEnv {
 /// An ended fight as the tuple Python's `End` reads.
 fn episode_end(e: sim::env::EpisodeEnd) -> End {
     let (encounter, kind) = (format!("{:?}", e.encounter), format!("{:?}", e.kind));
-    (e.env, e.won, e.hp_frac, e.hp_lost, e.potions_used, e.steps, e.floor, encounter, kind, e.reward, e.run.map(run_fight))
+    (e.env, e.won, e.hp_frac, e.hp_lost, e.potions_used, e.steps, e.floor, encounter, kind, e.reward, e.restart, e.run.map(run_fight))
 }
 
 /// Live view of one real combat: recorder lines in, the sim's state and

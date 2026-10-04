@@ -21,7 +21,7 @@ use crate::run::{Carried, RunState};
 use crate::runobs::{self, RunObs, RUN_FLOATS, RUN_IDS};
 use crate::potion::PotionId;
 use crate::relic::RelicId;
-use crate::types::{Ascension, AscensionLevel};
+use crate::types::{Ascension, AscensionLevel, Side};
 
 #[derive(Clone, Copy, Debug)]
 pub struct EnvConfig {
@@ -35,12 +35,31 @@ pub struct EnvConfig {
     /// floor from 5 up) or the boss instead, half each. The rest of the
     /// resets still roll elites and bosses at their natural rate.
     pub hard_frac: f32,
+    /// Fraction of resets that resume a turn start kept from an earlier
+    /// elite or boss fight (`Snapshot`) instead of starting a fight, once
+    /// the pool holds any.
+    pub restart_frac: f32,
 }
 
 impl Default for EnvConfig {
     fn default() -> Self {
-        Self { asc: Ascension(10), min_floor: 1, max_floor: LAST_FLOOR, max_steps: 500, hard_frac: 0.0 }
+        Self { asc: Ascension(10), min_floor: 1, max_floor: LAST_FLOOR, max_steps: 500, hard_frac: 0.0, restart_frac: 0.0 }
     }
+}
+
+/// Snapshots the restart pool holds, the oldest replaced first.
+const RESTART_POOL: usize = 4096;
+/// Share of eligible turn starts kept, so the pool spreads over many fights.
+const RESTART_KEEP: f32 = 0.25;
+
+/// A turn start of an elite or boss fight, kept whole so a later reset
+/// can resume it (`EnvConfig::restart_frac`): the setup and baseline the
+/// fight's rewards and its end report are measured from, with the combat.
+#[derive(Clone)]
+struct Snapshot {
+    setup: FightSetup,
+    combat: Combat,
+    base: Baseline,
 }
 
 /// What a finished fight looked like, for logging.
@@ -59,6 +78,8 @@ pub struct EpisodeEnd {
     pub encounter: Encounter,
     pub kind: Kind,
     pub reward: f32,
+    /// Resumed from the restart pool rather than played from its start.
+    pub restart: bool,
     /// The run the fight was in, in run mode.
     pub run: Option<RunFight>,
 }
@@ -356,6 +377,10 @@ struct Slot {
     /// When on (`VecEnv::log_fights`), each run elite and boss fight as it
     /// starts, in the recorder's `start` format with the run's act.
     fights: Option<Vec<String>>,
+    /// The fight was resumed from the restart pool.
+    restarted: bool,
+    /// A turn start this step kept for the pool, collected after the step.
+    kept: Option<Box<Snapshot>>,
 }
 
 /// Who makes a run-mode slot's run decisions.
@@ -885,14 +910,19 @@ impl Slot {
         if let Some(setup) = setup {
             self.start(setup);
             if self.combat.is_over() {
-                let later = self.reset(index, n, cfg, Pools { fixed: &[], hard: &[], real: &[] });
+                let later = self.reset(index, n, cfg, Pools { fixed: &[], hard: &[], real: &[], restarts: &[] });
                 return report.filter(|r| r.end.is_some()).or(later.filter(|r| r.end.is_some()));
             }
         }
         report.filter(|r| r.end.is_some())
     }
 
-    fn roll(&mut self, index: usize, n: usize, cfg: &EnvConfig, Pools { fixed, hard, real }: Pools) -> Option<RunFight> {
+    fn roll(&mut self, index: usize, n: usize, cfg: &EnvConfig, Pools { fixed, hard, real, restarts }: Pools) -> Option<RunFight> {
+        if self.run.is_none() && fixed.is_empty() && !restarts.is_empty() && self.rng.next_float(1.0) < cfg.restart_frac {
+            let snap = &restarts[self.rng.next_int(restarts.len())];
+            self.resume(snap);
+            return None;
+        }
         let acts = act_floor(cfg.min_floor).0..=act_floor(cfg.max_floor).0;
         let weighted: Vec<(Encounter, f32)> =
             hard.iter().copied().filter(|(e, _)| acts.contains(&(e.act().index() as u32))).collect();
@@ -949,8 +979,44 @@ impl Slot {
         self.setup = setup;
         self.resets += 1;
         self.steps = 0;
+        self.restarted = false;
         self.combat = self.setup.combat(self.rng.next_u64());
         self.base = Baseline::of(&self.combat);
+    }
+
+    /// Resume a kept turn start on a future the player cannot know: the
+    /// unseen part of the draw pile reshuffled and fresh dice, the
+    /// recording's script dropped, as the searches' forks do. The fight
+    /// keeps its setup and baseline, so its rewards add up to what the
+    /// whole fight's would from here.
+    fn resume(&mut self, snap: &Snapshot) {
+        self.setup = snap.setup.clone();
+        self.combat = snap.combat.clone();
+        self.combat.script = Default::default();
+        self.rng.shuffle(self.combat.player.unseen_draw());
+        self.combat.rngs = CombatRngs::new(self.rng.next_u64());
+        self.base = snap.base;
+        self.resets += 1;
+        self.steps = 0;
+        self.restarted = true;
+    }
+
+    /// Keep this turn start for the restart pool when it is the start of
+    /// turns 2 to 5 of an elite or boss fight played from its start, for
+    /// a share of them.
+    fn keep_turn_start(&mut self, before_turn: u32, cfg: &EnvConfig) {
+        let c = &self.combat;
+        let fresh_turn = c.player.turn != before_turn && c.side == Side::Player && c.pending.is_none() && !c.is_over();
+        if cfg.restart_frac > 0.0
+            && fresh_turn
+            && !self.restarted
+            && self.run.is_none()
+            && (2..=5).contains(&c.player.turn)
+            && matches!(self.setup.encounter.kind(), Kind::Elite | Kind::Boss)
+            && self.rng.next_float(1.0) < RESTART_KEEP
+        {
+            self.kept = Some(Box::new(Snapshot { setup: self.setup.clone(), combat: c.clone(), base: self.base }));
+        }
     }
 
     /// The pool of played fights this reset draws from, each taking its
@@ -981,6 +1047,7 @@ impl Slot {
             encounter: self.setup.encounter,
             kind: self.setup.encounter.kind(),
             reward: terminal_reward(c, self.base),
+            restart: self.restarted,
             run: None,
         }
     }
@@ -997,6 +1064,8 @@ struct Pools<'a> {
     /// Pools of played runs' fights, each drawn for its share of the
     /// resets with its enemies rolled afresh.
     real: &'a [(Vec<FightSetup>, f32)],
+    /// Kept turn starts, for the `restart_frac` share of resets.
+    restarts: &'a [Snapshot],
 }
 
 pub struct VecEnv {
@@ -1012,6 +1081,10 @@ pub struct VecEnv {
     real: Vec<(Vec<FightSetup>, f32)>,
     /// The afterstates built last (`afterstates`).
     pending: Option<Pending>,
+    /// The restart pool (`EnvConfig::restart_frac`) and where the next
+    /// kept turn start goes once it is full.
+    restarts: Vec<Snapshot>,
+    restart_next: usize,
 }
 
 impl VecEnv {
@@ -1021,13 +1094,13 @@ impl VecEnv {
                 let mut rng = Rng::new(seed.wrapping_mul(0x9E37_79B9).wrapping_add(i as u64));
                 let setup = generate(&mut rng, 1, cfg.asc);
                 let combat = setup.combat(0);
-                Slot { base: Baseline::of(&combat), combat, setup, steps: 0, rng, resets: 0, run: None, fights: None }
+                Slot { base: Baseline::of(&combat), combat, setup, steps: 0, rng, resets: 0, run: None, fights: None, restarted: false, kept: None }
             })
             .collect();
         for (i, s) in slots.iter_mut().enumerate() {
-            s.reset(i, n, &cfg, Pools { fixed: &[], hard: &[], real: &[] });
+            s.reset(i, n, &cfg, Pools { fixed: &[], hard: &[], real: &[], restarts: &[] });
         }
-        Self { slots, cfg, fixed: vec![], queued: vec![], hard: vec![], real: vec![], starts: Default::default(), pending: None }
+        Self { slots, cfg, fixed: vec![], queued: vec![], hard: vec![], real: vec![], starts: Default::default(), pending: None, restarts: vec![], restart_next: 0 }
     }
 
     pub fn len(&self) -> usize {
@@ -1046,6 +1119,11 @@ impl VecEnv {
     /// effect at each env's next reset.
     pub fn set_hard_frac(&mut self, frac: f32) {
         self.cfg.hard_frac = frac.clamp(0.0, 1.0);
+    }
+
+    /// Share of resets that resume a kept elite or boss turn start.
+    pub fn set_restart_frac(&mut self, frac: f32) {
+        self.cfg.restart_frac = frac.clamp(0.0, 1.0);
     }
 
     pub fn set_floors(&mut self, min: u32, max: u32) {
@@ -1094,7 +1172,7 @@ impl VecEnv {
         self.fixed = setups;
         let n = self.slots.len();
         let cfg = self.cfg;
-        let pools = Pools { fixed: &self.fixed, hard: &self.hard, real: &self.real };
+        let pools = Pools { fixed: &self.fixed, hard: &self.hard, real: &self.real, restarts: &[] };
         for (i, s) in self.slots.iter_mut().enumerate() {
             s.resets = 0;
             s.run = None;
@@ -1126,7 +1204,7 @@ impl VecEnv {
         self.slots.par_iter_mut().enumerate().for_each(|(i, s)| {
             s.resets = 0;
             s.run = Some(RunSlot::new(asc, base, i, choices, starts.clone()));
-            s.reset(i, n, &cfg, Pools { fixed: &[], hard, real: &[] });
+            s.reset(i, n, &cfg, Pools { fixed: &[], hard, real: &[], restarts: &[] });
         });
     }
 
@@ -1457,8 +1535,9 @@ impl VecEnv {
         let n = self.slots.len();
         assert!(actions.len() == n && rewards.len() == n && dones.len() == n, "batch size mismatch");
         let cfg = self.cfg;
-        let pools = Pools { fixed: &self.fixed, hard: &self.hard, real: &self.real };
-        self.slots
+        let pools = Pools { fixed: &self.fixed, hard: &self.hard, real: &self.real, restarts: &self.restarts };
+        let ends = self
+            .slots
             .par_iter_mut()
             .enumerate()
             .zip(actions.par_iter())
@@ -1477,6 +1556,7 @@ impl VecEnv {
                 let action = encode::decode(&s.combat, a as usize)
                     .unwrap_or_else(|| panic!("env {i}: action {a} is not legal; legal: {:?}", s.combat.legal_actions()));
                 let before = potential(&s.combat, s.base);
+                let turn = s.combat.player.turn;
                 s.combat.step(action);
                 s.steps += 1;
                 let over = s.combat.is_over() || s.steps >= cfg.max_steps;
@@ -1485,12 +1565,23 @@ impl VecEnv {
                 *d = over;
                 if let Some(end) = &mut end {
                     end.run = s.reset(i, n, &cfg, pools);
+                } else {
+                    s.keep_turn_start(turn, &cfg);
                 }
                 encode::encode(&s.combat, f, ids, m);
                 end
             })
             .flatten()
-            .collect()
+            .collect();
+        for snap in self.slots.iter_mut().filter_map(|s| s.kept.take()) {
+            if self.restarts.len() < RESTART_POOL {
+                self.restarts.push(*snap);
+            } else {
+                self.restarts[self.restart_next] = *snap;
+            }
+            self.restart_next = (self.restart_next + 1) % RESTART_POOL;
+        }
+        ends
     }
 
     fn check_buffers(&self, floats: &[f32], ids: &[i64], mask: &[bool]) {
@@ -2628,7 +2719,7 @@ pub(crate) mod tests {
         env.set_hard_weights(vec![(Encounter::KnowledgeDemonBoss, 1.0), (Encounter::VantomBoss, 0.0)]);
         for s in env.slots.iter_mut() {
             for _ in 0..20 {
-                s.reset(0, 4, &cfg, Pools { fixed: &[], hard: &env.hard, real: &[] });
+                s.reset(0, 4, &cfg, Pools { fixed: &[], hard: &env.hard, real: &[], restarts: &[] });
                 assert_eq!(s.setup.encounter, Encounter::KnowledgeDemonBoss);
                 assert_eq!(act_floor(s.setup.floor), (1, BOSS_FLOOR));
             }
@@ -2652,7 +2743,7 @@ pub(crate) mod tests {
         env.set_fixed(setups.clone());
         assert_eq!(env.slots[0].setup.encounter, setups[0].encounter);
         assert_eq!(env.slots[1].setup.encounter, setups[1].encounter);
-        env.slots[0].reset(0, 2, &env.cfg, Pools { fixed: &env.fixed, hard: &[], real: &[] });
+        env.slots[0].reset(0, 2, &env.cfg, Pools { fixed: &env.fixed, hard: &[], real: &[], restarts: &[] });
         assert_eq!(env.slots[0].setup.encounter, setups[2].encounter);
     }
 
@@ -2691,7 +2782,7 @@ pub(crate) mod tests {
         let pool = |enc: &str| crate::gen::run_setups(&line(enc), &ids, 1).unwrap();
         let mut env = VecEnv::new(1, 5, EnvConfig::default());
         env.set_real(vec![(pool("QUEEN_BOSS"), 0.25), (pool("AEONGLASS_BOSS"), 0.5)]);
-        let pools = Pools { fixed: &[], hard: &[], real: &env.real };
+        let pools = Pools { fixed: &[], hard: &[], real: &env.real, restarts: &[] };
         let mut counts = [0; 3];
         for _ in 0..4000 {
             env.slots[0].roll(0, 1, &env.cfg, pools);
@@ -2708,6 +2799,60 @@ pub(crate) mod tests {
 
     /// A played run's fight keeps its deck, HP, encounter and floor each
     /// time it is drawn.
+    /// Elite and boss turn starts fill the restart pool as fights are
+    /// played, and a resumed fight shows the player what the kept one
+    /// did, on a reshuffled unseen draw pile, its rewards summing to the
+    /// terminal reward less the potential it resumed at.
+    #[test]
+    fn restarts_resume_kept_turn_starts() {
+        let n = 32;
+        let cfg = EnvConfig { hard_frac: 1.0, restart_frac: 0.5, ..Default::default() };
+        let mut env = VecEnv::new(n, 3, cfg);
+        let (mut floats, mut ids, mut mask) = (vec![0.0; n * N_FLOATS], vec![0; n * N_IDS], vec![false; n * N_ACTIONS]);
+        let (mut rewards, mut dones) = (vec![0.0; n], vec![false; n]);
+        env.observe(&mut floats, &mut ids, &mut mask);
+        let mut rng = Rng::new(9);
+        let mut summed = vec![0.0f32; n];
+        let mut resumed = 0;
+        for _ in 0..3000 {
+            let actions: Vec<i64> = (0..n)
+                .map(|i| {
+                    let legal: Vec<usize> = (0..N_ACTIONS).filter(|&k| mask[i * N_ACTIONS + k]).collect();
+                    legal[rng.next_int(legal.len())] as i64
+                })
+                .collect();
+            let ends = env.step(&actions, &mut floats, &mut ids, &mut mask, &mut rewards, &mut dones);
+            for (i, r) in rewards.iter().enumerate() {
+                summed[i] += r;
+            }
+            for e in &ends {
+                // Shaping telescopes: from a resumed turn start the rewards
+                // sum to the terminal reward less the potential there.
+                assert!((summed[e.env] - e.reward).abs() < 1e-4, "env {}: summed {} vs terminal {}", e.env, summed[e.env], e.reward);
+                resumed += e.restart as usize;
+                let s = &env.slots[e.env];
+                summed[e.env] = potential(&s.combat, s.base);
+            }
+        }
+        assert!(!env.restarts.is_empty() && resumed > 0, "pool {} resumed {resumed}", env.restarts.len());
+        assert!(env.restarts.iter().all(|k| (2..=5).contains(&k.combat.player.turn) && matches!(k.setup.encounter.kind(), Kind::Elite | Kind::Boss)));
+
+        let snap = env.restarts[0].clone();
+        let slot = &mut env.slots[0];
+        slot.resume(&snap);
+        let (a, b) = (&slot.combat, &snap.combat);
+        assert!(slot.restarted && slot.base.hp == snap.base.hp);
+        assert_eq!(a.player.hand.iter().map(|k| k.uid).collect::<Vec<_>>(), b.player.hand.iter().map(|k| k.uid).collect::<Vec<_>>());
+        assert_eq!(a.player.creature.hp, b.player.creature.hp);
+        assert_eq!(a.enemies.iter().map(|e| e.creature.hp).collect::<Vec<_>>(), b.enemies.iter().map(|e| e.creature.hp).collect::<Vec<_>>());
+        let sorted = |c: &Combat| {
+            let mut v: Vec<u32> = c.player.draw.iter().map(|k| k.uid).collect();
+            v.sort_unstable();
+            v
+        };
+        assert_eq!(sorted(a), sorted(b), "the same cards wait to be drawn");
+    }
+
     #[test]
     fn real_setups_keep_the_run() {
         let ids = crate::replay::Ids::new();
@@ -2715,7 +2860,7 @@ pub(crate) mod tests {
         let real = crate::gen::run_setups(line, &ids, 1).unwrap();
         let mut env = VecEnv::new(8, 5, EnvConfig::default());
         env.set_real(vec![(real, 1.0)]);
-        let pools = Pools { fixed: &[], hard: &[], real: &env.real };
+        let pools = Pools { fixed: &[], hard: &[], real: &env.real, restarts: &[] };
         for s in env.slots.iter_mut() {
             s.reset(0, 8, &env.cfg, pools);
             assert_eq!((s.setup.encounter, s.setup.hp, s.setup.max_hp, s.setup.floor), (Encounter::QueenBoss, 41, 80, 48));

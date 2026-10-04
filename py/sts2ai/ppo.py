@@ -70,6 +70,10 @@ class Config:
     # Once the ramp is done, this fraction of fights is forced onto an
     # elite or boss; normal fights are won almost always by then.
     hard_frac: float = 0.4
+    # Share of resets that resume a turn start (2 to 5) kept from an
+    # earlier elite or boss fight, the unseen draws reshuffled and fresh
+    # dice: more practice at the turns that decide hard fights.
+    restart_frac: float = 0.0
     # Draw those forced elites and bosses by how often the policy loses
     # them (over the last `Stats` window) instead of evenly, so the fights
     # it already wins stop taking the compute.
@@ -226,7 +230,9 @@ class Stats:
         self.ends: deque[End] = deque(maxlen=window)
 
     def add(self, ends: list[End]) -> None:
-        self.ends.extend(ends)
+        # A resumed fight starts mid-way, often after the deciding turn, so
+        # its outcome would skew the win rates and the focus weights.
+        self.ends.extend(e for e in ends if not e.restart)
 
     def summary(self) -> dict[str, float]:
         if not self.ends:
@@ -452,6 +458,7 @@ def train(cfg: Config) -> Policy:
         max_floor = last if cfg.resume else min(last, cfg.floor_start + (last - cfg.floor_start) * it // max(1, cfg.floor_ramp))
         envs.set_floors(1, max_floor)
         envs.set_hard_frac(cfg.hard_frac if max_floor >= BOSS_FLOOR else 0.0)
+        envs.set_restart_frac(cfg.restart_frac if max_floor >= BOSS_FLOOR else 0.0)
         if cfg.focus and it % 10 == 0:
             envs.set_hard_weights(stats.loss_weights())
         lr = cfg.lr if cfg.lr_final is None else cfg.lr + (cfg.lr_final - cfg.lr) * (it - start_iter) / max(1, cfg.iters - 1)

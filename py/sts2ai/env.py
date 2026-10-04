@@ -177,6 +177,9 @@ class End(NamedTuple):
     encounter: str
     kind: str
     reward: float
+    # Resumed from the restart pool (`set_restart_frac`), not played from
+    # the fight's start.
+    restart: bool
     run: RunFight | None
 
 
@@ -218,6 +221,9 @@ class Envs:
 
     def set_hard_frac(self, frac: float) -> None:
         self.sim.set_hard_frac(frac)
+
+    def set_restart_frac(self, frac: float) -> None:
+        self.sim.set_restart_frac(frac)
 
     def set_hard_weights(self, weights: dict[str, float]) -> None:
         """Draw the forced elites and bosses by these weights, by encounter
