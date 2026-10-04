@@ -8,7 +8,6 @@ step t cuts the value bootstrap for step t+1.
 from __future__ import annotations
 
 import copy
-import shutil
 import threading
 import time
 from collections import deque
@@ -624,10 +623,10 @@ def train(cfg: Config) -> Policy:
                 f"(rollout {t_rollout:.2f} s, sim {t_sim:.2f} s, update {t_update:.2f} s)"
             )
         out_of_time = cfg.minutes is not None and time.time() - t0 > cfg.minutes * 60
+        if cfg.keep_every and it % cfg.keep_every == 0:
+            save_checkpoint(cfg.run_dir / f"it{it}.pt", policy, opt, it, global_step)
         if it % cfg.eval_every == 0 or it == start_iter + cfg.iters - 1 or out_of_time:
             save_checkpoint(cfg.run_dir / "latest.pt", policy, opt, it, global_step)
-            if cfg.keep_every and it % cfg.keep_every == 0:
-                shutil.copy(cfg.run_dir / "latest.pt", cfg.run_dir / f"it{it}.pt")
             policy.eval()
             win, _, by_kind = evaluate(policy, device, cfg.eval_repeats, acts=cfg.acts)
             writer.add_scalar("eval/holdout_win_rate", win, global_step)
