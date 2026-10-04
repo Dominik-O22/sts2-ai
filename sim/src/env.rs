@@ -699,8 +699,9 @@ struct Pending {
     runs: Vec<String>,
     /// Each distinct state's first forecast row, and the row count last.
     rows: Vec<usize>,
-    /// Whether each forecast row is a boss fight.
-    boss: Vec<bool>,
+    /// Each forecast row's part of the score: this act's elites (0) or
+    /// boss (1), the next act's elites (2) or bosses (3, `lookahead`).
+    part: Vec<u8>,
     /// Decisions where a cap kept a sub-decision shut, by decision kind
     /// and cap ("Shop nodes").
     capped: BTreeMap<String, usize>,
@@ -1085,6 +1086,9 @@ pub struct VecEnv {
     /// kept turn start goes once it is full.
     restarts: Vec<Snapshot>,
     restart_next: usize,
+    /// Weight of the next act's forecast in an afterstate's score; 0
+    /// leaves it out (`set_lookahead`).
+    lookahead: f32,
 }
 
 impl VecEnv {
@@ -1100,7 +1104,7 @@ impl VecEnv {
         for (i, s) in slots.iter_mut().enumerate() {
             s.reset(i, n, &cfg, Pools { fixed: &[], hard: &[], real: &[], restarts: &[] });
         }
-        Self { slots, cfg, fixed: vec![], queued: vec![], hard: vec![], real: vec![], starts: Default::default(), pending: None, restarts: vec![], restart_next: 0 }
+        Self { slots, cfg, fixed: vec![], queued: vec![], hard: vec![], real: vec![], starts: Default::default(), pending: None, restarts: vec![], restart_next: 0, lookahead: 0.0 }
     }
 
     pub fn len(&self) -> usize {
@@ -1124,6 +1128,12 @@ impl VecEnv {
     /// Share of resets that resume a kept elite or boss turn start.
     pub fn set_restart_frac(&mut self, frac: f32) {
         self.cfg.restart_frac = frac.clamp(0.0, 1.0);
+    }
+
+    /// Score afterstates on the next act too: its elites' and bosses'
+    /// calibrated win chances, pooled, at `weight` beside this act's.
+    pub fn set_lookahead(&mut self, weight: f32) {
+        self.lookahead = weight.max(0.0);
     }
 
     pub fn set_floors(&mut self, min: u32, max: u32) {
@@ -1340,12 +1350,26 @@ impl VecEnv {
             *capped.entry(k).or_default() += 1;
         }
 
-        let fights: Vec<Vec<FightSetup>> = states.par_iter().map(runobs::forecast_fights).collect();
+        // This act's forecast fights, then with `lookahead` the next act's,
+        // each with its part of the score (`Pending::part`).
+        let lookahead = self.lookahead > 0.0;
+        let fights: Vec<Vec<(FightSetup, u8)>> = states
+            .par_iter()
+            .map(|s| {
+                let now = runobs::forecast_fights(s);
+                let next = if lookahead && !now.is_empty() { runobs::lookahead_fights(s) } else { vec![] };
+                let part = |base: u8| move |f: FightSetup| {
+                    let boss = (f.encounter.kind() == Kind::Boss) as u8;
+                    (f, base + boss)
+                };
+                now.into_iter().map(part(0)).chain(next.into_iter().map(part(2))).collect()
+            })
+            .collect();
         let runs = states
             .iter()
             .zip(&fights)
             .map(|(state, f)| {
-                f.first().map_or_else(String::new, |f| {
+                f.first().map_or_else(String::new, |(f, _)| {
                     let mut run = f.run_json();
                     run["act"] = format!("{:?}", state.plan.acts[state.act].act).into();
                     run.to_string()
@@ -1357,7 +1381,7 @@ impl VecEnv {
             *n += f.len();
             Some(*n)
         }));
-        let fights: Vec<FightSetup> = fights.into_iter().flatten().collect();
+        let (fights, part): (Vec<FightSetup>, Vec<u8>) = fights.into_iter().flatten().unzip();
         let (floats, ids) = if encode_rows { runobs::forecast_rows(&fights) } else { (vec![], vec![]) };
         let pending = Pending {
             names,
@@ -1365,7 +1389,7 @@ impl VecEnv {
             hp: states.iter().map(|s| s.hp.max(0) as f32 / s.max_hp.max(1) as f32).collect(),
             runs,
             rows,
-            boss: fights.iter().map(|f| f.encounter.kind() == Kind::Boss).collect(),
+            part,
             capped,
             scores: None,
         };
@@ -1382,20 +1406,22 @@ impl VecEnv {
     /// scores 1, one that died or is stuck 0. A sub-decision takes its
     /// best option and an option the mean over its samples.
     pub fn afterstate_scores(&mut self, values: &[f32], win: [f64; 3]) -> AfterstateScores {
+        let lookahead = self.lookahead as f64;
         let p = self.pending.as_mut().expect("afterstates to score");
         assert_eq!(values.len(), *p.rows.last().expect("rows"), "a value per forecast row");
         const R: usize = runobs::FORECAST_ROLLS;
         let scores: Vec<f64> = (0..p.hp.len())
             .map(|s| {
-                let (mut sum, mut count) = ([0f64; 2], [0usize; 2]);
+                let (mut sum, mut count) = ([0f64; 4], [0usize; 4]);
                 for g in (p.rows[s]..p.rows[s + 1]).step_by(R) {
                     let v = values[g..g + R].iter().sum::<f32>() / R as f32;
                     let x = win[0] * v as f64 + win[1] * p.hp[s] as f64 + win[2];
-                    let boss = p.boss[g] as usize;
-                    sum[boss] += 1.0 / (1.0 + (-x).exp());
-                    count[boss] += 1;
+                    let part = p.part[g] as usize;
+                    sum[part] += 1.0 / (1.0 + (-x).exp());
+                    count[part] += 1;
                 }
-                sum[0] / count[0].max(1) as f64 + sum[1] / count[1].max(1) as f64
+                let mean = |k: usize| sum[k] / count[k].max(1) as f64;
+                mean(0) + mean(1) + lookahead * (mean(2) + mean(3))
             })
             .collect();
         self.afterstate_scores_given(scores)
@@ -2696,7 +2722,7 @@ pub(crate) mod tests {
             hp: vec![0.5, 1.0],
             runs: vec![String::new(); 2],
             rows: vec![0, 8, 12],
-            boss: [[false; 4], [true; 4], [true; 4]].concat(),
+            part: [[0u8; 4], [1; 4], [1; 4]].concat(),
             capped: BTreeMap::new(),
             scores: None,
         });

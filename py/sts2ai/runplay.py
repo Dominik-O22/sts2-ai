@@ -53,6 +53,9 @@ kind and what a decision costs; `--show-afterstates N` prints N decisions
 with each option's text and score. `--afterstate-kinds` and
 `--afterstate-acts` limit it to some decision kinds or acts, the policy
 deciding the rest.
+`--lookahead W` adds the next act to the score: its elites and bosses,
+all of each since the map does not show the next boss, at weight `W`
+beside this act's, so a pick that pays off later counts.
 """
 
 from __future__ import annotations
@@ -460,6 +463,9 @@ def main() -> None:
     ap.add_argument("--afterstate-nodes", type=int, default=256, help="branches an afterstate plays per option and sample, at most")
     ap.add_argument("--afterstate-acts", default="", help="acts (1-3, comma separated) whose decisions are made by afterstate; empty: every act")
     ap.add_argument("--afterstate-kinds", default="", help="decision kinds made by afterstate, comma separated (Event,Rest,...); empty: all but map steps")
+    ap.add_argument(
+        "--lookahead", type=float, default=0.0, help="afterstates also score the next act's elites and bosses, pooled, at this weight beside this act's"
+    )
     ap.add_argument("--show-afterstates", type=int, default=0, help="print this many scored decisions with each option's score")
     args = ap.parse_args()
     # Ids the combat checkpoint never saw get fresh rows (`vocab.remap_state`),
@@ -478,6 +484,7 @@ def main() -> None:
     forecast = Forecaster(combat, device, calibration) if calibration or args.forecast_log else None
     forecast_log = args.forecast_log.open("w") if args.forecast_log else None
     envs = Envs(args.envs, seed=args.seed)
+    envs.sim.set_lookahead(args.lookahead)
     picks = Picks(RunLayout.load(), args.show) if run_policy else None
     fights_out = args.fights_out.open("w") if args.fights_out else None
     event_table = EventTable(Rows.load(args.event_table), RunLayout.load()) if args.event_table else None
