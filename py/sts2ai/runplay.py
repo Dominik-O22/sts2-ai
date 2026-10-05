@@ -243,13 +243,15 @@ def play(
     afterstate: Scorer | None = None,
     show_afterstates: int = 0,
     afterstate_acts: frozenset[int] = frozenset(),
+    easy_fights: bool = False,
 ) -> tuple[list[End], list[RunFight], RunLoop, float]:
     """Plays until each env has finished `per_env` runs or `minutes` pass.
     Returns every fight that ended, every run that ended, the loop (its
     counts of combat batch steps, run decisions and searched decisions),
     and the seconds spent. With `fights_out`,
     each elite and boss fight as it starts is written there as a setup
-    (`sts2ai.setups`' format, `evaluate --source setups` plays them).
+    (`sts2ai.setups`' format, `evaluate --source setups` plays them), with
+    `easy_fights` the weak and normal fights too.
     With `late_policy`, that policy makes the decisions from act
     `late_from_act` on (1-based) and `run_policy` the ones before.
     `win_starts` of the runs start with winners' players (`Envs.use_winner_starts`),
@@ -339,7 +341,7 @@ def play(
     loop = RunLoop(combat, device, envs, drain, search, search_kinds, groups, seed, hybrid, forecast)
     start = time.perf_counter()
     next_note = start + NOTE_SECONDS
-    envs.sim.log_fights(fights_out is not None)
+    envs.sim.log_fights(fights_out is not None, easy_fights)
     while left and time.perf_counter() - start < minutes * 60:
         ended_now = loop.step(decide, ended)
         fights += ended_now
@@ -439,6 +441,7 @@ def main() -> None:
     ap.add_argument("--run-policy", type=Path, default=None, help="run policy checkpoint (sts2ai.runtrain), greedy")
     ap.add_argument("--show", type=int, default=0, help="print this many run decisions with the policy's odds")
     ap.add_argument("--fights-out", type=Path, default=None, help="write each elite and boss fight's start here as a setup")
+    ap.add_argument("--easy-fights", action="store_true", help="--fights-out also writes the weak and normal fights")
     ap.add_argument("--no-drain", action="store_true", help="answer one round of run decisions per combat step, not all (RunLoop)")
     ap.add_argument("--search", type=int, default=0, help="turn search with this many sim copies per decision, as the pilot (0: greedy)")
     ap.add_argument("--search-kinds", default="Elite,Boss", help="fight kinds searched (Weak,Normal,Elite,Boss); the rest greedy")
@@ -529,6 +532,7 @@ def main() -> None:
         afterstate,
         args.show_afterstates,
         frozenset(int(a) for a in args.afterstate_acts.split(",") if a),
+        easy_fights=args.easy_fights,
     )
     if fights_out is not None:
         fights_out.close()

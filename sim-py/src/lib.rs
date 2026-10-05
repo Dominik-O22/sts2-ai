@@ -292,8 +292,9 @@ impl VecEnv {
     /// `observe_run`, `step_run`).
     /// Log each run elite and boss fight as it starts, as a recorder
     /// `start` record with the run's act (`take_fights` drains them).
-    fn log_fights(&mut self, on: bool) {
-        self.inner.log_fights(on);
+    #[pyo3(signature = (on, easy=false))]
+    fn log_fights(&mut self, on: bool, easy: bool) {
+        self.inner.log_fights(on, easy);
     }
 
     fn take_fights(&mut self) -> Vec<String> {
