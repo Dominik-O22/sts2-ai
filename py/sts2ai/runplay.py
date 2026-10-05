@@ -244,6 +244,7 @@ def play(
     show_afterstates: int = 0,
     afterstate_acts: frozenset[int] = frozenset(),
     easy_fights: bool = False,
+    fight_ends: TextIO | None = None,
 ) -> tuple[list[End], list[RunFight], RunLoop, float]:
     """Plays until each env has finished `per_env` runs or `minutes` pass.
     Returns every fight that ended, every run that ended, the loop (its
@@ -251,7 +252,9 @@ def play(
     and the seconds spent. With `fights_out`,
     each elite and boss fight as it starts is written there as a setup
     (`sts2ai.setups`' format, `evaluate --source setups` plays them), with
-    `easy_fights` the weak and normal fights too.
+    `easy_fights` the weak and normal fights too. With `fight_ends`, each
+    run fight's outcome as it ends (won, HP lost, potions), keyed like the
+    start records by run seed and floor.
     With `late_policy`, that policy makes the decisions from act
     `late_from_act` on (1-based) and `run_policy` the ones before.
     `win_starts` of the runs start with winners' players (`Envs.use_winner_starts`),
@@ -346,6 +349,10 @@ def play(
         ended_now = loop.step(decide, ended)
         fights += ended_now
         for e in ended_now:
+            if fight_ends is not None and e.run is not None:
+                outcome = {"seed": e.run.seed, "floor": e.run.floor, "act": e.run.act, "encounter": e.encounter, "kind": e.kind}
+                outcome |= {"won": e.won, "hp_lost": e.hp_lost, "hp_frac": e.hp_frac, "potions_used": e.potions_used, "steps": e.steps}
+                fight_ends.write(json.dumps(outcome) + "\n")
             at = pending.pop(e.env, None)
             if forecast_log is not None and at and e.kind == "Elite" and e.encounter in at and e.run and e.run.seed < seed + per_env * envs.n:
                 value, hp, win = at[e.encounter]
@@ -442,6 +449,7 @@ def main() -> None:
     ap.add_argument("--show", type=int, default=0, help="print this many run decisions with the policy's odds")
     ap.add_argument("--fights-out", type=Path, default=None, help="write each elite and boss fight's start here as a setup")
     ap.add_argument("--easy-fights", action="store_true", help="--fights-out also writes the weak and normal fights")
+    ap.add_argument("--fight-ends", type=Path, default=None, help="write each run fight's outcome here (won, HP lost), keyed by run seed and floor")
     ap.add_argument("--no-drain", action="store_true", help="answer one round of run decisions per combat step, not all (RunLoop)")
     ap.add_argument("--search", type=int, default=0, help="turn search with this many sim copies per decision, as the pilot (0: greedy)")
     ap.add_argument("--search-kinds", default="Elite,Boss", help="fight kinds searched (Weak,Normal,Elite,Boss); the rest greedy")
@@ -490,6 +498,7 @@ def main() -> None:
     envs.sim.set_lookahead(args.lookahead)
     picks = Picks(RunLayout.load(), args.show) if run_policy else None
     fights_out = args.fights_out.open("w") if args.fights_out else None
+    fight_ends = args.fight_ends.open("w") if args.fight_ends else None
     event_table = EventTable(Rows.load(args.event_table), RunLayout.load()) if args.event_table else None
     afterstate = (
         Scorer(
@@ -533,9 +542,12 @@ def main() -> None:
         args.show_afterstates,
         frozenset(int(a) for a in args.afterstate_acts.split(",") if a),
         easy_fights=args.easy_fights,
+        fight_ends=fight_ends,
     )
     if fights_out is not None:
         fights_out.close()
+    if fight_ends is not None:
+        fight_ends.close()
     if forecast_log is not None:
         forecast_log.close()
     last = args.seed + args.runs_per_env * args.envs
