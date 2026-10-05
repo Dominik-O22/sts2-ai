@@ -375,8 +375,10 @@ struct Slot {
     /// In run mode, the run whose fight `combat` is.
     run: Option<RunSlot>,
     /// When on (`VecEnv::log_fights`), each run elite and boss fight as it
-    /// starts, in the recorder's `start` format with the run's act.
+    /// starts, in the recorder's `start` format with the run's act and
+    /// seed index; with `log_easy` its weak and normal fights too.
     fights: Option<Vec<String>>,
+    log_easy: bool,
     /// The fight was resumed from the restart pool.
     restarted: bool,
     /// A turn start this step kept for the pool, collected after the step.
@@ -971,9 +973,10 @@ impl Slot {
 
     fn start(&mut self, setup: FightSetup) {
         if let (Some(log), Some(run)) = (self.fights.as_mut(), self.run.as_ref()) {
-            if matches!(setup.encounter.kind(), Kind::Elite | Kind::Boss) {
+            if self.log_easy || matches!(setup.encounter.kind(), Kind::Elite | Kind::Boss) {
                 let mut start = setup.run_json();
                 start["act"] = (run.run.state.act as u32).into();
+                start["seed"] = run.seed.into();
                 log.push(start.to_string());
             }
         }
@@ -1098,7 +1101,7 @@ impl VecEnv {
                 let mut rng = Rng::new(seed.wrapping_mul(0x9E37_79B9).wrapping_add(i as u64));
                 let setup = generate(&mut rng, 1, cfg.asc);
                 let combat = setup.combat(0);
-                Slot { base: Baseline::of(&combat), combat, setup, steps: 0, rng, resets: 0, run: None, fights: None, restarted: false, kept: None }
+                Slot { base: Baseline::of(&combat), combat, setup, steps: 0, rng, resets: 0, run: None, fights: None, log_easy: false, restarted: false, kept: None }
             })
             .collect();
         for (i, s) in slots.iter_mut().enumerate() {
@@ -1196,9 +1199,10 @@ impl VecEnv {
     /// `RunChoices::Caller` each then waits at its first decision.
     /// Log each run elite and boss fight as it starts (`take_fights`), or
     /// stop and drop the log.
-    pub fn log_fights(&mut self, on: bool) {
+    pub fn log_fights(&mut self, on: bool, easy: bool) {
         for s in &mut self.slots {
             s.fights = on.then(Vec::new);
+            s.log_easy = easy;
         }
     }
 
@@ -2372,6 +2376,32 @@ pub(crate) mod tests {
             }
         }
         (played, reports)
+    }
+
+    /// Run fights are logged as they start, elites and bosses only, or with
+    /// `easy` the weak and normal fights too, each with its run's seed index.
+    #[test]
+    fn logged_fights_carry_their_run_and_kind() {
+        for easy in [false, true] {
+            let n = 4;
+            let mut env = VecEnv::new(n, 5, EnvConfig::default());
+            env.set_runs(Ascension(10), 100, RunChoices::Random);
+            env.log_fights(true, easy);
+            let (mut floats, mut ids, mut mask) = (vec![0.0; n * N_FLOATS], vec![0; n * N_IDS], vec![false; n * N_ACTIONS]);
+            let (mut rewards, mut dones) = (vec![0.0; n], vec![false; n]);
+            env.observe(&mut floats, &mut ids, &mut mask);
+            let mut ended = 0;
+            while ended < n {
+                let actions: Vec<i64> = (0..n).map(|i| mask[i * N_ACTIONS..][..N_ACTIONS].iter().position(|&m| m).unwrap() as i64).collect();
+                let ends = env.step(&actions, &mut floats, &mut ids, &mut mask, &mut rewards, &mut dones);
+                ended += ends.iter().filter(|e| e.run.as_ref().is_some_and(|r| r.end.is_some())).count();
+            }
+            let logged: Vec<serde_json::Value> = env.take_fights().iter().map(|l| serde_json::from_str(l).unwrap()).collect();
+            let rooms: Vec<&str> = logged.iter().map(|v| v["room"].as_str().unwrap()).collect();
+            assert!(logged.iter().all(|v| v["seed"].as_u64().is_some_and(|s| s >= 100)), "every fight names its run");
+            assert!(rooms.iter().any(|r| *r != "Monster"), "elites and bosses are logged");
+            assert_eq!(rooms.iter().any(|r| *r == "Monster"), easy, "weak and normal fights only with easy");
+        }
     }
 
     /// With every run sent to the last boss door, the runs after each
