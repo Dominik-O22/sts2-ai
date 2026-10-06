@@ -13,11 +13,12 @@ import time
 from collections import deque
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor, wait
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from torch import Tensor
 from torch.utils.tensorboard import SummaryWriter
 
@@ -103,6 +104,13 @@ class Config:
     # target averaged over many shuffles and dice where the rollout's return
     # is one sample of them. 0 leaves the value head on the returns alone.
     search_value_coef: float = 0.0
+    # The value as a win chance and the returns of a won and a lost fight
+    # (`model.Arch.value_split`): the chance learns from how each fight
+    # ended, each return from the fights that ended that way, at
+    # `value_split_coef`. Turning it on while resuming an unsplit
+    # checkpoint splits its value without moving it (`model.load_state`).
+    value_split: bool = False
+    value_split_coef: float = 1.0
     # Played-out value targets: each search also forks `playout_states`
     # elite and boss states the value head rates at or below
     # `playout_below` (close and losing positions, where it errs most)
@@ -203,6 +211,8 @@ class Rollout:
         self.values = torch.zeros((T, N), device=device)
         self.rewards = torch.zeros((T, N), device=device)
         self.dones = torch.zeros((T, N), device=device)
+        # Where `dones` is set: 1 if the fight was won there, else 0.
+        self.won = torch.zeros((T, N), device=device)
 
     def advantages(self, last_value: Tensor, gamma: float, lam: float) -> tuple[Tensor, Tensor]:
         """GAE. `dones[t]` means the transition at t was terminal, so nothing
@@ -218,6 +228,24 @@ class Rollout:
             adv[t] = gae
             next_value = self.values[t]
         return adv, adv + self.values
+
+
+def outcome_targets(roll: Rollout) -> tuple[Tensor, Tensor]:
+    """`[T, N]` each: whether the fight a decision belongs to was won (1)
+    or lost (0), -1 where it had not ended by the rollout's end, and the
+    return from the decision to that end (the rewards summed, nothing
+    bootstrapped)."""
+    T = roll.rewards.shape[0]
+    label = torch.full_like(roll.rewards, -1.0)
+    ret = torch.zeros_like(roll.rewards)
+    carry_label = torch.full_like(roll.rewards[0], -1.0)
+    carry_ret = torch.zeros_like(roll.rewards[0])
+    for t in reversed(range(T)):
+        done = roll.dones[t].bool()
+        carry_label = torch.where(done, roll.won[t], carry_label)
+        carry_ret = roll.rewards[t] + torch.where(done, torch.zeros_like(carry_ret), carry_ret)
+        label[t], ret[t] = carry_label, carry_ret
+    return label, ret
 
 
 def incoming_targets(roll: Rollout, last_floats: Tensor, end_turn: int) -> Tensor:
@@ -437,13 +465,17 @@ def train(cfg: Config) -> Policy:
         for (path, share), n in zip(pools, sizes):
             print(f"{n} played runs' fights from {path.name} for {share:.0%} of the resets")
     ck = torch.load(cfg.resume, map_location=device) if cfg.resume else None
-    arch = checkpoint_arch(ck) if ck else Arch(cfg.arch, cfg.hidden, cfg.depth, cfg.pointer, cfg.piles, cfg.choice_attn, cfg.incoming, cfg.ffn)
+    arch = checkpoint_arch(ck) if ck else Arch(cfg.arch, cfg.hidden, cfg.depth, cfg.pointer, cfg.piles, cfg.choice_attn, cfg.incoming, cfg.ffn, cfg.value_split)
+    splitting = ck is not None and cfg.value_split and not arch.value_split
+    if splitting:
+        arch = replace(arch, value_split=True)
     policy = build_policy(envs.layout, arch).to(device)
     opt = torch.optim.AdamW(policy.parameters(), lr=cfg.lr, eps=1e-5, weight_decay=cfg.weight_decay)
     # `net` is what runs; `policy` keeps the plain module for checkpoints.
     net = torch.compile(policy) if cfg.compile and device.type == "cuda" else policy
     aux = policy.arch.incoming
-    aux_net = (torch.compile(policy.forward_incoming) if cfg.compile and device.type == "cuda" else policy.forward_incoming) if aux else None
+    split = policy.arch.value_split
+    train_net = torch.compile(policy.forward_train) if cfg.compile and device.type == "cuda" else policy.forward_train
     autocast = torch.autocast(device.type, dtype=torch.bfloat16, enabled=cfg.bf16 and device.type == "cuda")
     roll = Rollout(cfg, envs, device)
     searched = SearchTargets(cfg.search_buffer, envs.layout, device) if cfg.search_states else None
@@ -482,6 +514,8 @@ def train(cfg: Config) -> Policy:
     if ck is not None:
         if load_state(policy, ck["policy"], checkpoint_vocab(ck, cfg.old_vocab), checkpoint_layout(ck)):
             print("vocabulary grew since the checkpoint: weights remapped by name, optimizer state reset")
+        elif splitting:
+            print("value split from the checkpoint's value: optimizer state reset")
         else:
             opt.load_state_dict(ck["optimizer"])
         start_iter, global_step = ck["iter"] + 1, ck["global_step"]
@@ -536,6 +570,10 @@ def train(cfg: Config) -> Policy:
                 t_sim += time.perf_counter() - sim_start
                 roll.rewards[t].copy_(torch.from_numpy(envs.rewards), non_blocking=True)
                 roll.dones[t].copy_(torch.from_numpy(envs.dones), non_blocking=True)
+                if split:
+                    won = np.zeros(cfg.envs, np.float32)
+                    won[[e.env for e in ends if e.won]] = 1.0
+                    roll.won[t].copy_(torch.from_numpy(won), non_blocking=True)
                 stats.add(ends)
             floats = torch.from_numpy(envs.floats).to(device)
             ids = torch.from_numpy(envs.ids).to(device)
@@ -580,13 +618,16 @@ def train(cfg: Config) -> Policy:
         }
         if incoming is not None:
             flat["incoming"] = incoming.reshape(B)
+        if split:
+            label, mc = outcome_targets(roll)
+            flat["won"], flat["mc"] = label.reshape(B), mc.reshape(B)
         mb = B // cfg.minibatches
         # Summed on the GPU and read once after the update: a read per
         # minibatch (or `Categorical`'s argument check) waits for the GPU,
         # and the update stalls whenever the search holds the GPU or CPU.
         losses = {
             k: torch.zeros((), device=device)
-            for k in ("policy", "value", "entropy", "clipfrac", "approx_kl", "search", "search_value", "playout_value", "expert", "incoming")
+            for k in ("policy", "value", "entropy", "clipfrac", "approx_kl", "search", "search_value", "playout_value", "value_split", "expert", "incoming")
         }
 
         n_updates = 0
@@ -595,8 +636,8 @@ def train(cfg: Config) -> Policy:
             for start in range(0, B, mb):
                 idx = perm[start : start + mb]
                 with autocast:
-                    if aux:
-                        logits, value, predicted = aux_net(flat["floats"][idx], flat["ids"][idx])
+                    if aux or split:
+                        logits, value, predicted, win_logit, won_v, lost_v = train_net(flat["floats"][idx], flat["ids"][idx])
                     else:
                         logits, value = net(flat["floats"][idx], flat["ids"][idx])
                 logits, value = logits.float(), value.float()
@@ -609,6 +650,19 @@ def train(cfg: Config) -> Policy:
                 vl = 0.5 * (value - flat["returns"][idx]).pow(2).mean()
                 ent = dist.entropy().mean()
                 loss = pg + cfg.value_coef * vl - cfg.entropy * ent
+                if split:
+                    # The win chance on how the fight ended, each return on
+                    # the fights that ended that way; undecided ones skip.
+                    label, mc = flat["won"][idx], flat["mc"][idx]
+                    known, won_rows, lost_rows = label >= 0, label == 1, label == 0
+                    bce = F.binary_cross_entropy_with_logits(win_logit.float(), label.clamp(min=0), reduction="none").mul(known).sum() / known.sum().clamp(
+                        min=1
+                    )
+                    wl = (won_v.float() - mc).pow(2).mul(won_rows).sum() / won_rows.sum().clamp(min=1)
+                    ll = (lost_v.float() - mc).pow(2).mul(lost_rows).sum() / lost_rows.sum().clamp(min=1)
+                    vs = bce + 0.5 * (wl + ll)
+                    loss = loss + cfg.value_split_coef * vs
+                    losses["value_split"] += vs.detach()
                 if aux:
                     target = flat["incoming"][idx]
                     known = ~torch.isnan(target)
