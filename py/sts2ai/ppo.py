@@ -98,6 +98,11 @@ class Config:
     search_top: int = 8
     search_temp: float = 0.05
     search_coef: float = 0.5
+    # The value head also regresses onto the search's value of each root
+    # (its action values over all the copies, weighted by the policy), a
+    # target averaged over many shuffles and dice where the rollout's return
+    # is one sample of them. 0 leaves the value head on the returns alone.
+    search_value_coef: float = 0.0
     # Recent search targets kept for the update, oldest dropped first; the
     # loss waits until `search_warmup` are in, so it does not fit a handful.
     search_buffer: int = 16384
@@ -265,20 +270,21 @@ class Stats:
 
 
 class SearchTargets:
-    """Ring buffer of (observation, mask, search distribution) on the
-    training device."""
+    """Ring buffer of (observation, mask, search distribution, search value)
+    on the training device."""
 
     def __init__(self, size: int, layout, device: torch.device):
         self.floats = torch.zeros((size, layout.n_floats), device=device)
         self.ids = torch.zeros((size, layout.n_ids), dtype=torch.long, device=device)
         self.mask = torch.zeros((size, layout.n_actions), dtype=torch.bool, device=device)
         self.target = torch.zeros((size, layout.n_actions), device=device)
+        self.value = torch.zeros(size, device=device)
         self.size, self.next, self.full = size, 0, False
 
     def __len__(self) -> int:
         return self.size if self.full else self.next
 
-    def add(self, floats: np.ndarray, ids: np.ndarray, mask: np.ndarray, target: np.ndarray) -> None:
+    def add(self, floats: np.ndarray, ids: np.ndarray, mask: np.ndarray, target: np.ndarray, value: np.ndarray | None = None) -> None:
         k = len(floats)
         idx = torch.arange(self.next, self.next + k, device=self.floats.device) % self.size
         dev = self.floats.device
@@ -286,14 +292,15 @@ class SearchTargets:
         self.ids[idx] = torch.from_numpy(ids).to(dev)
         self.mask[idx] = torch.from_numpy(mask).to(dev)
         self.target[idx] = torch.from_numpy(target).to(dev)
+        self.value[idx] = torch.from_numpy(np.zeros(k, np.float32) if value is None else value.astype(np.float32)).to(dev)
         self.full |= self.next + k >= self.size
         self.next = (self.next + k) % self.size
 
-    def sample(self, n: int) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+    def sample(self, n: int) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
         """`n` rows drawn with replacement. From an empty buffer, the
         all-zero first row, whose target scores nothing."""
         idx = torch.randint(max(len(self), 1), (n,), device=self.floats.device)
-        return self.floats[idx], self.ids[idx], self.mask[idx], self.target[idx]
+        return self.floats[idx], self.ids[idx], self.mask[idx], self.target[idx], self.value[idx]
 
     @classmethod
     def from_expert(cls, path: Path, layout, device: torch.device) -> SearchTargets:
@@ -360,7 +367,7 @@ def start_search(
         v = (prior * q).sum(axis=1, keepdims=True) / prior.sum(axis=1, keepdims=True)
         tilted = logits + np.where(searched, (q - v) / cfg.search_temp, 0.0)
         p = np.exp(tilted - tilted.max(axis=1, keepdims=True))
-        return floats, ids, mask, (p / p.sum(axis=1, keepdims=True)).astype(np.float32)
+        return floats, ids, mask, (p / p.sum(axis=1, keepdims=True)).astype(np.float32), v[:, 0]
 
     return finish
 
@@ -406,12 +413,14 @@ def train(cfg: Config) -> Policy:
     searched = SearchTargets(cfg.search_buffer, envs.layout, device) if cfg.search_states else None
     expert = SearchTargets.from_expert(cfg.expert, envs.layout, device) if cfg.expert else None
 
-    def target_ce(targets: SearchTargets, n: int) -> Tensor:
-        """Cross-entropy toward `n` rows of `targets`' distributions."""
-        t_floats, t_ids, t_mask, t_target = targets.sample(n)
+    def target_ce(targets: SearchTargets, n: int) -> tuple[Tensor, Tensor]:
+        """Cross-entropy toward `n` rows of `targets`' distributions, and
+        the value head's squared error against their values."""
+        t_floats, t_ids, t_mask, t_target, t_value = targets.sample(n)
         with autocast:
-            t_logits, _ = net(t_floats, t_ids)
-        return -(t_target * torch.log_softmax(masked_logits(t_logits.float(), t_mask), dim=1)).sum(dim=1).mean()
+            t_logits, t_v = net(t_floats, t_ids)
+        ce = -(t_target * torch.log_softmax(masked_logits(t_logits.float(), t_mask), dim=1)).sum(dim=1).mean()
+        return ce, 0.5 * (t_v.float() - t_value).pow(2).mean()
 
     # The search runs in a thread on its own copy of the policy, synced
     # each iteration, while the update trains the original: both mostly
@@ -534,7 +543,9 @@ def train(cfg: Config) -> Policy:
         # Summed on the GPU and read once after the update: a read per
         # minibatch (or `Categorical`'s argument check) waits for the GPU,
         # and the update stalls whenever the search holds the GPU or CPU.
-        losses = {k: torch.zeros((), device=device) for k in ("policy", "value", "entropy", "clipfrac", "approx_kl", "search", "expert", "incoming")}
+        losses = {
+            k: torch.zeros((), device=device) for k in ("policy", "value", "entropy", "clipfrac", "approx_kl", "search", "search_value", "expert", "incoming")
+        }
 
         n_updates = 0
         for _ in range(cfg.epochs):
@@ -566,13 +577,14 @@ def train(cfg: Config) -> Policy:
                     # Runs before the warmup too, weighing nothing, so its
                     # forward and backward compile in the first iteration
                     # with the rest.
-                    ce = target_ce(searched, mb // 8)
+                    ce, sv = target_ce(searched, mb // 8)
                     warm = len(searched) >= cfg.search_warmup
-                    loss = loss + (cfg.search_coef if warm else 0.0) * ce
+                    loss = loss + (cfg.search_coef if warm else 0.0) * ce + (cfg.search_value_coef if warm else 0.0) * sv
                     if warm:
                         losses["search"] += ce.detach()
+                        losses["search_value"] += sv.detach()
                 if expert is not None:
-                    ce = target_ce(expert, cfg.expert_rows)
+                    ce, _ = target_ce(expert, cfg.expert_rows)
                     loss = loss + cfg.expert_coef * ce
                     losses["expert"] += ce.detach()
                 opt.zero_grad(set_to_none=True)
