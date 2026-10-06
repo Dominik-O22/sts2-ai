@@ -109,8 +109,12 @@ clone's own on fresh seeds) and 4,800 weak and normal ones (winners' and
 sts2.fun players') from the same seeds, and reports per-fight differences
 in wins and HP lost by act and kind; greedy at 8 seeds takes minutes and
 resolves about 0.3 points. HP lost on the easy fights is the number that
-compounds over a run; check it on every change. Greedy is the screen, and enough for a training recipe
-change (epochs, lr, data mix). `--mode hybrid32` is the verdict for a
+compounds over a run; check it on every change. Greedy is a screen for
+broken runs and long trends, not a verdict: on 2026-10-04 re-weighting the
+mix toward own-run bosses moved runs +1.1 [+0.4, +1.7] while greedy showed
+nothing at any checkpoint. Judge training changes (epochs, lr, data mix,
+more iterations) by the run-level A/B on fresh seeds; `sts2ai.valueerr`
+measures the value head on its own in minutes. `--mode hybrid32` is the verdict for a
 change that could just teach greedy what the pilot's search already does
 (an act 3 boss specialist gained 3 points greedy and nothing with the
 hybrid): it defaults to one seed on a fixed 300 boss fights a set, about
