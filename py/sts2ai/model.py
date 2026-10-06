@@ -243,6 +243,10 @@ class Arch:
     incoming: bool = False
     # `attn` only: the feed-forward width as a multiple of `hidden`.
     ffn: int = 4
+    # `attn` only: the value as a win chance `p` and the return of a won
+    # fight `W` and of a lost one `L`, combined as p * W + (1 - p) * L
+    # (`SlotAttention.value_parts`); the parts train on how each fight ended.
+    value_split: bool = False
 
 
 class Policy(nn.Module):
@@ -376,12 +380,13 @@ class SlotAttention(Policy):
         choice_attn: bool = False,
         incoming: bool = False,
         ffn: int = 4,
+        value_split: bool = False,
     ):
         super().__init__()
         L = layout
         assert L.targets == L.max_enemies + 1
         self.layout = L
-        self.arch = Arch("attn", hidden, depth, pointer, piles, choice_attn, incoming, ffn)
+        self.arch = Arch("attn", hidden, depth, pointer, piles, choice_attn, incoming, ffn, value_split)
         d = hidden
         self.card = nn.Embedding(L.card_vocab, card_dim, padding_idx=0)
         self.monster = nn.Embedding(L.monster_vocab, monster_dim, padding_idx=0)
@@ -425,18 +430,51 @@ class SlotAttention(Policy):
             self.incoming = nn.Linear(d, 1)
         nn.init.orthogonal_(self.v.weight, gain=1.0)
         nn.init.zeros_(self.v.bias)
+        if value_split:
+            # The win chance's logit, and the returns of a won and a lost
+            # fight. Built like `v`; `load_state` starts W and L as copies
+            # of a checkpoint's `v` and the chance at even, so the value a
+            # warm start sees does not move.
+            self.v_win = nn.Linear(d, 1)
+            self.v_won = nn.Linear(d, 1)
+            self.v_lost = nn.Linear(d, 1)
+            nn.init.zeros_(self.v_win.weight)
+            nn.init.zeros_(self.v_win.bias)
+            for head in (self.v_won, self.v_lost):
+                nn.init.orthogonal_(head.weight, gain=1.0)
+                nn.init.zeros_(head.bias)
+
+    def value_parts(self, g: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+        """The value of the encoded global token `g`, and with `value_split`
+        its parts: the win chance's logit, the won and the lost return."""
+        if not self.arch.value_split:
+            v = self.v(g).squeeze(-1)
+            return v, v, v, v
+        logit, won, lost = (head(g).squeeze(-1) for head in (self.v_win, self.v_won, self.v_lost))
+        p = torch.sigmoid(logit)
+        return p * won + (1 - p) * lost, logit, won, lost
 
     def forward(self, floats: Tensor, ids: Tensor) -> tuple[Tensor, Tensor]:
         keep = self.filled(floats, ids)
         logits, g = self.trunk(floats, ids, keep, keep.flatten().nonzero().squeeze(1))
-        return logits, self.v(g).squeeze(-1)
+        return logits, self.value_parts(g)[0]
 
     def forward_incoming(self, floats: Tensor, ids: Tensor) -> tuple[Tensor, Tensor, Tensor]:
         """`forward` and the damage the player is about to take this enemy
         turn (`incoming` head, a thirtieth of the HP), for its auxiliary loss."""
         keep = self.filled(floats, ids)
         logits, g = self.trunk(floats, ids, keep, keep.flatten().nonzero().squeeze(1))
-        return logits, self.v(g).squeeze(-1), self.incoming(g).squeeze(-1)
+        return logits, self.value_parts(g)[0], self.incoming(g).squeeze(-1)
+
+    def forward_train(self, floats: Tensor, ids: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+        """What the update reads: the logits, the value, the incoming damage
+        (the value again without that head), and the value's parts
+        (`value_parts`)."""
+        keep = self.filled(floats, ids)
+        logits, g = self.trunk(floats, ids, keep, keep.flatten().nonzero().squeeze(1))
+        value, logit, won, lost = self.value_parts(g)
+        incoming = self.incoming(g).squeeze(-1) if self.arch.incoming else value
+        return logits, value, incoming, logit, won, lost
 
     def filled(self, floats: Tensor, ids: Tensor) -> Tensor:
         """`[B, S]`, False where a token's slot is empty. The global token
@@ -523,7 +561,15 @@ def build_policy(layout: Layout, arch: Arch) -> Policy:
         return SlotMLP(layout, hidden=arch.hidden, depth=arch.depth)
     if arch.kind == "attn":
         return SlotAttention(
-            layout, arch.hidden, arch.depth, pointer=arch.pointer, piles=arch.piles, choice_attn=arch.choice_attn, incoming=arch.incoming, ffn=arch.ffn
+            layout,
+            arch.hidden,
+            arch.depth,
+            pointer=arch.pointer,
+            piles=arch.piles,
+            choice_attn=arch.choice_attn,
+            incoming=arch.incoming,
+            ffn=arch.ffn,
+            value_split=arch.value_split,
         )
     raise ValueError(f"unknown architecture {arch.kind!r}: slots or attn")
 
@@ -555,6 +601,13 @@ def load_state(policy: Policy, state: dict[str, Tensor], old_vocab: str | None, 
     A layout change (a capacity or a per-slot feature count) has no remap;
     that is a retrain."""
     own = policy.state_dict()
+    if policy.arch.value_split and "v_won.weight" not in state:
+        # Splitting a trained value: both returns start as its value and the
+        # chance at even, so the combined value is unchanged.
+        state = dict(state)
+        for head in ("v_won", "v_lost"):
+            state[f"{head}.weight"], state[f"{head}.bias"] = state["v.weight"], state["v.bias"]
+        state["v_win.weight"], state["v_win.bias"] = torch.zeros_like(state["v.weight"]), torch.zeros_like(state["v.bias"])
     if all(t.shape == own[k].shape for k, t in state.items()) and state.keys() == own.keys():
         policy.load_state_dict(state)
         return False
