@@ -103,6 +103,19 @@ class Config:
     # target averaged over many shuffles and dice where the rollout's return
     # is one sample of them. 0 leaves the value head on the returns alone.
     search_value_coef: float = 0.0
+    # Played-out value targets: each search also forks `playout_states`
+    # elite and boss states the value head rates at or below
+    # `playout_below` (close and losing positions, where it errs most)
+    # into `playout_copies` copies, each with its own shuffle and dice, and
+    # plays them to the fight's end; their mean is the state's value target,
+    # with no bootstrapping and the noise of one outcome cut by the copy
+    # count. The value head regresses onto as many of them a minibatch as
+    # the search targets take, at `playout_coef`. 0 states turns it off.
+    playout_states: int = 0
+    playout_copies: int = 64
+    playout_below: float = 0.6
+    playout_coef: float = 0.5
+    playout_buffer: int = 65536
     # Recent search targets kept for the update, oldest dropped first; the
     # loss waits until `search_warmup` are in, so it does not fit a handful.
     search_buffer: int = 16384
@@ -311,7 +324,10 @@ class SearchTargets:
         return out
 
 
-@torch.no_grad()
+# Turns a played-out value target's copies get: to the fight's end.
+PLAYOUT_TURNS = 200
+
+
 @torch.no_grad()
 def start_search(
     policy: Policy,
@@ -341,6 +357,20 @@ def start_search(
     unsure = np.flatnonzero((top2[:, 0] - top2[:, 1]).cpu().numpy() <= cfg.search_margin)
     pick = np.random.choice(unsure, min(cfg.search_states, len(unsure)), replace=False)
     roots, logits = choice[pick], logits[pick].cpu().numpy()
+    played = None
+    if cfg.playout_states:
+        hard = np.array([i for i in range(envs.n) if envs.sim.fight(i)[1] in ("Elite", "Boss")], np.int64)
+        if len(hard):
+            h_logits, h_value = policy(torch.from_numpy(envs.floats[hard]).to(device), torch.from_numpy(envs.ids[hard]).to(device))
+            low = hard[(h_value.float().cpu().numpy() <= cfg.playout_below)]
+            if len(low):
+                at = np.random.choice(low, min(cfg.playout_states, len(low)), replace=False)
+                p_probs = masked_logits(h_logits.float(), torch.from_numpy(envs.mask[hard]).to(device)).softmax(1).cpu().numpy()
+                p_probs = p_probs[np.searchsorted(hard, at)]
+                k = cfg.playout_copies
+                p_forks = envs.sim.fork([int(i) for i in at], k, k, seed ^ 0x9E37, PLAYOUT_TURNS)
+                p_first = np.concatenate([np.random.choice(len(q), k, p=q / q.sum()) for q in p_probs])
+                played = (p_forks, p_first, envs.floats[at], envs.ids[at], envs.mask[at], len(at), k)
     n = cfg.search_copies
     tops = [np.argsort(-logits[r])[: min(cfg.search_top, int(envs.mask[i].sum()))] for r, i in enumerate(roots)]
     forks = envs.sim.fork([int(i) for i in roots], n, seed=seed)
@@ -367,7 +397,13 @@ def start_search(
         v = (prior * q).sum(axis=1, keepdims=True) / prior.sum(axis=1, keepdims=True)
         tilted = logits + np.where(searched, (q - v) / cfg.search_temp, 0.0)
         p = np.exp(tilted - tilted.max(axis=1, keepdims=True))
-        return floats, ids, mask, (p / p.sum(axis=1, keepdims=True)).astype(np.float32), v[:, 0]
+        out = (floats, ids, mask, (p / p.sum(axis=1, keepdims=True)).astype(np.float32), v[:, 0])
+        if played is None:
+            return out, None
+        p_forks, p_first, p_floats, p_ids, p_mask, roots_n, k = played
+        with torch.cuda.stream(stream), autocast:
+            p_score = rollout(net, device, p_forks, p_first, on_step=lambda *_: go.wait(), depth=PLAYOUT_TURNS)
+        return out, (p_floats, p_ids, p_mask, np.zeros((roots_n, p_mask.shape[1]), np.float32), p_score.reshape(roots_n, k).mean(axis=1))
 
     return finish
 
@@ -411,6 +447,8 @@ def train(cfg: Config) -> Policy:
     autocast = torch.autocast(device.type, dtype=torch.bfloat16, enabled=cfg.bf16 and device.type == "cuda")
     roll = Rollout(cfg, envs, device)
     searched = SearchTargets(cfg.search_buffer, envs.layout, device) if cfg.search_states else None
+    # Played-out value targets ride with the search (`playout_states`).
+    played = SearchTargets(cfg.playout_buffer, envs.layout, device) if cfg.search_states and cfg.playout_states else None
     expert = SearchTargets.from_expert(cfg.expert, envs.layout, device) if cfg.expert else None
 
     def target_ce(targets: SearchTargets, n: int) -> tuple[Tensor, Tensor]:
@@ -512,7 +550,10 @@ def train(cfg: Config) -> Policy:
         # this iteration starts none, unless `search_sync`.
         if searched is not None and (pending is None or cfg.search_sync or pending.done()):
             if pending is not None:
-                searched.add(*pending.result())
+                result, playouts = pending.result()
+                searched.add(*result)
+                if played is not None and playouts is not None:
+                    played.add(*playouts)
             searches += 1
             search_policy.load_state_dict(policy.state_dict())
             pending = searcher.submit(
@@ -544,7 +585,8 @@ def train(cfg: Config) -> Policy:
         # minibatch (or `Categorical`'s argument check) waits for the GPU,
         # and the update stalls whenever the search holds the GPU or CPU.
         losses = {
-            k: torch.zeros((), device=device) for k in ("policy", "value", "entropy", "clipfrac", "approx_kl", "search", "search_value", "expert", "incoming")
+            k: torch.zeros((), device=device)
+            for k in ("policy", "value", "entropy", "clipfrac", "approx_kl", "search", "search_value", "playout_value", "expert", "incoming")
         }
 
         n_updates = 0
@@ -583,6 +625,12 @@ def train(cfg: Config) -> Policy:
                     if warm:
                         losses["search"] += ce.detach()
                         losses["search_value"] += sv.detach()
+                if played is not None:
+                    # As the search targets: compiled in the first iteration,
+                    # weighing nothing until the first playouts land.
+                    _, pv = target_ce(played, mb // 8)
+                    loss = loss + (cfg.playout_coef if len(played) else 0.0) * pv
+                    losses["playout_value"] += pv.detach()
                 if expert is not None:
                     ce, _ = target_ce(expert, cfg.expert_rows)
                     loss = loss + cfg.expert_coef * ce
