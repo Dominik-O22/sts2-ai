@@ -114,8 +114,8 @@ def measure(policies: list, device: torch.device, setups: list[str], per_fight: 
 
 
 # Situations a row falls in: (heading, [(label, test)]); how the fight
-# truly stands goes by the first checkpoint's truth, so every checkpoint
-# is judged on the same states.
+# truly stands goes by every checkpoint's truth averaged: binning by one
+# checkpoint's own noisy truth would bias its error in each bin.
 SITUATIONS = [
     ("HP left", [("under 30%", lambda r: r["hp_frac"] < 0.3), ("30-60%", lambda r: 0.3 <= r["hp_frac"] < 0.6), ("60% and up", lambda r: r["hp_frac"] >= 0.6)]),
     (
@@ -147,9 +147,9 @@ SITUATIONS = [
     (
         "how the fight truly stands",
         [
-            ("likely lost", lambda r: r["mean"][0] < -0.3),
-            ("close", lambda r: -0.3 <= r["mean"][0] <= 0.6),
-            ("likely won", lambda r: r["mean"][0] > 0.6),
+            ("likely lost", lambda r: np.mean(r["mean"]) < -0.3),
+            ("close", lambda r: -0.3 <= np.mean(r["mean"]) <= 0.6),
+            ("likely won", lambda r: np.mean(r["mean"]) > 0.6),
         ],
     ),
 ]
