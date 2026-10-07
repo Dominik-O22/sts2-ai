@@ -1,6 +1,7 @@
 """Play whole runs: a combat checkpoint plays the fights greedily; the run
 decisions are made at random or by taking the first option, in the sim, or
-by a run policy (`sts2ai.runtrain`) through `step_run` (docs/run-env.md).
+by a run policy (`sts2ai.runtrain`), on the sim's threaded loop
+(`sts2ai.runloop`, docs/run-env.md).
 
     uv run python -m sts2ai.runplay runs/<run>/latest.pt --envs 256 --runs-per-env 2
     uv run python -m sts2ai.runplay runs/<run>/latest.pt --choices first
@@ -12,14 +13,13 @@ With `--search N` the fights of `--search-kinds` (elites and bosses by
 default) are played as the live pilot plays them (`sts2ai.play --search
 N`): a turn search of N copies at every decision with more than one legal
 action, the searches of every env in such a fight in one batch
-(`RunLoop`). It is much slower per run. `--search-mode hybrid` (or
+(`Loop`). It is much slower per run. `--search-mode hybrid` (or
 `race`) plays those fights with the exact search's best `--top` lines
 picked by `--playouts` playouts each instead (`exactsearch.Hybrid`).
 
-Every env plays runs back to back. The numbers cover each env's first
-`--runs-per-env` runs, so long runs count as often as short ones; the
-envs that finish early keep playing, and those extra runs only count
-toward throughput. With a run policy it also prints what the policy
+The `--envs` envs play the `--envs * --runs-per-env` runs from `--seed`
+on, each env taking the next unplayed seed as its run ends, so every run
+counts and none is a filler. With a run policy it also prints what the policy
 picks at each kind of decision, and `--show` prints that many decisions,
 drawn at random, with the policy's odds for each option.
 
@@ -78,9 +78,9 @@ from sts2ai.env import START_POINTS, End, Envs, RunFight, RunLayout
 from sts2ai.forecast import Calibration, Forecaster
 from sts2ai.imitation import Rows
 from sts2ai.model import Net, for_play, load_policy
+from sts2ai.runloop import Loop
 from sts2ai.runmodel import RunPolicy, load_run_policy
-from sts2ai.runtrace import KINDS, Trace, offered, option_text
-from sts2ai.runtrain import RunLoop
+from sts2ai.runtrace import KINDS, offered, option_text
 from sts2ai.setups import TRACKER, sim_floor, split_runs
 
 NAMES = _sim.run_names()
@@ -195,7 +195,6 @@ def play(
     choices: str,
     run_policy: RunPolicy | None,
     picks: Picks | None,
-    drain: bool = True,
     fights_out: TextIO | None = None,
     search: int = 0,
     search_kinds: frozenset[str] = frozenset({"Elite", "Boss"}),
@@ -215,35 +214,36 @@ def play(
     afterstate_acts: frozenset[int] = frozenset(),
     easy_fights: bool = False,
     fight_ends: TextIO | None = None,
-    trace: Trace | None = None,
-) -> tuple[list[End], list[RunFight], RunLoop, float]:
-    """Plays until each env has finished `per_env` runs or `minutes` pass.
-    Returns every fight that ended, every run that ended, the loop (its
-    counts of combat batch steps, run decisions and searched decisions),
-    and the seconds spent. With `fights_out`,
-    each elite and boss fight as it starts is written there as a setup
-    (`sts2ai.setups`' format, `evaluate --source setups` plays them), with
-    `easy_fights` the weak and normal fights too. With `fight_ends`, each
-    run fight's outcome as it ends (won, HP lost, potions), keyed like the
-    start records by run seed and floor. With `trace`, each counted run's
-    fights, decisions and decks go there (`sts2ai.runtrace`).
-    With `late_policy`, that policy makes the decisions from act
-    `late_from_act` on (1-based) and `run_policy` the ones before.
-    `win_starts` of the runs start with winners' players (`Envs.use_winner_starts`),
-    the held-out players' with `win_holdout`. `hybrid` (top lines,
-    playouts, race size or 0) searches with `exactsearch.Hybrid`. With
-    `forecast`, map steps get the forecast (`RunLoop`); with
-    `forecast_log` too, each map step into an elite is written there with
-    the fight's outcome. With `afterstate`, it makes every decision but a
-    map step (`Scorer.choose`), and `show_afterstates` decisions are
-    printed with each option's score."""
+    runs_out: TextIO | None = None,
+) -> tuple[list[End], list[RunFight], Loop, float]:
+    """Plays the `per_env * envs.n` runs from `seed` on, or until `minutes`
+    pass, on the threaded loop (`sts2ai.runloop`). Returns every fight that
+    ended, every run that ended, the loop (its counts of combat steps, run
+    decisions and searched decisions), and the seconds spent. With
+    `fights_out`, each elite and boss fight as it starts is written there
+    as a setup (`sts2ai.setups`' format, `evaluate --source setups` plays
+    them), with `easy_fights` the weak and normal fights too. With
+    `fight_ends`, each run fight's outcome as it ends (won, HP lost,
+    potions), keyed like the start records by run seed and floor. With
+    `runs_out`, each run's trace goes there as it ends (`sts2ai.runtrace`,
+    written by the sim). With `late_policy`, that policy makes the
+    decisions from act `late_from_act` on (1-based) and `run_policy` the
+    ones before. `win_starts` of the runs start with winners' players
+    (`Envs.use_winner_starts`), the held-out players' with `win_holdout`.
+    `hybrid` (top lines, playouts, race size or 0) searches with
+    `exactsearch.Hybrid`. With `forecast`, map steps get the forecast
+    (`Loop`); with `forecast_log` too, each map step into an elite is
+    written there with the fight's outcome. With `afterstate`, it makes
+    every decision but a map step (`Scorer.choose`), and
+    `show_afterstates` decisions are printed with each option's score."""
     if win_starts > 0:
         held = envs.use_winner_starts(split_runs(win_runs, win_holdout), win_starts)
         print("winners' starts: " + ", ".join(f"{n} at {p}" for p, n in zip(START_POINTS, held) if n))
     # Before the runs start: with the sim deciding, each starts its first fight at once.
-    envs.sim.log_fights(fights_out is not None or trace is not None, easy_fights or trace is not None)
-    envs.use_runs(seed, choices="caller" if run_policy else choices)
-    left = set(range(seed, seed + per_env * envs.n))
+    envs.sim.log_fights(fights_out is not None, easy_fights)
+    envs.sim.trace_runs(runs_out is not None)
+    total = per_env * envs.n
+    envs.use_runs(seed, choices="caller" if run_policy else choices, last=seed + total, static_seeds=True)
     fights: list[End] = []
     runs: list[RunFight] = []
     L = RunLayout.load()
@@ -251,17 +251,6 @@ def play(
     pending: dict[int, dict[str, tuple[float, float, float]]] = {}
     # One scored decision in twenty is shown, so the ones shown are not all Neow's.
     shown, show_rng = [0], np.random.default_rng(1)
-
-    # Runs each env has finished: its current run's seed is
-    # `seed + env + done[env] * envs.n` (`Envs.use_runs`).
-    done = [0] * envs.n
-
-    def ended(env: int, run: RunFight) -> None:
-        runs.append(run)
-        left.discard(run.seed)
-        done[env] += 1
-        if trace is not None:
-            trace.end(run)
 
     @torch.no_grad()
     def decide(waiting: list[int], floats: np.ndarray, ids: np.ndarray) -> np.ndarray:
@@ -284,15 +273,9 @@ def play(
             options = event_table.choose(floats, ids, options)
         if afterstate is not None:
             policy = options
-            # Runs past each env's counted ones only fill the batch until the
-            # last counted run ends: their decisions are not worth scoring.
             # The global token's act id: 1 and 2 are act 1's two acts, then one
             # per act (runobs.rs ACTS); `afterstate_acts` counts from 1.
-            counted = [
-                k
-                for k, env in enumerate(waiting)
-                if seed + env + done[env] * envs.n in left and (not afterstate_acts or max(int(ids[k, 2]) - 1, 1) in afterstate_acts)
-            ]
+            counted = [k for k in range(len(waiting)) if not afterstate_acts or max(int(ids[k, 2]) - 1, 1) in afterstate_acts]
             options, score = afterstate.choose(waiting, ids, policy, counted)
             for k in np.flatnonzero(np.isfinite(score).any(1)):
                 if shown[0] >= show_afterstates or show_rng.random() >= 0.05:
@@ -315,33 +298,27 @@ def play(
                     pending[env] = {e: (float(v), float(h), float(w)) for e, v, h, w, m in zip(read.encounter, read.value, read.hp, read.win, here) if m}
         if picks:
             picks.add(floats, ids, torch.softmax(logits, 1).cpu().numpy(), options)
-        if trace is not None:
-            trace.decided([seed + env + done[env] * envs.n for env in waiting], floats, ids, options)
         return options
 
-    loop = RunLoop(combat, device, envs, drain, search, search_kinds, groups, seed, hybrid, forecast)
+    loop = Loop(combat, device, envs, search, search_kinds, groups, seed, hybrid, forecast)
     start = time.perf_counter()
     next_note = start + NOTE_SECONDS
-    while left and time.perf_counter() - start < minutes * 60:
-        ended_now = loop.step(decide, ended)
-        # Starts before outcomes: a fight can start and end in one step.
-        if fights_out is not None or trace is not None:
-            for record in envs.sim.take_fights():
+    while time.perf_counter() - start < minutes * 60:
+        taken = loop.step(decide)
+        if fights_out is not None:
+            for record in taken.starts:
                 fight = json.loads(record)
-                if trace is not None:
-                    trace.started(fight)
-                if fights_out is not None and (easy_fights or KINDS[fight["encounter"]] in ("Elite", "Boss")):
+                if easy_fights or KINDS[fight["encounter"]] in ("Elite", "Boss"):
                     fights_out.write(json.dumps(as_setup(fight)) + "\n")
-        fights += ended_now
-        for e in ended_now:
-            if trace is not None:
-                trace.fought(e)
+        fights += taken.ends
+        runs += taken.runs
+        for e in taken.ends:
             if fight_ends is not None and e.run is not None:
                 outcome = {"seed": e.run.seed, "floor": e.run.floor, "act": e.run.act, "encounter": e.encounter, "kind": e.kind}
                 outcome |= {"won": e.won, "hp_lost": e.hp_lost, "hp_frac": e.hp_frac, "potions_used": e.potions_used, "steps": e.steps}
                 fight_ends.write(json.dumps(outcome) + "\n")
             at = pending.pop(e.env, None)
-            if forecast_log is not None and at and e.kind == "Elite" and e.encounter in at and e.run and e.run.seed < seed + per_env * envs.n:
+            if forecast_log is not None and at and e.kind == "Elite" and e.encounter in at and e.run:
                 value, hp, win = at[e.encounter]
                 record = {
                     "act": e.run.act,
@@ -354,22 +331,26 @@ def play(
                     "kept": e.hp_frac,
                 }
                 forecast_log.write(json.dumps(record) + "\n")
-        if trace is not None:
-            trace.flush()
+        if runs_out is not None:
+            for line in taken.traces:
+                runs_out.write(line + "\n")
+        if taken.active == 0:
+            break
         if (now := time.perf_counter()) >= next_note:
             next_note = now + NOTE_SECONDS
-            total = per_env * envs.n
-            finished = total - len(left)
+            finished = len(runs)
             eta = (now - start) / max(finished, 1) * (total - finished)
             print(f"{(now - start) / 60:.0f} min: {finished} of {total} runs finished, about {eta / 60:.0f} min to go", flush=True)
-    return fights, runs, loop, time.perf_counter() - start
+    seconds = time.perf_counter() - start
+    loop.stop()
+    return fights, runs, loop, seconds
 
 
-def report(fights: list[End], runs: list[RunFight], seed: int, last: int, loop: RunLoop, n: int, seconds: float) -> None:
+def report(fights: list[End], runs: list[RunFight], seed: int, last: int, loop: Loop, n: int, seconds: float) -> None:
     counted = [r for r in runs if r.seed < last]
     seeds = {r.seed for r in counted}
     in_counted = [e for e in fights if e.run and e.run.seed in seeds]
-    print(f"{len(counted)} of {last - seed} runs finished ({len(runs)} in all), {len(in_counted)} fights in them")
+    print(f"{len(counted)} of {last - seed} runs finished, {len(in_counted)} fights in them")
     if not counted:
         return
     outcome = Counter(r.end if not r.end.startswith("stuck") else "stuck" for r in counted)
@@ -415,9 +396,7 @@ def report(fights: list[End], runs: list[RunFight], seed: int, last: int, loop: 
     losses = Counter(e.encounter for e in in_counted if not e.won)
     print("  most runs lost to: " + ", ".join(f"{enc} {k}" for enc, k in losses.most_common(8)))
 
-    rate = (
-        f"{loop.combat_steps * n / seconds:,.0f} combat steps/s, {loop.decisions / seconds:,.0f} run decisions/s, {len(runs) / seconds * 3600:,.0f} runs/hour"
-    )
+    rate = f"{loop.combat_steps / seconds:,.0f} combat steps/s, {loop.decisions / seconds:,.0f} run decisions/s, {len(runs) / seconds * 3600:,.0f} runs/hour"
     searched = f", {loop.searched} decisions searched" if loop.searching else ""
     print(f"throughput: {rate} ({seconds:.0f} s, {n} envs{searched})")
 
@@ -436,7 +415,7 @@ def main() -> None:
     ap.add_argument("--fights-out", type=Path, default=None, help="write each elite and boss fight's start here as a setup")
     ap.add_argument("--easy-fights", action="store_true", help="--fights-out also writes the weak and normal fights")
     ap.add_argument("--fight-ends", type=Path, default=None, help="write each run fight's outcome here (won, HP lost), keyed by run seed and floor")
-    ap.add_argument("--no-drain", action="store_true", help="answer one round of run decisions per combat step, not all (RunLoop)")
+    ap.add_argument("--no-drain", action="store_true", help="accepted for old command lines; the loop answers each env's decisions as they come")
     ap.add_argument("--search", type=int, default=0, help="turn search with this many sim copies per decision, as the pilot (0: greedy)")
     ap.add_argument("--search-kinds", default="Elite,Boss", help="fight kinds searched (Weak,Normal,Elite,Boss); the rest greedy")
     ap.add_argument("--search-mode", choices=("copies", "hybrid", "race"), default="copies", help="copies: --search N copies; hybrid, race: exactsearch.Hybrid")
@@ -513,7 +492,6 @@ def main() -> None:
         args.choices,
         run_policy,
         picks,
-        not args.no_drain,
         fights_out,
         args.search,
         frozenset(args.search_kinds.split(",")),
@@ -533,7 +511,7 @@ def main() -> None:
         frozenset(int(a) for a in args.afterstate_acts.split(",") if a),
         easy_fights=args.easy_fights,
         fight_ends=fight_ends,
-        trace=Trace(runs_out, RunLayout.load(), last) if runs_out is not None else None,
+        runs_out=runs_out,
     )
     for f in (fights_out, fight_ends, forecast_log, runs_out):
         if f is not None:

@@ -189,6 +189,27 @@ def pinned(shape: tuple[int, ...], dtype: torch.dtype) -> np.ndarray:
     return torch.zeros(shape, dtype=dtype, pin_memory=torch.cuda.is_available()).numpy()
 
 
+class Taken(NamedTuple):
+    """One `Envs.take`: the envs at a combat decision and their rows
+    (`floats[k]` is `combat[k]`'s), the envs at a run decision and theirs,
+    the fights and runs that ended since the last take, the fight starts
+    logged (`log_fights`) and the trace lines written (`trace_runs`), and
+    how many envs are still in the batch."""
+
+    combat: list[int]
+    decision: list[int]
+    floats: np.ndarray
+    ids: np.ndarray
+    mask: np.ndarray
+    run_floats: np.ndarray
+    run_ids: np.ndarray
+    ends: list[End]
+    runs: list[RunFight]
+    starts: list[str]
+    traces: list[str]
+    active: int
+
+
 class Envs:
     """`n` combats stepped together. `floats`, `ids`, and `mask` always hold
     the current observation; `step` overwrites them in place, so a
@@ -237,17 +258,49 @@ class Envs:
         self.sim.observe(self.floats, self.ids, self.mask)
         return n
 
-    def use_runs(self, seed: int = 0, asc: int = 10, choices: str = "random") -> None:
-        """Play whole runs, fight after fight; a run that ends starts a
-        fresh one from the next seed. `choices` makes the run decisions:
-        "random", "first", or "caller", where each run stops at its
-        decisions until `step_run` answers them."""
-        self.sim.use_runs(seed, asc, choices)
-        if choices == "caller":
-            self.run_layout = RunLayout.load()
-            self.run_floats = pinned((self.n, self.run_layout.run_floats), torch.float32)
-            self.run_ids = pinned((self.n, self.run_layout.run_ids), torch.int64)
+    def use_runs(self, seed: int = 0, asc: int = 10, choices: str = "random", last: int | None = None, static_seeds: bool = False) -> None:
+        """Play whole runs, fight after fight, on the seeds `seed..last`
+        (`sim::env::Seeds`; no `last`: without end): env `i` starts on
+        `seed + i`, and a run that ends takes the next unplayed seed, or,
+        with `static_seeds`, env `i`'s `k`-th run is `seed + i + k * n`.
+        `choices` makes the run decisions: "random", "first", or "caller",
+        where each run stops at its decisions until they are answered."""
+        self.sim.use_runs(seed, asc, choices, last, static_seeds)
+        self.run_layout = RunLayout.load()
+        self.run_floats = pinned((self.n, self.run_layout.run_floats), torch.float32)
+        self.run_ids = pinned((self.n, self.run_layout.run_ids), torch.int64)
         self.sim.observe(self.floats, self.ids, self.mask)
+
+    def start_loop(self, workers: int = 0) -> None:
+        """Start the threaded run loop (`sim::runloop`): `take` and `post`
+        drive it (`sts2ai.runloop.Loop`); `workers` 0 is one per core."""
+        self.sim.start_loop(workers)
+
+    def take(self, min_rows: int, timeout_ms: int) -> Taken:
+        """The envs ready for the network, their rows packed at the front
+        of the observation buffers: waits for `min_rows` of them, or until
+        no env is being stepped, or `timeout_ms`."""
+        t = self.sim.take(min_rows, timeout_ms, self.floats, self.ids, self.mask, self.run_floats, self.run_ids)
+        k, m = len(t.combat), len(t.decision)
+        return Taken(
+            t.combat,
+            t.decision,
+            self.floats[:k],
+            self.ids[:k],
+            self.mask[:k],
+            self.run_floats[:m],
+            self.run_ids[:m],
+            [End(*e[:-1], RunFight(*e[-1]) if e[-1] else None) for e in t.ends],
+            [RunFight(*r) for r in t.runs],
+            t.starts,
+            t.traces,
+            t.active,
+        )
+
+    def post(self, combat: list[int], actions: np.ndarray, decision: list[int], options: np.ndarray) -> None:
+        """Answer the envs taken: `actions[k]` for `combat[k]`, `options[k]`
+        for `decision[k]`."""
+        self.sim.post(combat, np.ascontiguousarray(actions, dtype=np.int64), decision, np.ascontiguousarray(options, dtype=np.int64))
 
     def set_starts(self, full: float, weights: list[float], own: list[float]) -> None:
         """Where the runs that start from now on start: floor 1 with chance

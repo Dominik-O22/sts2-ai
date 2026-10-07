@@ -1,5 +1,6 @@
 """Per-run traces: what each run fought, decided and carried, one JSON line
-a run (`runplay --runs-out`), for `sts2ai.runreport` and `sts2ai.paired`.
+a run (`runplay --runs-out`, written by the sim as each run ends:
+`sim::runtrace`), for `sts2ai.runreport` and `sts2ai.paired`.
 
     uv run python -m sts2ai.runtrace runs/ab/NAME/a.jsonl   # check a trace's invariants
 
@@ -30,14 +31,12 @@ from __future__ import annotations
 
 import argparse
 import json
-from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TextIO
 
 import numpy as np
 
 from sts2ai import _sim
-from sts2ai.env import End, RunFight, RunLayout
+from sts2ai.env import RunLayout
 
 NAMES = _sim.run_names()
 CARDS = ["-"] + _sim.game_ids()["card"]
@@ -78,118 +77,6 @@ def option_text(L: RunLayout, floats: np.ndarray, ids: np.ndarray, k: int, paths
 def offered(L: RunLayout, floats: np.ndarray) -> list[int]:
     """The option tokens a run row offers."""
     return np.flatnonzero(floats[L.f_options : L.f_options + L.max_options * L.option_floats : L.option_floats]).tolist()
-
-
-def card_text(card: dict) -> str:
-    """A start record's deck entry (`FightSetup::run_json`) as `BASH+` or
-    `STRIKE~SHARP2`."""
-    text = card["id"] + ("+" if card["up"] else "")
-    if ench := card.get("ench"):
-        text += f"~{ench[0]}{ench[1]}"
-    return text
-
-
-@dataclass
-class Run:
-    """One run's trace as it plays; `fights` ends with the fight being
-    played, whose outcome `fought` fills in."""
-
-    fights: list[dict] = field(default_factory=list)
-    decisions: list[dict] = field(default_factory=list)
-    decks: list[dict] = field(default_factory=list)
-    last: dict | None = None  # the last fight's deck entry
-
-
-class Trace:
-    """Collects each counted run's trace from the run loop's events and
-    writes its line to `out` once the run has ended and its last fight's
-    outcome is in (`flush`). Runs with a seed from `last` on only fill the
-    batch and are not traced."""
-
-    def __init__(self, out: TextIO, layout: RunLayout, last: int):
-        self.out, self.L, self.last = out, layout, last
-        self.runs: dict[int, Run] = {}
-        self.ended: list[RunFight] = []
-
-    def run(self, seed: int) -> Run:
-        if (r := self.runs.get(seed)) is None:
-            r = self.runs[seed] = Run()
-        return r
-
-    def decided(self, seeds: list[int], floats: np.ndarray, ids: np.ndarray, options: np.ndarray) -> None:
-        """Row `k` of a batch of run decisions, answered with option token
-        `options[k]`, belongs to the run of `seeds[k]`."""
-        L = self.L
-        for k, seed in enumerate(seeds):
-            if seed >= self.last:
-                continue
-            text = {j: option_text(L, floats[k], ids[k], j, paths=False) for j in offered(L, floats[k])}
-            distinct = list(dict.fromkeys(text.values()))
-            floor = round(float(floats[k, 3]) * 49)
-            self.run(seed).decisions.append([floor, NAMES["decision"][ids[k, 0]], distinct.index(text[int(options[k])]), distinct])
-
-    def started(self, start: dict) -> None:
-        """A fight's start record (`Envs.sim.take_fights`, every kind)."""
-        if start["seed"] >= self.last:
-            return
-        r = self.run(start["seed"])
-        r.fights.append(
-            {
-                "floor": start["floor"],
-                "act": start["act"],
-                "kind": KINDS[start["encounter"]],
-                "enc": start["encounter"],
-                "hp": start["hp"],
-                "max_hp": start["max_hp"],
-                "potions": sum(p is not None for p in start["potions"]),
-                "cards": len(start["deck"]),
-                "gold": start["gold"],
-            }
-        )
-        r.last = {
-            "floor": start["floor"],
-            "act": start["act"],
-            "enc": start["encounter"],
-            "hp": start["hp"],
-            "max_hp": start["max_hp"],
-            "gold": start["gold"],
-            "cards": [card_text(c) for c in start["deck"]],
-            "relics": start["relics"],
-            "potions": [p for p in start["potions"] if p is not None],
-        }
-        if KINDS[start["encounter"]] == "Boss":
-            r.decks.append(r.last)
-
-    def fought(self, e: End) -> None:
-        """A run fight's outcome; its start came through `started` first."""
-        if e.run is None or e.run.seed >= self.last:
-            return
-        # With the sim making the decisions the next fight can start in the
-        # loop step this one ended in, so it is found by its floor.
-        fight = next(f for f in reversed(self.run(e.run.seed).fights) if f["floor"] == e.run.floor and "won" not in f)
-        # `End` gives HP as shares of the max HP the fight ended with.
-        max_end = round(fight["hp"] / (e.hp_frac + e.hp_lost)) if e.hp_frac + e.hp_lost > 0 else fight["max_hp"]
-        fight |= {"won": e.won, "lost": round(e.hp_lost * max_end), "used": e.potions_used, "steps": e.steps}
-
-    def end(self, run: RunFight) -> None:
-        """A run ended; its line waits for `flush`, as its last fight's
-        outcome may come later in the same loop step."""
-        if run.seed < self.last:
-            self.ended.append(run)
-
-    def flush(self) -> None:
-        """Write the lines of the runs that ended."""
-        for run in self.ended:
-            r = self.runs.pop(run.seed, Run())
-            if r.last is not None and r.last not in r.decks:
-                r.decks.append(r.last)
-            line = {"seed": run.seed, "end": run.end, "act": run.act, "floor": run.floor, "deck": run.deck}
-            if run.start is not None:
-                line["start"] = run.start
-                line["source"] = run.source
-            line |= {"fights": r.fights, "decisions": r.decisions, "decks": r.decks}
-            self.out.write(json.dumps(line, separators=(",", ":")) + "\n")
-        self.ended.clear()
 
 
 def problems(run: dict) -> list[str]:
