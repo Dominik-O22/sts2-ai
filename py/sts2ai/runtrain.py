@@ -13,7 +13,8 @@ decision's state) - Phi(its own), Phi 0 once the run is over, Phi the
 deck-value net's view of the run (`deckvalue.RunPotential`). Each env's
 decisions form one trajectory, cut into batches: GAE with gamma 1 and
 `lam` over each env's decisions, bootstrapped from the value of the env's
-next decision, which waits for the next batch.
+next decision, which waits for the next batch. Each update runs while the
+next batch collects, with the policy as it was before that update.
 
 With `--start-full` below 1 the other runs start later in a run
 (`Curriculum`); the log splits floors and wins by where runs started.
@@ -36,9 +37,11 @@ calibration (`imitation build --combat --forecast`).
 from __future__ import annotations
 
 import argparse
+import copy
 import time
 from collections import Counter, defaultdict, deque
 from collections.abc import Callable
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -449,11 +452,30 @@ def train(combat_path: Path, run_dir: Path, cfg: Config, resume: Path | None) ->
     names = _sim.run_names()
     L = envs.run_layout
 
+    # Updates run on a thread of their own, on a CUDA stream of their own,
+    # while this thread collects the next batch with `actor`, a copy of the
+    # policy one update behind: PPO's ratio against the log-prob stored at
+    # collection corrects for that. Torch lets go of the GIL in its kernels
+    # and the sim in its steps, so the two overlap. The actor is compiled,
+    # as `for_play` compiles the combat net; only this thread calls it, so
+    # only this thread compiles.
+    actor = copy.deepcopy(policy)
+    act = torch.compile(actor, dynamic=True) if device.type == "cuda" else actor
+    learner = ThreadPoolExecutor(1)
+    stream = torch.cuda.Stream(device) if device.type == "cuda" else None
+    learning: Future[None] | None = None
+
+    def learn(parts: list[Trajectory], advs: list[np.ndarray], it: int) -> None:
+        with torch.cuda.stream(stream):
+            update(policy, opt, cfg, parts, advs, device, writer, it, anchor, warm=it <= cfg.value_warmup)
+        if stream is not None:
+            stream.synchronize()
+
     @torch.no_grad()
     def decide(waiting: list[int], floats: np.ndarray, ids: np.ndarray) -> np.ndarray:
         f, i = torch.from_numpy(floats).to(device), torch.from_numpy(ids).to(device)
         with loop.autocast:
-            logits, values = policy(f, i)
+            logits, values = act(f, i)
         dist = torch.distributions.Categorical(logits=logits, validate_args=False)
         options = dist.sample()
         logp = dist.log_prob(options).cpu().numpy()
@@ -503,8 +525,12 @@ def train(combat_path: Path, run_dir: Path, cfg: Config, resume: Path | None) ->
         # known (or whose run ended).
         while sum(max(len(t) - (0 if t.done and t.done[-1] else 1), 0) for t in trajs) < cfg.batch:
             stats.fights.extend(e for e in loop.step(decide, run_ended) if e.run)
+        parts, advs = ready(trajs, cfg.lam)
+        if learning is not None:
+            learning.result()
+            actor.load_state_dict(policy.state_dict())
         it += 1
-        update(policy, opt, cfg, trajs, device, writer, it, anchor, warm=it <= cfg.value_warmup)
+        learning = learner.submit(learn, parts, advs, it)
         if time.perf_counter() - last_log > 30:
             last_log = time.perf_counter()
             secs = last_log - start
@@ -527,34 +553,44 @@ def train(combat_path: Path, run_dir: Path, cfg: Config, resume: Path | None) ->
             if cfg.start_full < 1.0 or cfg.win_starts > 0:
                 print(f"    starts: frontier {START_POINTS[curriculum.frontier]}, pools {envs.start_pools()}; won {late}", flush=True)
             stats.picks.clear()
+            # A save waits for the update to end: it reads the weights.
+            learning.result()
             save_run_policy(run_dir / "latest.pt", policy, opt, iter=it, config=asdict(cfg), combat=str(combat_path), frontier=curriculum.frontier, **saved)
+    if learning is not None:
+        learning.result()
     save_run_policy(run_dir / "latest.pt", policy, opt, iter=it, config=asdict(cfg), combat=str(combat_path), frontier=curriculum.frontier, **saved)
+
+
+def ready(trajs: list[Trajectory], lam: float) -> tuple[list[Trajectory], list[np.ndarray]]:
+    """Takes every env's decisions whose successor is known out of `trajs`,
+    with their advantages; each env's last decision of a run still going
+    waits for the next batch."""
+    parts, advs = [], []
+    for t in trajs:
+        n = len(t) if t.done and t.done[-1] else len(t) - 1
+        if n <= 0:
+            continue
+        next_value = t.value[n] if n < len(t) else 0.0
+        head = t.take(n)
+        parts.append(head)
+        advs.append(gae(head, next_value, lam))
+    return parts, advs
 
 
 def update(
     policy: RunPolicy,
     opt: torch.optim.Optimizer,
     cfg: Config,
-    trajs: list[Trajectory],
+    parts: list[Trajectory],
+    advs: list[np.ndarray],
     device: torch.device,
     writer: SummaryWriter,
     it: int,
     anchor: Rows | None = None,
     warm: bool = False,
 ) -> None:
-    """One PPO update over every env's decisions whose successor is known;
-    each env's last decision of a run still going waits for the next batch.
-    `warm` trains the value head alone; `anchor` rows add the imitation
-    loss at `cfg.imitate_coef`."""
-    parts, advs = [], []
-    for t in trajs:
-        ready = len(t) if t.done and t.done[-1] else len(t) - 1
-        if ready <= 0:
-            continue
-        next_value = t.value[ready] if ready < len(t) else 0.0
-        head = t.take(ready)
-        parts.append(head)
-        advs.append(gae(head, next_value, cfg.lam))
+    """One PPO update over `ready`'s decisions. `warm` trains the value head
+    alone; `anchor` rows add the imitation loss at `cfg.imitate_coef`."""
     floats = torch.from_numpy(np.stack([f for p in parts for f in p.floats]).astype(np.float32)).to(device)
     ids = torch.from_numpy(np.stack([i for p in parts for i in p.ids]).astype(np.int64)).to(device)
     options = torch.tensor([o for p in parts for o in p.option], device=device)
@@ -564,6 +600,7 @@ def update(
     ret = adv + old_v
     adv = (adv - adv.mean()) / (adv.std() + 1e-8)
     n = len(options)
+    imitation = None
     for _ in range(cfg.epochs):
         for idx in torch.randperm(n, device=device).split(cfg.minibatch):
             with torch.autocast(device.type, dtype=torch.bfloat16, enabled=device.type == "cuda"):
@@ -583,7 +620,6 @@ def update(
                     a_logits, _ = policy(a_floats, a_ids)
                 imitation = torch.nn.functional.cross_entropy(a_logits.float(), a_option)
                 loss = loss + cfg.imitate_coef * imitation
-                writer.add_scalar("loss/imitation", imitation.item(), it)
             opt.zero_grad()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(policy.parameters(), cfg.max_grad_norm)
@@ -592,6 +628,9 @@ def update(
     writer.add_scalar("loss/value", vf.item(), it)
     writer.add_scalar("loss/entropy", ent.item(), it)
     writer.add_scalar("loss/ratio", ratio.mean().item(), it)
+    # The last minibatch's, as above: a value read per minibatch waits on the GPU.
+    if imitation is not None:
+        writer.add_scalar("loss/imitation", imitation.item(), it)
     writer.add_scalar("run/decisions", n, it)
 
 
