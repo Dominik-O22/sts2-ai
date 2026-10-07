@@ -279,6 +279,14 @@ ended, the runs that ended, the fight starts logged and, with
 `runplay --runs-out` writes), all written in Rust, so Python holds no
 per-env state.
 
+Nothing in the loop waits forever. An env is in one place at a time, so
+its slot is free whenever anything locks it; `env::lock_slot` try-locks
+and panics naming the env otherwise, which turns a nested lock or an env
+touched while a worker steps it into an error instead of a hang. A worker
+that panics stops the loop, and Python's next `take` raises with its
+message; a worker on one env for over a minute (`runloop::STALL`) makes
+`take` raise naming each worker's env.
+
 `Run::next` plays a whole segment between fights and cannot stop halfway:
 the rooms call the chooser from deep inside their flows. So a `Caller`
 slot keeps the run as it stood after the last fight, and each answer plays
