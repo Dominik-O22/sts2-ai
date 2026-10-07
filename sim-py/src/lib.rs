@@ -127,8 +127,9 @@ impl VecEnv {
     /// `depth` player turns are played: the rest of this one, then more.
     #[pyo3(signature = (envs, n, groups=4, seed=0, depth=1))]
     fn fork(&self, envs: Vec<usize>, n: usize, groups: usize, seed: u64, depth: u32) -> Forks {
-        let roots: Vec<_> = envs.iter().map(|&i| self.inner.combat(i)).collect();
-        let bases: Vec<_> = envs.iter().map(|&i| self.inner.base(i)).collect();
+        let guards: Vec<_> = envs.iter().map(|&i| self.inner.combat(i)).collect();
+        let roots: Vec<&sim::combat::Combat> = guards.iter().map(|g| &**g).collect();
+        let bases: Vec<_> = guards.iter().map(|g| g.base()).collect();
         Forks { inner: InnerForks::of(&roots, &bases, n, groups, seed, depth) }
     }
 
@@ -140,7 +141,8 @@ impl VecEnv {
     fn solve(&self, py: Python<'_>, envs: Vec<usize>, beam: usize, turn_states: usize, max_turns: u32) -> Vec<(bool, u32, u64, bool)> {
         use rayon::prelude::*;
         let cfg = sim::solve::Config { beam, turn_states, max_turns };
-        let roots: Vec<&sim::combat::Combat> = envs.iter().map(|&i| self.inner.combat(i)).collect();
+        let guards: Vec<_> = envs.iter().map(|&i| self.inner.combat(i)).collect();
+        let roots: Vec<&sim::combat::Combat> = guards.iter().map(|g| &**g).collect();
         py.detach(|| {
             roots
                 .par_iter()
@@ -162,7 +164,8 @@ impl VecEnv {
     fn solve_trace(&self, py: Python<'_>, envs: Vec<usize>, beam: usize, turn_states: usize, max_turns: u32) -> Vec<Option<Vec<(Vec<f32>, Vec<i64>, usize)>>> {
         use rayon::prelude::*;
         let cfg = sim::solve::Config { beam, turn_states, max_turns };
-        let roots: Vec<&sim::combat::Combat> = envs.iter().map(|&i| self.inner.combat(i)).collect();
+        let guards: Vec<_> = envs.iter().map(|&i| self.inner.combat(i)).collect();
+        let roots: Vec<&sim::combat::Combat> = guards.iter().map(|g| &**g).collect();
         py.detach(|| {
             roots
                 .par_iter()
@@ -288,8 +291,8 @@ impl VecEnv {
     /// Switch to run mode: every env plays whole runs at `asc`, fight
     /// after fight; the envs' k-th runs are seed indices `seed + env + k *
     /// n` (`sim::env::VecEnv::set_runs`). `choices` makes the run
-    /// decisions: "random", "first", or "caller" (`run_waiting`,
-    /// `observe_run`, `step_run`).
+    /// decisions: "random", "first", or "caller" (the loop: `start_loop`,
+    /// `take`, `post`).
     /// Log each run elite and boss fight as it starts, as a recorder
     /// `start` record with the run's act (`take_fights` drains them).
     #[pyo3(signature = (on, easy=false))]
@@ -301,16 +304,82 @@ impl VecEnv {
         self.inner.take_fights()
     }
 
-    #[pyo3(signature = (seed=0, asc=10, choices="random"))]
-    fn use_runs(&mut self, py: Python<'_>, seed: u64, asc: u8, choices: &str) -> PyResult<()> {
+    /// Run mode over seed indices `seed..last` (`sim::env::Seeds`; None:
+    /// unbounded).
+    #[pyo3(signature = (seed=0, asc=10, choices="random", last=None))]
+    fn use_runs(&mut self, py: Python<'_>, seed: u64, asc: u8, choices: &str, last: Option<u64>) -> PyResult<()> {
         let choices = match choices {
             "random" => RunChoices::Random,
             "first" => RunChoices::First,
             "caller" => RunChoices::Caller,
             other => return Err(pyo3::exceptions::PyValueError::new_err(format!("unknown run choices {other:?}: random, first or caller"))),
         };
-        py.detach(|| self.inner.set_runs(Ascension(asc), seed, choices));
+        py.detach(|| self.inner.set_runs(Ascension(asc), seed, last.unwrap_or(u64::MAX), choices));
         Ok(())
+    }
+
+    /// Trace each run (`sim::runtrace`): the lines come out of `take`.
+    fn trace_runs(&mut self, on: bool) {
+        self.inner.trace_runs(on);
+    }
+
+    /// Start the threaded run loop (`sim::runloop::Loop`) with `workers`
+    /// threads; `take` and `post` drive it, `stop_loop` ends it.
+    #[pyo3(signature = (workers=0))]
+    fn start_loop(&mut self, workers: usize) {
+        let workers = if workers == 0 { std::thread::available_parallelism().map_or(8, |n| n.get()) } else { workers };
+        self.inner.start_loop(workers);
+    }
+
+    fn stop_loop(&mut self) {
+        self.inner.stop_loop();
+    }
+
+    /// The envs ready for the network, their rows packed at the front of
+    /// the buffers (`sim::runloop::Loop::take`): waits for `min_rows` of
+    /// them, or until none is posted, or `timeout_ms`.
+    #[allow(clippy::too_many_arguments)]
+    fn take(
+        &self,
+        py: Python<'_>,
+        min_rows: usize,
+        timeout_ms: u64,
+        mut floats: PyReadwriteArray2<f32>,
+        mut ids: PyReadwriteArray2<i64>,
+        mut mask: PyReadwriteArray2<bool>,
+        mut run_floats: PyReadwriteArray2<f32>,
+        mut run_ids: PyReadwriteArray2<i64>,
+    ) -> PyResult<Taken> {
+        let f = floats.as_slice_mut()?;
+        let i = ids.as_slice_mut()?;
+        let m = mask.as_slice_mut()?;
+        let rf = run_floats.as_slice_mut()?;
+        let ri = run_ids.as_slice_mut()?;
+        let taken = py.detach(|| self.inner.run_loop().take(min_rows, std::time::Duration::from_millis(timeout_ms), f, i, m, rf, ri));
+        let sim::env::Events { ends, runs, starts, traces } = taken.events;
+        Ok(Taken {
+            combat: taken.combat,
+            decision: taken.decision,
+            ends: ends.into_iter().map(episode_end).collect(),
+            ended: runs.into_iter().map(|(env, r)| (env, run_fight(r))).collect(),
+            starts,
+            traces,
+            active: taken.active,
+        })
+    }
+
+    /// Answer the envs taken: `actions[k]` for `combat[k]`, `options[k]`
+    /// for `decision[k]`.
+    fn post(&self, py: Python<'_>, combat: Vec<usize>, actions: PyReadonlyArray1<i64>, decision: Vec<usize>, options: PyReadonlyArray1<i64>) -> PyResult<()> {
+        let a = actions.as_slice()?;
+        let o = options.as_slice()?;
+        py.detach(|| self.inner.run_loop().post(&combat, a, &decision, o));
+        Ok(())
+    }
+
+    /// Combat steps taken and run decisions answered by the loop so far.
+    fn loop_counts(&self) -> (u64, u64) {
+        self.inner.run_loop().counts()
     }
 
     /// Where the runs that start from now on start: floor 1 with chance
@@ -338,23 +407,11 @@ impl VecEnv {
         self.inner.start_pools().to_vec()
     }
 
-    /// The envs whose run waits at a decision for the caller.
-    fn run_waiting(&self) -> Vec<usize> {
-        self.inner.run_waiting()
-    }
-
-    /// Fill rows `0..len(envs)` of `floats [k, RUN_FLOATS]` and `ids [k,
-    /// RUN_IDS]` with the decision each env waits at (`sim::runobs`).
-    fn observe_run(&self, py: Python<'_>, envs: Vec<usize>, mut floats: PyReadwriteArray2<f32>, mut ids: PyReadwriteArray2<i64>) -> PyResult<()> {
-        let f = floats.as_slice_mut()?;
-        let i = ids.as_slice_mut()?;
-        py.detach(|| self.inner.observe_run(&envs, f, i));
-        Ok(())
-    }
-
     /// The forecast fights of the decisions `envs` wait at (`forecast_rows`).
     fn forecast<'py>(&self, py: Python<'py>, envs: Vec<usize>) -> Forecast<'py> {
-        forecast_rows(py, &self.inner.forecast(&envs))
+        let fights = self.inner.forecast(&envs);
+        let fights: Vec<&[sim::gen::FightSetup]> = fights.iter().map(Vec::as_slice).collect();
+        forecast_rows(py, &fights)
     }
 
     /// Builds the afterstates of every option of the decisions `envs` wait
@@ -403,26 +460,6 @@ impl VecEnv {
     /// words, and the sub-decisions' options on its best path.
     fn afterstate_option(&self, row: usize, option: usize) -> (String, Vec<String>) {
         self.inner.afterstate_option(row, option)
-    }
-
-    /// Answer each of `envs`' run decision with its option token
-    /// `options[k]` and play on, writing the combat rows of the fights that
-    /// start. Returns the runs that ended: (env, run).
-    fn step_run(
-        &mut self,
-        py: Python<'_>,
-        envs: Vec<usize>,
-        options: PyReadonlyArray1<i64>,
-        mut floats: PyReadwriteArray2<f32>,
-        mut ids: PyReadwriteArray2<i64>,
-        mut mask: PyReadwriteArray2<bool>,
-    ) -> PyResult<Vec<(usize, RunFight)>> {
-        let o = options.as_slice()?;
-        let f = floats.as_slice_mut()?;
-        let i = ids.as_slice_mut()?;
-        let m = mask.as_slice_mut()?;
-        let ended = py.detach(|| self.inner.step_run(&envs, o, f, i, m));
-        Ok(ended.into_iter().map(|(env, r)| (env, run_fight(r))).collect())
     }
 
     /// Switch to cycling through the recordings in `dir` (the held-out
@@ -478,6 +515,23 @@ impl VecEnv {
         let ends = py.detach(|| self.inner.step(a, f, i, m, r, d));
         Ok(ends.into_iter().map(episode_end).collect())
     }
+}
+
+/// What one `take` handed out (`sim::runloop::Taken`): the envs at a
+/// combat decision (row k of the combat buffers is `combat[k]`), the envs
+/// at a run decision (row k of the run buffers), the fights that ended
+/// since the last take and the runs that ended (by env), the fight starts
+/// logged and the trace lines written, and how many envs are still in
+/// the batch.
+#[pyclass(get_all)]
+struct Taken {
+    combat: Vec<usize>,
+    decision: Vec<usize>,
+    ends: Vec<End>,
+    ended: Vec<(usize, RunFight)>,
+    starts: Vec<String>,
+    traces: Vec<String>,
+    active: usize,
 }
 
 /// An ended fight as the tuple Python's `End` reads.
@@ -775,11 +829,12 @@ impl TurnPlanner {
         let (fresh, rows): (Vec<usize>, Vec<usize>) = envs
             .iter()
             .enumerate()
-            .filter(|&(_, &i)| !self.searches[i].as_ref().is_some_and(|s| !s.stats.capped && s.find(inner.combat(i)).is_some()))
+            .filter(|&(_, &i)| !self.searches[i].as_ref().is_some_and(|s| !s.stats.capped && s.find(&inner.combat(i)).is_some()))
             .map(|(row, &i)| (i, row))
             .unzip();
-        let roots: Vec<&sim::combat::Combat> = fresh.iter().map(|&i| inner.combat(i)).collect();
-        let bases: Vec<Baseline> = fresh.iter().map(|&i| inner.base(i)).collect();
+        let guards: Vec<_> = fresh.iter().map(|&i| inner.combat(i)).collect();
+        let roots: Vec<&sim::combat::Combat> = guards.iter().map(|g| &**g).collect();
+        let bases: Vec<Baseline> = guards.iter().map(|g| g.base()).collect();
         let p: Vec<Option<&[f32]>> = rows.iter().map(|&r| Some(&priors[r * N_ACTIONS..][..N_ACTIONS])).collect();
         let cfg = self.cfg;
         let done = py.detach(|| sim::turnsearch::Search::run_all(&roots, &bases, &p, &cfg));
@@ -832,7 +887,7 @@ impl TurnPlanner {
     /// (action index, value) for env `i`'s legal actions, or None when its
     /// search does not hold its state.
     fn action_values(&self, env: PyRef<'_, VecEnv>, i: usize) -> Option<Vec<(usize, f32)>> {
-        self.searches[i].as_ref()?.action_values(env.inner.combat(i))
+        self.searches[i].as_ref()?.action_values(&env.inner.combat(i))
     }
 
     /// Env `i`'s lines from its current state, best value first, as
@@ -841,7 +896,8 @@ impl TurnPlanner {
     /// search does not hold the state.
     fn lines(&mut self, env: PyRef<'_, VecEnv>, i: usize) -> Option<Vec<(usize, f32, f32, String)>> {
         let s = self.searches[i].as_ref()?;
-        let c = env.inner.combat(i);
+        let guard = env.inner.combat(i);
+        let c = &*guard;
         let lines = s.lines(c)?;
         let out = lines.iter().map(|l| s.line_action(c, l).map(|a| (a, l.value, l.way, format!("{:?}", l.end)))).collect::<Option<Vec<_>>>()?;
         self.lines[i] = lines;
@@ -858,7 +914,7 @@ impl TurnPlanner {
     /// turn is over).
     fn planned_action(&self, env: PyRef<'_, VecEnv>, i: usize) -> Option<usize> {
         let (s, line) = (self.searches[i].as_ref()?, self.plans[i].as_ref()?);
-        s.line_action(env.inner.combat(i), line)
+        s.line_action(&env.inner.combat(i), line)
     }
 
     /// `n` copies of where each of `picks` (env, line) takes its env's
@@ -881,7 +937,7 @@ impl TurnPlanner {
         for (&(i, k), &seed) in picks.iter().zip(&seeds) {
             let s = self.searches[i].as_ref().ok_or_else(|| err("no search for env"))?;
             let line = self.lines[i].get(k).ok_or_else(|| err("no such line"))?;
-            let start = s.line_start(env.inner.combat(i), line);
+            let start = s.line_start(&env.inner.combat(i), line);
             ok.push(start.is_some());
             let Some((c, a)) = start else { continue };
             last.push(a.map_or(-1, |a| sim::turnsearch::index(&c, a).map_or(-1, |x| x as i64)));
@@ -1278,7 +1334,8 @@ impl TreeSearch {
     /// Start a fresh search from each of `envs`' current states.
     fn start(&mut self, env: PyRef<'_, VecEnv>, envs: Vec<usize>) {
         for i in envs {
-            self.trees[i] = Some(sim::mcts::Tree::new(env.inner.combat(i), env.inner.base(i), self.cfg));
+            let root = env.inner.combat(i);
+            self.trees[i] = Some(sim::mcts::Tree::new(&root, root.base(), self.cfg));
         }
     }
 
@@ -1358,6 +1415,7 @@ fn set_loss_damage(w: f32) {
 #[pymodule]
 fn _sim(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<VecEnv>()?;
+    m.add_class::<Taken>()?;
     m.add_class::<Advisor>()?;
     m.add_class::<Forks>()?;
     m.add_class::<TurnPlanner>()?;

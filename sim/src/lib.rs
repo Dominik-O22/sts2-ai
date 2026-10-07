@@ -50,7 +50,9 @@ pub mod shop;
 pub mod game_rng;
 pub mod rng;
 pub mod rooms;
+pub mod runloop;
 pub mod runobs;
+pub mod runtrace;
 pub mod turnsearch;
 pub mod types;
 

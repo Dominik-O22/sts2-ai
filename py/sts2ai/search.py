@@ -78,6 +78,106 @@ def buffers(n: int, L: Layout) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor
     return _buffers
 
 
+def outputs(logits: torch.Tensor, values: torch.Tensor, mask: torch.Tensor, picks: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """One sampled action per entry of `picks` (a row of the network's
+    output, `mask` its legal actions) and every row's value, on the CPU:
+    one sync for any number of rollouts' rows."""
+    sampled = np.empty(0, np.int64)
+    if len(picks):
+        masked = masked_logits(logits.float(), mask)
+        rows = masked[torch.from_numpy(picks).to(logits.device)]
+        sampled = torch.distributions.Categorical(logits=rows, validate_args=False).sample().cpu().numpy()
+    return sampled, values.float().cpu().numpy()
+
+
+class Rollout:
+    """`rollout` as steps the caller drives, so a loop can batch many
+    rollouts' rows with everything else it forwards (`sts2ai.runloop`).
+    `rows(floats, ids, mask)` packs the rows the network must see next
+    at the front of those buffers (which hold `len(forks)` rows) and
+    returns how many, or None once the copies are scored; `picks` names
+    the row each live copy samples its action from (none once scoring),
+    and `apply(sampled, values, legal_rows)` takes those actions, the rows'
+    values and legal actions (`outputs`) and steps the copies. `score`
+    holds each copy's score at the end."""
+
+    def __init__(
+        self,
+        forks,
+        first: np.ndarray,
+        depth: int = 1,
+        second: tuple[np.ndarray, np.ndarray] | None = None,
+        on_step: Callable[[np.ndarray, np.ndarray], None] | None = None,
+    ):
+        self.forks, self.depth, self.second, self.on_step = forks, depth, second, on_step
+        n = len(forks)
+        self.inverse = np.empty(n, np.int64)
+        self.rewards = np.zeros(n, np.float32)
+        self.score = np.zeros(n, np.float32)
+        self.step = 0
+        self.live = np.arange(n)
+        # The copies waiting on the network: in their turn, or, once every
+        # turn is over, where the value head scores them.
+        self.scoring = False
+        self.done = False
+        self.advance(np.ascontiguousarray(first, dtype=np.int64))
+
+    def advance(self, actions: np.ndarray) -> None:
+        """Applies one step's actions to the live copies."""
+        if self.on_step is not None:
+            self.on_step(actions, self.live)
+        self.forks.step(actions, self.rewards)
+        self.score += self.rewards
+        self.step += 1
+
+    def rows(self, floats: np.ndarray, ids: np.ndarray, mask: np.ndarray) -> int | None:
+        if self.done:
+            return None
+        if not self.scoring:
+            # Only the copies still in their turn, packed: most end it in a
+            # few steps.
+            self.live = np.array(self.forks.live(), dtype=np.int64)
+            if len(self.live) == 0 or self.step >= MAX_PLAN_STEPS * self.depth:
+                # Where the next turn starts, by the value head; a finished
+                # fight already paid its terminal reward.
+                self.scoring = True
+                self.live = np.flatnonzero(~np.array(self.forks.is_over()))
+                if len(self.live) == 0:
+                    self.done = True
+                    return None
+        # The network sees each distinct observation once; every copy
+        # still samples its own action.
+        return self.forks.observe_unique(self.live.tolist(), floats, ids, mask, self.inverse)
+
+    @property
+    def picks(self) -> np.ndarray:
+        """The row of the last `rows` each live copy samples from."""
+        return np.empty(0, np.int64) if self.scoring else self.inverse[: len(self.live)]
+
+    def apply(self, sampled: np.ndarray, values: np.ndarray, legal_rows: np.ndarray) -> None:
+        """`sampled`, an action per `picks` entry; `values` and `legal_rows`
+        (the legal actions, on the CPU) for the rows of the last `rows`."""
+        live = self.live
+        if self.scoring:
+            self.score[live] += values[self.inverse[: len(live)]]
+            self.done = True
+            return
+        actions = np.zeros(len(self.forks), np.int64)
+        actions[live] = sampled
+        if self.step == 1 and self.second is not None:
+            groups, seconds = self.second
+            groups[:] = -1
+            seen = self.inverse[: len(live)]
+            for g in np.unique(seen):
+                members = live[seen == g]
+                legal = np.flatnonzero(legal_rows[g])
+                if len(members) >= SECOND_MIN * len(legal):
+                    actions[members] = spread(legal, len(members))
+                    groups[members] = g
+            seconds[:] = actions
+        self.advance(actions)
+
+
 @torch.no_grad()
 def rollout(
     policy: Net,
@@ -98,52 +198,13 @@ def rollout(
     `SECOND_MIN` copies for each; `groups[i]` is copy i's observation group,
     or -1 where the policy played on or the turn was already over, and
     `actions[i]` its second action. The network sees `chunk` rows a call."""
-    n = len(forks)
-    floats, ids, mask = buffers(n, Layout.load())
-    inverse = np.empty(n, np.int64)
-    rewards = np.zeros(n, np.float32)
-    score = np.zeros(n, np.float32)
-    actions = np.ascontiguousarray(first, dtype=np.int64)
-    live = np.arange(n)
-    for step in range(MAX_PLAN_STEPS * depth):
-        if step > 0:
-            # Only the copies still in their turn, packed: most end it in a
-            # few steps.
-            live = np.array(forks.live(), dtype=np.int64)
-            if len(live) == 0:
-                break
-            # The network sees each distinct observation once; every copy
-            # still samples its own action.
-            n_unique = forks.observe_unique(live.tolist(), floats.numpy(), ids.numpy(), mask.numpy(), inverse)
-            logits, _ = forward(policy, device, floats[:n_unique], ids[:n_unique], chunk)
-            masked = masked_logits(logits.float(), mask[:n_unique].to(device, non_blocking=True))
-            per_copy = masked[torch.from_numpy(inverse[: len(live)]).to(device)]
-            actions = np.zeros(n, np.int64)
-            actions[live] = torch.distributions.Categorical(logits=per_copy, validate_args=False).sample().cpu().numpy()
-            if step == 1 and second is not None:
-                groups, seconds = second
-                groups[:] = -1
-                seen = inverse[: len(live)]
-                legal_rows = mask[:n_unique].numpy()
-                for g in np.unique(seen):
-                    members = live[seen == g]
-                    legal = np.flatnonzero(legal_rows[g])
-                    if len(members) >= SECOND_MIN * len(legal):
-                        actions[members] = spread(legal, len(members))
-                        groups[members] = g
-                seconds[:] = actions
-        if on_step is not None:
-            on_step(actions, live)
-        forks.step(actions, rewards)
-        score += rewards
-    # Where the next turn starts, by the value head; a finished fight
-    # already paid its terminal reward.
-    rows = np.flatnonzero(~np.array(forks.is_over()))
-    if len(rows):
-        n_unique = forks.observe_unique(rows.tolist(), floats.numpy(), ids.numpy(), mask.numpy(), inverse)
-        _, value = forward(policy, device, floats[:n_unique], ids[:n_unique], chunk)
-        score[rows] += value.float().cpu().numpy()[inverse[: len(rows)]]
-    return score
+    floats, ids, mask = buffers(len(forks), Layout.load())
+    r = Rollout(forks, first, depth, second, on_step)
+    while (n := r.rows(floats.numpy(), ids.numpy(), mask.numpy())) is not None:
+        logits, values = forward(policy, device, floats[:n], ids[:n], chunk)
+        sampled, value = outputs(logits, values, mask[:n].to(device, non_blocking=True), r.picks)
+        r.apply(sampled, value, mask[:n].numpy())
+    return r.score
 
 
 def openings(first: np.ndarray, score: np.ndarray, second: tuple[np.ndarray, np.ndarray]) -> dict[int, tuple[float, int | None]]:
@@ -187,24 +248,31 @@ def spread(legal: np.ndarray, n: int) -> np.ndarray:
     return legal[np.arange(n) % len(legal)]
 
 
+def picks(first: np.ndarray, score: np.ndarray, second: tuple[np.ndarray, np.ndarray], own: np.ndarray, n: int) -> np.ndarray:
+    """The pilot's pick per root from a search of `n` copies a root
+    (`Rollout` with `second`): openings ranked by their best second
+    action (`openings`). The policy's own action `own[r]` stays unless
+    another beats it by `PLAN_MARGIN`."""
+    out = own.copy()
+    for r in range(len(own)):
+        part = slice(r * n, (r + 1) * n)
+        value = openings(first[part], score[part], (second[0][part], second[1][part]))
+        best = max(value, key=lambda a: value[a][0])
+        if int(own[r]) not in value or value[best][0] - value[int(own[r])][0] >= PLAN_MARGIN:
+            out[r] = best
+    return out
+
+
 @torch.no_grad()
 def choose(policy: Net, device: torch.device, sim, roots: list[int], mask: np.ndarray, own: np.ndarray, n: int, groups: int, seed: int) -> np.ndarray:
     """The pilot's pick (`advise.Session.plan`) at the decisions of many
     fights at once: `n` copies of each env in `roots` of the VecEnv `sim`,
     over `groups` draw-pile shuffles, every legal first action (`mask[r]`)
     with its share, openings ranked by their best second action
-    (`openings`). The policy's own action `own[r]` stays unless another
-    beats it by `PLAN_MARGIN`. Returns the action per root. The copies roll
-    their own dice from `seed`, never the env's."""
+    (`picks`). Returns the action per root. The copies roll their own dice
+    from `seed`, never the env's."""
     forks = sim.fork(roots, n, groups, seed)
     first = np.concatenate([spread(np.flatnonzero(m), n) for m in mask])
     second = (np.full(len(first), -1), np.zeros(len(first), np.int64))
     score = rollout(policy, device, forks, first, second=second, chunk=CHOOSE_CHUNK)
-    picks = own.copy()
-    for r in range(len(roots)):
-        part = slice(r * n, (r + 1) * n)
-        value = openings(first[part], score[part], (second[0][part], second[1][part]))
-        best = max(value, key=lambda a: value[a][0])
-        if int(own[r]) not in value or value[best][0] - value[int(own[r])][0] >= PLAN_MARGIN:
-            picks[r] = best
-    return picks
+    return picks(first, score, second, own, n)

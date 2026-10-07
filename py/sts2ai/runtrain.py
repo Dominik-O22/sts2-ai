@@ -13,7 +13,9 @@ decision's state) - Phi(its own), Phi 0 once the run is over, Phi the
 deck-value net's view of the run (`deckvalue.RunPotential`). Each env's
 decisions form one trajectory, cut into batches: GAE with gamma 1 and
 `lam` over each env's decisions, bootstrapped from the value of the env's
-next decision, which waits for the next batch.
+next decision, which waits for the next batch. Each update runs on a
+thread of its own while the next batch collects on the sim's threaded
+loop (`sts2ai.runloop`), with the policy as it was before that update.
 
 With `--start-full` below 1 the other runs start later in a run
 (`Curriculum`); the log splits floors and wins by where runs started.
@@ -36,11 +38,13 @@ calibration (`imitation build --combat --forecast`).
 from __future__ import annotations
 
 import argparse
+import copy
 import time
-from collections import Counter, defaultdict, deque
-from collections.abc import Callable
-from dataclasses import asdict, dataclass, field
+from collections import Counter, deque
+from concurrent.futures import Future, ThreadPoolExecutor
+from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import NamedTuple
 
 import numpy as np
 import torch
@@ -49,21 +53,15 @@ from torch.utils.tensorboard import SummaryWriter
 from sts2ai import _sim
 from sts2ai.deckvalue import RunPotential
 from sts2ai.deckvalue import load as load_deckvalue
-from sts2ai.env import START_POINTS, End, Envs, RunFight, RunLayout
-from sts2ai.exactsearch import Hybrid
-from sts2ai.forecast import Calibration, Forecaster, Read
+from sts2ai.env import START_POINTS, End, Envs, RunFight, RunLayout, Taken
+from sts2ai.forecast import Calibration, Forecaster
 from sts2ai.imitation import DECISIONS, Rows, batches, pretrain
-from sts2ai.model import Net, for_play, load_policy, masked_logits
+from sts2ai.model import for_play, load_policy
+from sts2ai.runloop import Loop
 from sts2ai.runmodel import RunArch, RunPolicy, load_run_policy, save_run_policy
-from sts2ai.search import choose
 from sts2ai.setups import TRACKER, split_runs
 
 FLOORS = 49
-
-# Picks options for the envs waiting at run decisions, given their rows.
-Decide = Callable[[list[int], np.ndarray, np.ndarray], np.ndarray]
-# Hears of a run that ended, by env, before that env's next decision.
-OnRunEnd = Callable[[int, RunFight], None]
 
 
 def run_reward(run: RunFight, floor_weight: float = 1.0) -> float | None:
@@ -74,115 +72,6 @@ def run_reward(run: RunFight, floor_weight: float = 1.0) -> float | None:
     if run.end == "died":
         return floor_weight * max(run.floor - 1, 0) / FLOORS - 1.0
     return None
-
-
-class RunLoop:
-    """Plays runs in `envs` (`use_runs(choices="caller")`): each `step`
-    answers run decisions through `decide`, then takes one combat step for
-    the whole batch with the combat policy, greedy. With `drain` it answers
-    until no env waits (docs/run-env.md), so every combat row is live;
-    without, it answers one round, and the envs still waiting sit the
-    combat step out.
-
-    With `search` copies, fights of `search_kinds` play the pilot's turn
-    search instead (`search.choose`, `groups` shuffles, the copies' dice
-    drawn from `seed` and the step), all of them in one batch; the others
-    stay greedy. With `hybrid` (top lines, playouts, race size or 0) they
-    play the exact search's lines picked by playouts instead
-    (`exactsearch.Hybrid`).
-
-    With a `forecast`, each map step's row gets the forecast filled in
-    before `decide` sees it (`Forecaster.fill`); `read` holds what the
-    last round read, by row of that round's `waiting`."""
-
-    def __init__(
-        self,
-        combat: Net,
-        device: torch.device,
-        envs: Envs,
-        drain: bool = True,
-        search: int = 0,
-        search_kinds: frozenset[str] = frozenset({"Elite", "Boss"}),
-        groups: int = 4,
-        seed: int = 0,
-        hybrid: tuple[int, int, int] | None = None,
-        forecast: Forecaster | None = None,
-    ):
-        self.combat, self.device, self.envs, self.drain = combat, device, envs, drain
-        self.forecast = forecast
-        self.read: Read | None = None
-        self.search, self.search_kinds, self.groups, self.seed = search, search_kinds, groups, seed
-        self.hybrid = Hybrid(envs, *hybrid, seed=seed) if hybrid else None
-        self.autocast = torch.autocast(device.type, dtype=torch.bfloat16, enabled=device.type == "cuda")
-        self.decisions = 0
-        self.combat_steps = 0
-        self.searched = 0
-
-    @torch.no_grad()
-    def step(self, decide: Decide, on_run_end: OnRunEnd) -> list[End]:
-        """Returns the fights that ended."""
-        envs = self.envs
-        while waiting := envs.run_waiting():
-            floats, ids = envs.observe_run(waiting)
-            if self.forecast is not None:
-                self.read = self.forecast.fill(floats, envs.forecast(waiting))
-            for env, run in envs.step_run(waiting, decide(waiting, floats, ids)):
-                on_run_end(env, run)
-            self.decisions += len(waiting)
-            if not self.drain:
-                break
-        floats = torch.from_numpy(envs.floats).to(self.device, non_blocking=True)
-        ids = torch.from_numpy(envs.ids).to(self.device, non_blocking=True)
-        mask = torch.from_numpy(envs.mask).to(self.device, non_blocking=True)
-        with self.autocast:
-            logits, _ = self.combat(floats, ids)
-        masked = masked_logits(logits.float(), mask)
-        actions = masked.argmax(dim=1).cpu().numpy()
-        if self.searching:
-            self.overrule(actions, masked)
-        fights = envs.step(actions)
-        self.combat_steps += 1
-        for e in fights:
-            if e.run and e.run.end:
-                on_run_end(e.env, e.run)
-        return fights
-
-    @property
-    def searching(self) -> bool:
-        return bool(self.search) or self.hybrid is not None
-
-    def overrule(self, actions: np.ndarray, masked: torch.Tensor) -> None:
-        """Replace the greedy `actions` by the turn search's picks in the
-        envs fighting a searched kind with more than one legal action;
-        `masked` holds the policy's masked logits for every env."""
-        envs = self.envs
-        waiting = set(envs.run_waiting())
-        choice = np.flatnonzero(envs.mask.sum(axis=1) > 1)
-        roots = [int(i) for i in choice if i not in waiting and envs.sim.fight(int(i))[1] in self.search_kinds]
-        if not roots:
-            return
-        self.searched += len(roots)
-        if self.hybrid is not None:
-            self.hybrid.choose(self.combat, self.device, roots, masked.softmax(dim=1).cpu().numpy(), actions)
-            # Its per-search stats are for exactsearch's report; a run keeps none.
-            self.hybrid.planner.searched.clear()
-            return
-        seed = self.seed << 32 | self.combat_steps
-        actions[roots] = choose(self.combat, self.device, envs.sim, roots, envs.mask[roots], actions[roots], self.search, self.groups, seed)
-
-
-def policy_decide(policy: RunPolicy, device: torch.device, greedy: bool) -> Decide:
-    """The run policy's picks: sampled, or its favourite."""
-
-    @torch.no_grad()
-    def decide(_: list[int], floats: np.ndarray, ids: np.ndarray) -> np.ndarray:
-        with torch.autocast(device.type, dtype=torch.bfloat16, enabled=device.type == "cuda"):
-            logits, _ = policy(torch.from_numpy(floats).to(device), torch.from_numpy(ids).to(device))
-        if greedy:
-            return logits.argmax(1).cpu().numpy()
-        return torch.distributions.Categorical(logits=logits, validate_args=False).sample().cpu().numpy()
-
-    return decide
 
 
 @dataclass
@@ -203,8 +92,8 @@ class Config:
     seed: int = 0
     minutes: float = 60.0
     seed_cards: bool = True
-    # Answer run decisions until none wait before each combat step
-    # (`RunLoop`); without, one round per step.
+    # Accepted for old command lines; the threaded loop answers each
+    # env's decisions as they come, so there is no round to drain.
     drain: bool = True
     # Paid for each relic gained, at the decision it arrived after: about a
     # floor's worth (1 / 49). A relic's worth shows many floors later, mixed
@@ -246,7 +135,7 @@ class Config:
     # comes with no critic, and a random one's advantages undo the clone.
     value_warmup: int = 0
     # Fights of these kinds play the pilot's turn search with this many
-    # copies (RunLoop), so the run policy learns the risks the combat it
+    # copies (Loop), so the run policy learns the risks the combat it
     # will have can take: with greedy fights PPO gave up elites and
     # upgrades, and the decks that win act 3 with them. 0: greedy.
     search: int = 0
@@ -268,42 +157,145 @@ class Config:
     forecast: str = ""
 
 
-@dataclass
-class Trajectory:
-    """One env's decisions since the last update: rows, the option taken,
-    its log-prob and value when taken, and the reward and end after each."""
+class Batch(NamedTuple):
+    """Decisions ready for an update: rows, the option taken, its log-prob
+    and value when taken, and the advantage."""
 
-    floats: list[np.ndarray] = field(default_factory=list)
-    ids: list[np.ndarray] = field(default_factory=list)
-    option: list[int] = field(default_factory=list)
-    logp: list[float] = field(default_factory=list)
-    value: list[float] = field(default_factory=list)
-    reward: list[float] = field(default_factory=list)
-    done: list[bool] = field(default_factory=list)
+    floats: np.ndarray
+    ids: np.ndarray
+    option: np.ndarray
+    logp: np.ndarray
+    value: np.ndarray
+    adv: np.ndarray
+
+
+class Decisions:
+    """Every env's decisions since the last update, flat and in the order
+    they were made: the row (float16 and int16), the option taken, its
+    log-prob and value when taken, the reward after it, whether its run
+    ended there, and its env. An env's decisions form one trajectory;
+    `take` hands out those whose successor is known (the run ended, or
+    the env decided again) with their advantages, and keeps the rest."""
+
+    def __init__(self, n_envs: int, layout: RunLayout, capacity: int):
+        self.L = layout
+        self.floats = np.empty((capacity, layout.run_floats), np.float16)
+        self.ids = np.empty((capacity, layout.run_ids), np.int16)
+        self.option = np.empty(capacity, np.int64)
+        self.logp = np.empty(capacity, np.float32)
+        self.value = np.empty(capacity, np.float32)
+        self.reward = np.empty(capacity, np.float32)
+        self.done = np.empty(capacity, bool)
+        self.env = np.empty(capacity, np.int64)
+        self.n = 0
+        # Each env's latest decision of a run still going, -1 for none.
+        self.last = np.full(n_envs, -1, np.int64)
+        # Relics the env held at it, and Phi there.
+        self.held = np.zeros(n_envs, np.int64)
+        self.phi = np.zeros(n_envs, np.float32)
 
     def __len__(self) -> int:
-        return len(self.option)
+        return self.n
 
-    def take(self, k: int) -> Trajectory:
-        """The first `k` decisions, which leave this one."""
-        head = Trajectory(*(getattr(self, f)[:k] for f in self.__dataclass_fields__))
-        for f in self.__dataclass_fields__:
-            del getattr(self, f)[:k]
-        return head
+    @property
+    def ready(self) -> int:
+        """Decisions whose successor is known: all but each live env's last."""
+        return self.n - int((self.last >= 0).sum())
 
+    def grow(self, k: int) -> None:
+        if self.n + k <= len(self.option):
+            return
+        cap = max(2 * len(self.option), self.n + k)
+        for name in ("floats", "ids", "option", "logp", "value", "reward", "done", "env"):
+            old = getattr(self, name)
+            new = np.empty((cap, *old.shape[1:]), old.dtype)
+            new[: self.n] = old[: self.n]
+            setattr(self, name, new)
 
-def gae(traj: Trajectory, next_value: float, lam: float) -> np.ndarray:
-    """Advantages over one env's decisions, gamma 1; `next_value` is the
-    value of the decision after the last, if its run goes on."""
-    adv = np.zeros(len(traj), dtype=np.float32)
-    last = 0.0
-    for t in reversed(range(len(traj))):
-        nv = next_value if t + 1 == len(traj) else traj.value[t + 1]
-        nonterminal = 0.0 if traj.done[t] else 1.0
-        delta = traj.reward[t] + nonterminal * nv - traj.value[t]
-        last = delta + lam * nonterminal * last
-        adv[t] = last
-    return adv
+    def add(
+        self,
+        waiting: np.ndarray,
+        floats: np.ndarray,
+        ids: np.ndarray,
+        option: np.ndarray,
+        logp: np.ndarray,
+        value: np.ndarray,
+        relics: np.ndarray,
+        phi: np.ndarray,
+        relic_bonus: float,
+    ) -> None:
+        """The envs `waiting` decided. Each env's previous decision of the
+        same run is paid the relics gained since and Phi here minus Phi
+        there."""
+        k = len(waiting)
+        self.grow(k)
+        prev = self.last[waiting]
+        has = prev >= 0
+        self.reward[prev[has]] += relic_bonus * np.maximum(relics[has] - self.held[waiting][has], 0) + phi[has] - self.phi[waiting][has]
+        rows = np.arange(self.n, self.n + k)
+        self.floats[rows] = floats
+        self.ids[rows] = ids
+        self.option[rows] = option
+        self.logp[rows] = logp
+        self.value[rows] = value
+        self.reward[rows] = 0.0
+        self.done[rows] = False
+        self.env[rows] = waiting
+        self.last[waiting] = rows
+        self.held[waiting] = relics
+        self.phi[waiting] = phi
+        self.n += k
+
+    def ended(self, env: int, run: RunFight, floor_weight: float) -> None:
+        """`env`'s run ended: its last decision is paid the run's reward
+        (Phi is 0 once the run is over) and closes the trajectory."""
+        idx = self.last[env]
+        if idx >= 0:
+            reward = run_reward(run, floor_weight)
+            self.reward[idx] = self.value[idx] if reward is None else reward - self.phi[env]
+            self.done[idx] = True
+        self.last[env] = -1
+
+    def take(self, lam: float) -> Batch:
+        """The ready decisions with their advantages (GAE, gamma 1, `lam`
+        over each env's decisions, bootstrapped from the value of the
+        env's next decision), which leave the buffer; each live env's
+        last decision stays for the next batch."""
+        n = self.n
+        ready = np.ones(n, bool)
+        tail = self.last[self.last >= 0]
+        ready[tail] = False
+        # Grouped by env, each group in time order.
+        s = np.argsort(self.env[:n], kind="stable")
+        env, value, reward, done = self.env[s], self.value[s], self.reward[s], self.done[s]
+        same_next = np.zeros(n, bool)
+        same_next[:-1] = env[:-1] == env[1:]
+        next_value = np.zeros(n, np.float32)
+        next_value[:-1][same_next[:-1]] = value[1:][same_next[:-1]]
+        nonterminal = (~done).astype(np.float32)
+        delta = reward + nonterminal * next_value - value
+        # A trajectory ends at a run's end or at the env's last ready
+        # decision (the one after it, if any, only lends its value);
+        # advantages scan each from its end, all trajectories at once by
+        # position from the end.
+        last_ready = ~same_next
+        last_ready[:-1] |= ~ready[s][1:]
+        ends = np.flatnonzero(done | last_ready)
+        pos = ends[np.searchsorted(ends, np.arange(n))] - np.arange(n)
+        adv = delta.copy()
+        for k in range(1, int(pos.max()) + 1 if n else 0):
+            rows = np.flatnonzero(pos == k)
+            adv[rows] += lam * nonterminal[rows] * adv[rows + 1]
+        out = s[ready[s]]
+        batch = Batch(self.floats[out], self.ids[out], self.option[out], self.logp[out], self.value[out], adv[ready[s]])
+        # The unready rows move to the front.
+        tail = np.sort(tail)
+        for name in ("floats", "ids", "option", "logp", "value", "reward", "done", "env"):
+            a = getattr(self, name)
+            a[: len(tail)] = a[tail]
+        self.n = len(tail)
+        self.last[self.env[: self.n]] = np.arange(self.n)
+        return batch
 
 
 def start_name(run: RunFight) -> str:
@@ -313,26 +305,50 @@ def start_name(run: RunFight) -> str:
 
 class Stats:
     """Rolling run outcomes for the log: runs from floor 1 in full, the
-    others by where they started."""
+    others by where they started. `picks` counts what the policy picked
+    since the last log line, by kind (a path by its room); each run's map
+    steps, the ones into an elite, and its rests healed and smithed are
+    counted per env (`picked`) and kept with the run at its end."""
 
-    def __init__(self, window: int = 2000):
-        self.full: deque[tuple[RunFight, Counter[str]]] = deque(maxlen=window)
-        self.late: dict[str, deque[RunFight]] = defaultdict(lambda: deque(maxlen=window // 4))
+    def __init__(self, n_envs: int, window: int = 2000):
+        self.full: deque[tuple[RunFight, np.ndarray]] = deque(maxlen=window)
+        self.late: dict[str, deque[RunFight]] = {}
         self.fights: deque[End] = deque(maxlen=20000)
         self.picks: Counter[str] = Counter()
+        # Per env: map steps, map steps into an elite, rests healed, smithed.
+        self.per_env = np.zeros((n_envs, 4), np.int64)
+        names = _sim.run_names()
+        self.option_names = names["option"]
+        self.room_names = names["room"]
+        self.path = self.option_names.index("Path")
+        self.elite = self.room_names.index("Elite")
+        self.heal = self.option_names.index("RestHeal")
+        self.smith = self.option_names.index("RestSmith")
 
-    def ended(self, run: RunFight, picks: Counter[str]) -> None:
-        """A run that ended, with what it picked."""
+    def picked(self, waiting: np.ndarray, kinds: np.ndarray, rooms: np.ndarray) -> None:
+        """The envs `waiting` picked options of these kinds (a path into
+        these rooms)."""
+        keys = np.where(kinds == self.path, kinds * len(self.room_names) + rooms, kinds * len(self.room_names))
+        for key, count in zip(*np.unique(keys, return_counts=True)):
+            kind, room = divmod(int(key), len(self.room_names))
+            name = self.option_names[kind]
+            self.picks[f"{name} {self.room_names[room]}" if kind == self.path else name] += int(count)
+        counts = np.stack([kinds == self.path, (kinds == self.path) & (rooms == self.elite), kinds == self.heal, kinds == self.smith], axis=1)
+        np.add.at(self.per_env, waiting, counts)
+
+    def ended(self, env: int, run: RunFight) -> None:
+        """`env`'s run ended."""
         if run.start is None:
-            self.full.append((run, picks))
+            self.full.append((run, self.per_env[env].copy()))
         else:
-            self.late[start_name(run)].append(run)
+            self.late.setdefault(start_name(run), deque(maxlen=self.full.maxlen // 4)).append(run)
+        self.per_env[env] = 0
 
     def summary(self) -> dict[str, float]:
         out = {}
         if self.full:
             runs = [r for r, _ in self.full]
-            paths = sum((p for _, p in self.full), Counter())
+            paths, elite, heal, smith = np.sum([p for _, p in self.full], axis=0)
             out = {
                 "run/floor": float(np.mean([r.floor for r in runs])),
                 "run/won": float(np.mean([r.end == "won" for r in runs])),
@@ -341,8 +357,8 @@ class Stats:
                 "run/deck": float(np.mean([r.deck for r in runs])),
                 "run/stuck": float(np.mean([r.end.startswith("stuck") for r in runs])),
                 # Of the map steps taken, the share into an elite.
-                "run/elite_paths": paths["Path Elite"] / max(sum(v for k, v in paths.items() if k.startswith("Path")), 1),
-                "run/rest_heal": paths["RestHeal"] / max(paths["RestHeal"] + paths["RestSmith"], 1),
+                "run/elite_paths": elite / max(paths, 1),
+                "run/rest_heal": heal / max(heal + smith, 1),
             }
         for name, runs in self.late.items():
             out[f"start/{name}/won"] = float(np.mean([r.end == "won" for r in runs]))
@@ -405,6 +421,13 @@ def train(combat_path: Path, run_dir: Path, cfg: Config, resume: Path | None) ->
     opt = torch.optim.Adam(policy.parameters(), lr=cfg.lr, eps=1e-5)
     if ck and ck.get("optimizer"):
         opt.load_state_dict(ck["optimizer"])
+        # The checkpoint's Adam steps come back on the GPU. Adam keeps a step
+        # as a tensor whenever torch thinks it is compiling, and that flag is
+        # process-wide: while the main thread compiles the actor, the learner
+        # thread's update would feed GPU scalars to the foreach kernels. A
+        # fresh optimizer keeps its steps on the CPU, where they are accepted.
+        for state in opt.state.values():
+            state["step"] = state["step"].cpu()
     calibration = Calibration.load(Path(cfg.forecast)) if cfg.forecast else Calibration(**ck["forecast"]) if ck and ck.get("forecast") else None
     saved = {"forecast": asdict(calibration) if calibration else None}
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -435,64 +458,63 @@ def train(combat_path: Path, run_dir: Path, cfg: Config, resume: Path | None) ->
     envs.use_runs(cfg.seed * 1_000_000, choices="caller")
     writer = SummaryWriter(str(run_dir))
     forecast = Forecaster(combat, device, calibration) if calibration else None
-    loop = RunLoop(combat, device, envs, cfg.drain, cfg.search, frozenset(cfg.search_kinds.split(",")), seed=cfg.seed, forecast=forecast)
-    trajs = [Trajectory() for _ in range(cfg.envs)]
-    # Relics each env held at its last decision, for `relic_bonus`.
-    held: list[int | None] = [None] * cfg.envs
-    potential = RunPotential(load_deckvalue(Path(cfg.potential), device), envs.run_layout, cfg.phi_scale) if cfg.potential else None
-    # Phi at each env's last decision.
-    phi = np.zeros(cfg.envs, dtype=np.float32)
-    # What each env's run has picked so far.
-    run_picks = [Counter() for _ in range(cfg.envs)]
-    curriculum = Curriculum(cfg, int(ck.get("frontier", 0)) if ck else 0)
-    stats = Stats()
-    names = _sim.run_names()
     L = envs.run_layout
+    decisions = Decisions(cfg.envs, L, 2 * cfg.batch + 2 * cfg.envs)
+    potential = RunPotential(load_deckvalue(Path(cfg.potential), device), L, cfg.phi_scale) if cfg.potential else None
+    curriculum = Curriculum(cfg, int(ck.get("frontier", 0)) if ck else 0)
+    stats = Stats(cfg.envs)
+    autocast = torch.autocast(device.type, dtype=torch.bfloat16, enabled=device.type == "cuda")
+
+    # Updates run on a thread of their own, on a CUDA stream of their own,
+    # while this thread collects the next batch with `actor`, a copy of the
+    # policy one update behind: PPO's ratio against the log-prob stored at
+    # collection corrects for that. Torch lets go of the GIL in its kernels
+    # and the sim in its steps, so the two overlap. The actor is compiled,
+    # as `for_play` compiles the combat net; only this thread calls it, so
+    # only this thread compiles.
+    actor = copy.deepcopy(policy)
+    act = torch.compile(actor, dynamic=True) if device.type == "cuda" else actor
+    learner = ThreadPoolExecutor(1)
+    stream = torch.cuda.Stream(device) if device.type == "cuda" else None
+    learning: Future[None] | None = None
+
+    def learn(batch: Batch, it: int) -> None:
+        with torch.cuda.stream(stream):
+            update(policy, opt, cfg, batch, device, writer, it, anchor, warm=it <= cfg.value_warmup)
+        if stream is not None:
+            stream.synchronize()
 
     @torch.no_grad()
     def decide(waiting: list[int], floats: np.ndarray, ids: np.ndarray) -> np.ndarray:
-        f, i = torch.from_numpy(floats).to(device), torch.from_numpy(ids).to(device)
-        with loop.autocast:
-            logits, values = policy(f, i)
-        dist = torch.distributions.Categorical(logits=logits, validate_args=False)
+        f = torch.from_numpy(floats).to(device, non_blocking=True)
+        i = torch.from_numpy(ids).to(device, non_blocking=True)
+        with autocast:
+            logits, values = act(f, i)
+        dist = torch.distributions.Categorical(logits=logits.float(), validate_args=False)
         options = dist.sample()
-        logp = dist.log_prob(options).cpu().numpy()
-        options, values = options.cpu().numpy(), values.cpu().numpy()
-        now = potential(f, i).cpu().numpy() if potential else np.zeros(len(waiting), dtype=np.float32)
+        phi = potential(f, i) if potential else torch.zeros_like(values)
+        # One copy back for the four.
+        out = torch.stack([options.float(), dist.log_prob(options), values.float(), phi.float()]).cpu().numpy()
+        options = out[0].astype(np.int64)
+        envs_ = np.asarray(waiting, dtype=np.int64)
         rows = np.arange(len(waiting))
+        relics = (floats[:, L.f_relics : L.f_relics + L.max_relics * L.relic_floats : L.relic_floats] != 0).sum(1)
+        decisions.add(envs_, floats, ids, options, out[1], out[2], relics, out[3], cfg.relic_bonus)
         kinds = ids[rows, L.i_options + options * L.option_ids]
         rooms = ids[rows, L.i_options + options * L.option_ids + 4 + L.option_cards]
-        relics = (floats[:, L.f_relics : L.f_relics + L.max_relics * L.relic_floats : L.relic_floats] != 0).sum(1)
-        for k, env in enumerate(waiting):
-            t = trajs[env]
-            if held[env] is not None and len(t) and not t.done[-1]:
-                t.reward[-1] += cfg.relic_bonus * max(int(relics[k]) - held[env], 0) + now[k] - phi[env]
-            held[env], phi[env] = int(relics[k]), now[k]
-            t.floats.append(floats[k].astype(np.float16))
-            t.ids.append(ids[k].astype(np.int16))
-            t.option.append(int(options[k]))
-            t.logp.append(float(logp[k]))
-            t.value.append(float(values[k]))
-            t.reward.append(0.0)
-            t.done.append(False)
-            kind = names["option"][kinds[k]]
-            pick = f"{kind} {names['room'][rooms[k]]}" if kind == "Path" else kind
-            stats.picks[pick] += 1
-            run_picks[env][pick] += 1
+        stats.picked(envs_, kinds, rooms)
         return options
 
-    def run_ended(env: int, run: RunFight) -> None:
-        stats.ended(run, run_picks[env])
-        curriculum.ended(run)
-        run_picks[env] = Counter()
-        t = trajs[env]
-        if len(t) and not t.done[-1]:
-            reward = run_reward(run, cfg.floor_weight)
-            # Phi is 0 once the run is over.
-            t.reward[-1] = t.value[-1] if reward is None else reward - phi[env]
-            t.done[-1] = True
-        held[env] = None
+    def events(taken: Taken) -> None:
+        # Before the round's decisions: an ended run's env comes back at
+        # the next run's first decision, which must not inherit the end.
+        stats.fights.extend(e for e in taken.ends if e.run)
+        for env, run in taken.ended:
+            stats.ended(env, run)
+            curriculum.ended(run)
+            decisions.ended(env, run, cfg.floor_weight)
 
+    loop = Loop(combat, device, envs, cfg.search, frozenset(cfg.search_kinds.split(",")), seed=cfg.seed, forecast=forecast)
     it = int(ck.get("iter", 0)) if ck else 0
     start = time.perf_counter()
     last_log = start
@@ -501,10 +523,14 @@ def train(combat_path: Path, run_dir: Path, cfg: Config, resume: Path | None) ->
             curriculum.update(envs)
         # Collect until the batch fills with decisions whose successor is
         # known (or whose run ended).
-        while sum(max(len(t) - (0 if t.done and t.done[-1] else 1), 0) for t in trajs) < cfg.batch:
-            stats.fights.extend(e for e in loop.step(decide, run_ended) if e.run)
+        while decisions.ready < cfg.batch:
+            loop.step(decide, events)
+        batch = decisions.take(cfg.lam)
+        if learning is not None:
+            learning.result()
+            actor.load_state_dict(policy.state_dict())
         it += 1
-        update(policy, opt, cfg, trajs, device, writer, it, anchor, warm=it <= cfg.value_warmup)
+        learning = learner.submit(learn, batch, it)
         if time.perf_counter() - last_log > 30:
             last_log = time.perf_counter()
             secs = last_log - start
@@ -512,7 +538,7 @@ def train(combat_path: Path, run_dir: Path, cfg: Config, resume: Path | None) ->
             for k, v in summary.items():
                 writer.add_scalar(k, v, it)
             writer.add_scalar("speed/decisions_per_s", loop.decisions / secs, it)
-            writer.add_scalar("speed/combat_steps_per_s", loop.combat_steps * cfg.envs / secs, it)
+            writer.add_scalar("speed/combat_steps_per_s", loop.combat_steps / secs, it)
             writer.add_scalar("start/frontier", curriculum.frontier, it)
             top = ", ".join(f"{k} {v / max(stats.picks.total(), 1):.0%}" for k, v in stats.picks.most_common(8))
             late = "  ".join(f"{name} {np.mean([r.end == 'won' for r in runs]):.0%} ({len(runs)})" for name, runs in sorted(stats.late.items()))
@@ -521,13 +547,18 @@ def train(combat_path: Path, run_dir: Path, cfg: Config, resume: Path | None) ->
                 f"act2 {summary.get('run/act2', 0):.1%}  act3 {summary.get('run/act3', 0):.1%}  "
                 f"elite paths {summary.get('run/elite_paths', 0):.1%}  elites won {summary.get('fight/elite', 0):.1%}  "
                 f"heal {summary.get('run/rest_heal', 0):.0%}  "
-                f"{loop.decisions / secs:,.0f} dec/s  {loop.combat_steps * cfg.envs / secs:,.0f} steps/s  picks: {top}",
+                f"{loop.decisions / secs:,.0f} dec/s  {loop.combat_steps / secs:,.0f} steps/s  picks: {top}",
                 flush=True,
             )
             if cfg.start_full < 1.0 or cfg.win_starts > 0:
                 print(f"    starts: frontier {START_POINTS[curriculum.frontier]}, pools {envs.start_pools()}; won {late}", flush=True)
             stats.picks.clear()
+            # A save waits for the update to end: it reads the weights.
+            learning.result()
             save_run_policy(run_dir / "latest.pt", policy, opt, iter=it, config=asdict(cfg), combat=str(combat_path), frontier=curriculum.frontier, **saved)
+    if learning is not None:
+        learning.result()
+    loop.stop()
     save_run_policy(run_dir / "latest.pt", policy, opt, iter=it, config=asdict(cfg), combat=str(combat_path), frontier=curriculum.frontier, **saved)
 
 
@@ -535,35 +566,25 @@ def update(
     policy: RunPolicy,
     opt: torch.optim.Optimizer,
     cfg: Config,
-    trajs: list[Trajectory],
+    batch: Batch,
     device: torch.device,
     writer: SummaryWriter,
     it: int,
     anchor: Rows | None = None,
     warm: bool = False,
 ) -> None:
-    """One PPO update over every env's decisions whose successor is known;
-    each env's last decision of a run still going waits for the next batch.
-    `warm` trains the value head alone; `anchor` rows add the imitation
-    loss at `cfg.imitate_coef`."""
-    parts, advs = [], []
-    for t in trajs:
-        ready = len(t) if t.done and t.done[-1] else len(t) - 1
-        if ready <= 0:
-            continue
-        next_value = t.value[ready] if ready < len(t) else 0.0
-        head = t.take(ready)
-        parts.append(head)
-        advs.append(gae(head, next_value, cfg.lam))
-    floats = torch.from_numpy(np.stack([f for p in parts for f in p.floats]).astype(np.float32)).to(device)
-    ids = torch.from_numpy(np.stack([i for p in parts for i in p.ids]).astype(np.int64)).to(device)
-    options = torch.tensor([o for p in parts for o in p.option], device=device)
-    old_logp = torch.tensor([x for p in parts for x in p.logp], device=device)
-    old_v = torch.tensor([x for p in parts for x in p.value], device=device)
-    adv = torch.from_numpy(np.concatenate(advs)).to(device)
+    """One PPO update over `batch`. `warm` trains the value head alone;
+    `anchor` rows add the imitation loss at `cfg.imitate_coef`."""
+    floats = torch.from_numpy(batch.floats.astype(np.float32)).to(device)
+    ids = torch.from_numpy(batch.ids.astype(np.int64)).to(device)
+    options = torch.from_numpy(batch.option).to(device)
+    old_logp = torch.from_numpy(batch.logp).to(device)
+    old_v = torch.from_numpy(batch.value).to(device)
+    adv = torch.from_numpy(batch.adv).to(device)
     ret = adv + old_v
     adv = (adv - adv.mean()) / (adv.std() + 1e-8)
     n = len(options)
+    imitation = None
     for _ in range(cfg.epochs):
         for idx in torch.randperm(n, device=device).split(cfg.minibatch):
             with torch.autocast(device.type, dtype=torch.bfloat16, enabled=device.type == "cuda"):
@@ -583,7 +604,6 @@ def update(
                     a_logits, _ = policy(a_floats, a_ids)
                 imitation = torch.nn.functional.cross_entropy(a_logits.float(), a_option)
                 loss = loss + cfg.imitate_coef * imitation
-                writer.add_scalar("loss/imitation", imitation.item(), it)
             opt.zero_grad()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(policy.parameters(), cfg.max_grad_norm)
@@ -592,6 +612,9 @@ def update(
     writer.add_scalar("loss/value", vf.item(), it)
     writer.add_scalar("loss/entropy", ent.item(), it)
     writer.add_scalar("loss/ratio", ratio.mean().item(), it)
+    # The last minibatch's, as above: a value read per minibatch waits on the GPU.
+    if imitation is not None:
+        writer.add_scalar("loss/imitation", imitation.item(), it)
     writer.add_scalar("run/decisions", n, it)
 
 
