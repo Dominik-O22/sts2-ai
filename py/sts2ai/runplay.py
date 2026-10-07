@@ -40,9 +40,10 @@ another option is open: the forecast as a rule, whatever the policy.
 policy: of the options offered, the one winners took most often when it
 was offered to them (`EventTable`), from imitation rows.
 
-`--runs-out FILE` writes each counted run as a JSON line (seed, end, act,
-floor, deck) and the command line as the first, for `sts2ai.paired` to
-compare two arms run on the same seeds.
+`--runs-out FILE` writes each counted run as a JSON line as it ends, the
+command line first: how it ended, and its fights, decisions and decks
+(`sts2ai.runtrace`), for `sts2ai.runreport` and `sts2ai.paired` to
+compare arms run on the same seeds.
 
 `--afterstate K` makes every decision but a map step by its afterstates
 (`sts2ai.afterstate`): each option applied in the sim, random outcomes
@@ -78,39 +79,13 @@ from sts2ai.forecast import Calibration, Forecaster
 from sts2ai.imitation import Rows
 from sts2ai.model import Net, for_play, load_policy
 from sts2ai.runmodel import RunPolicy, load_run_policy
+from sts2ai.runtrace import KINDS, Trace, offered, option_text
 from sts2ai.runtrain import RunLoop
 from sts2ai.setups import TRACKER, sim_floor, split_runs
 
 NAMES = _sim.run_names()
 # Seconds between progress lines, the first after as long.
 NOTE_SECONDS = 300
-CARDS = ["-"] + _sim.game_ids()["card"]
-POTIONS = ["-"] + _sim.game_ids()["potion"]
-
-
-def option_text(L: RunLayout, floats: np.ndarray, ids: np.ndarray, k: int) -> str:
-    """Option token `k` of a run row in words: its kind and what it names."""
-    i, f = L.i_options + k * L.option_ids, L.f_options + k * L.option_floats
-    C = L.option_cards
-    kind = NAMES["option"][ids[i]]
-    parts = [kind]
-    for c in range(C):
-        if ids[i + 1 + c]:
-            parts.append(CARDS[ids[i + 1 + c]] + ("+" if floats[f + 1 + c] else ""))
-    if ids[i + 2 + C]:
-        parts.append(NAMES["relic"][ids[i + 2 + C]])
-    if ids[i + 3 + C]:
-        parts.append(POTIONS[ids[i + 3 + C]])
-    if ids[i + 4 + C]:
-        parts.append(NAMES["room"][ids[i + 4 + C]])
-    if kind == "Event":
-        parts.append(f"key#{ids[i + 5 + C]}")
-    if price := floats[f + 2 + C]:
-        parts.append(f"{price * 100:.0f}g")
-    if kind == "Path":
-        m = floats[f + 3 + C : f + L.option_floats] * 8
-        parts.append(f"elites {m[10]:.0f}-{m[11]:.0f} rests {m[6]:.0f}-{m[7]:.0f} ?{m[0]:.0f}-{m[1]:.0f}")
-    return " ".join(parts)
 
 
 def row_text(L: RunLayout, floats: np.ndarray, ids: np.ndarray) -> str:
@@ -141,9 +116,8 @@ class Picks:
             # One decision in fifty, so the ones shown are not all Neow's.
             if self.show > 0 and self.rng.random() < 0.02:
                 self.show -= 1
-                present = [j for j in range(L.max_options) if floats[k, L.f_options + j * L.option_floats]]
                 print(row_text(L, floats[k], ids[k]))
-                for j in present:
+                for j in offered(L, floats[k]):
                     mark = "*" if j == o else " "
                     print(f"  {mark} {probs[k, j]:6.1%}  {option_text(L, floats[k], ids[k], j)}")
 
@@ -169,19 +143,15 @@ class EventTable:
     def __init__(self, rows: Rows, layout: RunLayout, min_offered: int = 5):
         self.L = layout
         self.event = NAMES["decision"].index("Event")
-        offered: Counter[tuple[int, int]] = Counter()
+        seen: Counter[tuple[int, int]] = Counter()
         picked: Counter[tuple[int, int]] = Counter()
         for k in np.flatnonzero(rows.kind == self.event):
-            for j in self.offered(rows.floats[k]):
+            for j in offered(layout, rows.floats[k]):
                 key = self.key(rows.ids[k], j)
-                offered[key] += 1
+                seen[key] += 1
                 picked[key] += j == rows.option[k]
-        self.rate = {key: picked[key] / n for key, n in offered.items() if n >= min_offered}
+        self.rate = {key: picked[key] / n for key, n in seen.items() if n >= min_offered}
         self.decisions = self.changed = 0
-
-    def offered(self, floats: np.ndarray) -> list[int]:
-        L = self.L
-        return [j for j in range(L.max_options) if floats[L.f_options + j * L.option_floats]]
 
     def key(self, ids: np.ndarray, j: int) -> tuple[int, int]:
         L = self.L
@@ -190,7 +160,7 @@ class EventTable:
     def choose(self, floats: np.ndarray, ids: np.ndarray, options: np.ndarray) -> np.ndarray:
         options = options.copy()
         for k in np.flatnonzero(ids[:, 0] == self.event):
-            rated = [(self.rate[key], j) for j in self.offered(floats[k]) if (key := self.key(ids[k], j)) in self.rate]
+            rated = [(self.rate[key], j) for j in offered(self.L, floats[k]) if (key := self.key(ids[k], j)) in self.rate]
             self.decisions += 1
             if rated:
                 best = max(rated)[1]
@@ -245,6 +215,7 @@ def play(
     afterstate_acts: frozenset[int] = frozenset(),
     easy_fights: bool = False,
     fight_ends: TextIO | None = None,
+    trace: Trace | None = None,
 ) -> tuple[list[End], list[RunFight], RunLoop, float]:
     """Plays until each env has finished `per_env` runs or `minutes` pass.
     Returns every fight that ended, every run that ended, the loop (its
@@ -254,7 +225,8 @@ def play(
     (`sts2ai.setups`' format, `evaluate --source setups` plays them), with
     `easy_fights` the weak and normal fights too. With `fight_ends`, each
     run fight's outcome as it ends (won, HP lost, potions), keyed like the
-    start records by run seed and floor.
+    start records by run seed and floor. With `trace`, each counted run's
+    fights, decisions and decks go there (`sts2ai.runtrace`).
     With `late_policy`, that policy makes the decisions from act
     `late_from_act` on (1-based) and `run_policy` the ones before.
     `win_starts` of the runs start with winners' players (`Envs.use_winner_starts`),
@@ -268,6 +240,8 @@ def play(
     if win_starts > 0:
         held = envs.use_winner_starts(split_runs(win_runs, win_holdout), win_starts)
         print("winners' starts: " + ", ".join(f"{n} at {p}" for p, n in zip(START_POINTS, held) if n))
+    # Before the runs start: with the sim deciding, each starts its first fight at once.
+    envs.sim.log_fights(fights_out is not None or trace is not None, easy_fights or trace is not None)
     envs.use_runs(seed, choices="caller" if run_policy else choices)
     left = set(range(seed, seed + per_env * envs.n))
     fights: list[End] = []
@@ -286,6 +260,8 @@ def play(
         runs.append(run)
         left.discard(run.seed)
         done[env] += 1
+        if trace is not None:
+            trace.end(run)
 
     @torch.no_grad()
     def decide(waiting: list[int], floats: np.ndarray, ids: np.ndarray) -> np.ndarray:
@@ -339,16 +315,27 @@ def play(
                     pending[env] = {e: (float(v), float(h), float(w)) for e, v, h, w, m in zip(read.encounter, read.value, read.hp, read.win, here) if m}
         if picks:
             picks.add(floats, ids, torch.softmax(logits, 1).cpu().numpy(), options)
+        if trace is not None:
+            trace.decided([seed + env + done[env] * envs.n for env in waiting], floats, ids, options)
         return options
 
     loop = RunLoop(combat, device, envs, drain, search, search_kinds, groups, seed, hybrid, forecast)
     start = time.perf_counter()
     next_note = start + NOTE_SECONDS
-    envs.sim.log_fights(fights_out is not None, easy_fights)
     while left and time.perf_counter() - start < minutes * 60:
         ended_now = loop.step(decide, ended)
+        # Starts before outcomes: a fight can start and end in one step.
+        if fights_out is not None or trace is not None:
+            for record in envs.sim.take_fights():
+                fight = json.loads(record)
+                if trace is not None:
+                    trace.started(fight)
+                if fights_out is not None and (easy_fights or KINDS[fight["encounter"]] in ("Elite", "Boss")):
+                    fights_out.write(json.dumps(as_setup(fight)) + "\n")
         fights += ended_now
         for e in ended_now:
+            if trace is not None:
+                trace.fought(e)
             if fight_ends is not None and e.run is not None:
                 outcome = {"seed": e.run.seed, "floor": e.run.floor, "act": e.run.act, "encounter": e.encounter, "kind": e.kind}
                 outcome |= {"won": e.won, "hp_lost": e.hp_lost, "hp_frac": e.hp_frac, "potions_used": e.potions_used, "steps": e.steps}
@@ -367,9 +354,8 @@ def play(
                     "kept": e.hp_frac,
                 }
                 forecast_log.write(json.dumps(record) + "\n")
-        if fights_out is not None:
-            for record in envs.sim.take_fights():
-                fights_out.write(json.dumps(as_setup(json.loads(record))) + "\n")
+        if trace is not None:
+            trace.flush()
         if (now := time.perf_counter()) >= next_note:
             next_note = now + NOTE_SECONDS
             total = per_env * envs.n
@@ -467,7 +453,7 @@ def main() -> None:
     ap.add_argument("--forecast", type=Path, default=None, help="forecast calibration for a run policy that has none")
     ap.add_argument("--elite-gate", type=float, default=0.0, help="pass up elites whose forecast win chance is under this")
     ap.add_argument("--event-table", type=Path, default=None, help="imitation rows (.npz); event choices take winners' most picked option")
-    ap.add_argument("--runs-out", type=Path, default=None, help="write each counted run here as a JSON line, for sts2ai.paired")
+    ap.add_argument("--runs-out", type=Path, default=None, help="write each counted run's trace here as a JSON line (sts2ai.runtrace)")
     ap.add_argument("--deckvalue", type=Path, default=None, help="score afterstates with this deck value network (sts2ai.deckvalue) instead of the forecast")
     ap.add_argument("--afterstate", type=int, default=0, help="make every decision but a map step by its afterstates, K samples each (needs the forecast)")
     ap.add_argument("--afterstate-depth", type=int, default=3, help="sub-decisions an afterstate opens on the way, at most")
@@ -499,6 +485,10 @@ def main() -> None:
     picks = Picks(RunLayout.load(), args.show) if run_policy else None
     fights_out = args.fights_out.open("w") if args.fights_out else None
     fight_ends = args.fight_ends.open("w") if args.fight_ends else None
+    last = args.seed + args.runs_per_env * args.envs
+    runs_out = args.runs_out.open("w") if args.runs_out else None
+    if runs_out is not None:
+        runs_out.write(json.dumps({"argv": sys.argv}) + "\n")
     event_table = EventTable(Rows.load(args.event_table), RunLayout.load()) if args.event_table else None
     afterstate = (
         Scorer(
@@ -543,20 +533,12 @@ def main() -> None:
         frozenset(int(a) for a in args.afterstate_acts.split(",") if a),
         easy_fights=args.easy_fights,
         fight_ends=fight_ends,
+        trace=Trace(runs_out, RunLayout.load(), last) if runs_out is not None else None,
     )
-    if fights_out is not None:
-        fights_out.close()
-    if fight_ends is not None:
-        fight_ends.close()
-    if forecast_log is not None:
-        forecast_log.close()
-    last = args.seed + args.runs_per_env * args.envs
+    for f in (fights_out, fight_ends, forecast_log, runs_out):
+        if f is not None:
+            f.close()
     report(fights, runs, args.seed, last, loop, args.envs, seconds)
-    if args.runs_out:
-        with args.runs_out.open("w") as out:
-            out.write(json.dumps({"argv": sys.argv}) + "\n")
-            for r in sorted((r for r in runs if r.seed < last), key=lambda r: r.seed):
-                out.write(json.dumps({"seed": r.seed, "end": r.end, "act": r.act, "floor": r.floor, "deck": r.deck}) + "\n")
     if picks:
         picks.report()
     if event_table:
