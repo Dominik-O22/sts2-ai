@@ -2750,30 +2750,35 @@ pub(crate) mod tests {
     }
 
     /// A run played under the caller's choices: where it began, its
-    /// answers, each fight's setup and the combat it ended as, and its end.
+    /// answers, each fight the caller saw end (its index among the run's
+    /// fights, its setup and the combat it ended as), and its end.
     struct CallerRun {
         seed: u64,
         began: Began,
         answers: Vec<usize>,
-        fights: Vec<(FightSetup, Combat)>,
+        fights: Vec<(usize, FightSetup, Combat)>,
         end: forward::End,
     }
 
     /// Plays `env` (run mode, `RunChoices::Caller`) on the threaded loop
     /// until `runs` runs have ended: random options at the run decisions,
-    /// the first legal action at the combat decisions. Checks each run row
-    /// is the decision its env waits at, with an option token per answer,
-    /// and records each fight as it ends by stepping a copy of the
-    /// combat as the worker steps the slot's (the lone legal actions
-    /// after the posted one included).
+    /// drawn from dice of the run's own seed so they do not hang on which
+    /// worker gets there first, and the first legal action at the combat
+    /// decisions. Checks each run row is the decision its env waits at,
+    /// with an option token per answer, and records each fight it sees end
+    /// by stepping a copy of the combat as the worker steps the slot's (the
+    /// lone legal actions after the posted one included). A fight with no
+    /// choice in it goes unseen: one over at once, or one the worker plays
+    /// out on lone legal actions, as after Whispering Earring's opening
+    /// turn leaves only End Turn.
     fn caller_runs(env: &mut VecEnv, runs: usize) -> Vec<CallerRun> {
         let n = env.len();
         let (mut floats, mut ids, mut mask) = (vec![0.0; n * N_FLOATS], vec![0; n * N_IDS], vec![false; n * N_ACTIONS]);
         let (mut run_f, mut run_i) = (vec![0.0; n * RUN_FLOATS], vec![0; n * RUN_IDS]);
         env.start_loop(2);
-        let mut rng = Rng::new(3);
+        let mut dice: std::collections::HashMap<u64, Rng> = Default::default();
         let mut answers: std::collections::HashMap<u64, Vec<usize>> = Default::default();
-        let mut fights: std::collections::HashMap<u64, Vec<(FightSetup, Combat)>> = Default::default();
+        let mut fights: std::collections::HashMap<u64, Vec<(usize, FightSetup, Combat)>> = Default::default();
         let mut ended: Vec<RunFight> = vec![];
         while ended.len() < runs {
             let t = env.run_loop().take(1, std::time::Duration::from_secs(5), &mut floats, &mut ids, &mut mask, &mut run_f, &mut run_i);
@@ -2789,7 +2794,7 @@ pub(crate) mod tests {
                     let present = (0..runobs::MAX_OPTIONS).filter(|&o| run_f[k * RUN_FLOATS + runobs::F_OPTIONS + o * runobs::OPTION_FLOATS] == 1.0).count();
                     assert_eq!(present, obs.answers.len(), "env {i}: an option token per answer");
                     assert!(present > 1, "env {i}: a decision with one option is taken without asking");
-                    let option = rng.next_int(present);
+                    let option = dice.entry(slot.seed).or_insert_with(|| Rng::new(slot.seed)).next_int(present);
                     answers.entry(slot.seed).or_default().push(obs.answers[option]);
                     option as i64
                 })
@@ -2801,7 +2806,8 @@ pub(crate) mod tests {
                 .map(|(k, &i)| {
                     let a = mask[k * N_ACTIONS..][..N_ACTIONS].iter().position(|&m| m).unwrap();
                     let s = env.slot(i);
-                    let (setup, mut combat, seed) = (s.setup.clone(), s.combat.clone(), s.run.as_ref().unwrap().seed);
+                    let run = s.run.as_ref().unwrap();
+                    let (setup, mut combat, seed, fight) = (s.setup.clone(), s.combat.clone(), run.seed, run.run.fights - 1);
                     combat.step(encode::decode(&combat, a).unwrap());
                     loop {
                         let legal = combat.legal_actions();
@@ -2811,7 +2817,7 @@ pub(crate) mod tests {
                         combat.step(legal[0]);
                     }
                     if combat.is_over() {
-                        fights.entry(seed).or_default().push((setup, combat));
+                        fights.entry(seed).or_default().push((fight, setup, combat));
                     }
                     a as i64
                 })
@@ -2832,21 +2838,54 @@ pub(crate) mod tests {
             .collect()
     }
 
-    /// Plays `start` on as `forward::play_on` does with the answers and
-    /// fights `run` had in the env: the same setup at every fight, the same
-    /// end, every answer used.
-    fn replays_forward(start: Run, run: CallerRun) {
+    /// Plays `setup` on `dice` as a worker plays a fight under
+    /// `caller_runs`: a lone legal action as it comes, the first legal
+    /// action at a choice, cut at `max_steps` as `apply_action` cuts it.
+    fn play_first(setup: &FightSetup, dice: u64) -> Combat {
+        let mut combat = setup.combat(dice);
+        let (mut floats, mut ids, mut mask) = (vec![0.0; N_FLOATS], vec![0; N_IDS], vec![false; N_ACTIONS]);
+        let mut steps = 0;
+        while !combat.is_over() && steps < EnvConfig::default().max_steps {
+            let action = match combat.legal_actions()[..] {
+                [only] => only,
+                _ => {
+                    encode::encode(&combat, &mut floats, &mut ids, &mut mask);
+                    encode::decode(&combat, mask.iter().position(|&m| m).unwrap()).unwrap()
+                }
+            };
+            combat.step(action);
+            steps += 1;
+        }
+        combat
+    }
+
+    /// Plays `start` on as `forward::play_on` does with the answers `run`
+    /// had in `env`, each fight played as the worker plays it (`play_first`)
+    /// on the run's dice past where `begin` drew its start: every fight the
+    /// caller saw end has the same setup and ends the same way, and the run
+    /// ends the same way with every answer used. Returns how many fights
+    /// the caller did not see.
+    fn replays_forward(env: &VecEnv, start: Run, run: CallerRun) -> usize {
         let seed = run.seed;
-        let mut recorded = run.fights.into_iter();
+        let mut dice = run_rng(seed);
+        assert_eq!(begin(&env.starts, &mut dice, seed, Ascension(10)).1, run.began, "seed {seed}: where it began");
+        let saw = run.fights.len();
+        let mut seen = run.fights.into_iter().peekable();
         let mut chooser = Scripted(run.answers.into_iter());
+        let mut fight = 0;
         let forward = forward::play_on(start, &mut chooser, &mut |state: &mut RunState, setup: FightSetup| {
-            let (fought, combat) = recorded.next().expect("forward played more fights");
-            assert_eq!(format!("{setup:?}"), format!("{fought:?}"), "seed {seed}: fight on floor {}", state.floor);
+            let combat = play_first(&setup, dice.next_u64());
+            if let Some((_, fought, ended)) = seen.next_if(|&(k, ..)| k == fight) {
+                assert_eq!(format!("{setup:?}"), format!("{fought:?}"), "seed {seed}: fight on floor {}", state.floor);
+                assert_eq!(format!("{combat:?}"), format!("{ended:?}"), "seed {seed}: the fight on floor {} ends as in the env", state.floor);
+            }
+            fight += 1;
             state.end_fight(&setup, &combat)
         });
         assert_eq!(forward.end, run.end, "seed {seed}");
-        assert!(recorded.next().is_none(), "seed {seed}: fights left over");
+        assert!(seen.next().is_none(), "seed {seed}: fights left over");
         assert!(chooser.0.next().is_none(), "seed {seed}: answers left over");
+        forward.fights - saw
     }
 
     /// Runs under the caller's choices play as `forward::play` does with
@@ -2854,11 +2893,11 @@ pub(crate) mod tests {
     #[test]
     fn caller_choices_play_the_forward_run() {
         let mut env = VecEnv::new(4, 5, EnvConfig::default());
-        env.set_runs(Ascension(10), 300, u64::MAX, RunChoices::Caller);
+        env.set_runs(Ascension(10), 300, 308, RunChoices::Caller);
         let runs = caller_runs(&mut env, 8);
         assert!(runs.iter().map(|r| r.answers.len()).sum::<usize>() > 50, "few decisions");
         for run in runs {
-            replays_forward(Run::new(&run_seed(run.seed), Ascension(10)), run);
+            replays_forward(&env, Run::new(&run_seed(run.seed), Ascension(10)), run);
         }
     }
 
@@ -2866,22 +2905,26 @@ pub(crate) mod tests {
     /// a fresh run of their own seed picked up there with that player
     /// (`Run::start_at`) does, given the same choices and fights. Every
     /// run starts so with the share at 1, the envs' first ones among them.
+    /// Seed 540 takes Whispering Earring at the act 3 entrance, and its
+    /// opening turn leaves the next fight nothing but End Turn: a fight
+    /// the caller never sees.
     #[test]
     fn winner_starts_play_the_forward_run() {
         let text = include_str!("../testdata/run-TBL5VNYN4M.run");
         let players = crate::history::entrances(&serde_json::from_str(text).unwrap());
         let mut env = VecEnv::new(4, 5, EnvConfig::default());
         assert_eq!(env.set_winner_starts(players.clone(), 1.0), [0, 1, 0, 1, 0]);
-        env.set_runs(Ascension(10), 300, u64::MAX, RunChoices::Caller);
+        env.set_runs(Ascension(10), 529, 541, RunChoices::Caller);
         let runs = caller_runs(&mut env, 12);
-        let mut began = std::collections::BTreeSet::new();
+        let (mut began, mut unseen) = (std::collections::BTreeSet::new(), 0);
         for run in runs {
             let Began::Winner(at) = run.began else { panic!("seed {}: began {:?}", run.seed, run.began) };
             began.insert(at.act());
             let carried = players.iter().find(|(p, _)| *p == at).expect("a kept player").1.clone();
-            replays_forward(Run::start_at(&run_seed(run.seed), Ascension(10), at, carried), run);
+            unseen += replays_forward(&env, Run::start_at(&run_seed(run.seed), Ascension(10), at, carried), run);
         }
         assert_eq!(began, [1, 2].into(), "runs start at both entrances");
+        assert!(unseen > 0, "a fight with no choice in it");
     }
 
     /// An afterstate plays what could follow an option, never what the

@@ -41,7 +41,83 @@ pub struct EventOption {
     pub items: Vec<String>,
     /// Shown but not choosable (`IsLocked`, no `OnChosen`).
     pub locked: bool,
+    /// What the option's text says it does.
+    pub shown: Shown,
 }
+
+/// What an option's text (`<EVENT>.pages.<PAGE>.options.<KEY>.description`
+/// in the game's localization) tells the player it does, in amounts as the
+/// text states them, for the run policy (`runobs`). A card or relic the
+/// option always gives is the option's own and stays out; what it gives at
+/// random, or costs, goes in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Shown {
+    /// HP healed, or lost as a negative.
+    pub hp: i32,
+    pub max_hp: i32,
+    /// Gold gained, or paid as a negative.
+    pub gold: i32,
+    /// Cards added that the text describes rather than names.
+    pub cards: Option<NewCards>,
+    /// Deck cards removed, transformed, upgraded, downgraded, enchanted and
+    /// duplicated.
+    pub remove: u8,
+    pub transform: u8,
+    pub upgrade: u8,
+    pub downgrade: u8,
+    pub enchant: u8,
+    pub duplicate: u8,
+    /// The deck changes land on cards the game picks, not the player.
+    pub random: bool,
+    pub curses: u8,
+    /// Relics and potions obtained.
+    pub relics: u8,
+    pub potions: u8,
+    /// The option starts a fight.
+    pub fight: bool,
+}
+
+/// Cards an option adds without naming them: `count` of them, each picked
+/// among `from` shown (1 for a random card), of the type and rarity the
+/// text gives (`None` for any).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NewCards {
+    pub count: u8,
+    pub from: u8,
+    pub kind: Option<CardType>,
+    pub rarity: Option<Rarity>,
+    pub colorless: bool,
+    pub upgraded: bool,
+}
+
+impl Shown {
+    pub const NOTHING: Shown = Shown {
+        hp: 0,
+        max_hp: 0,
+        gold: 0,
+        cards: None,
+        remove: 0,
+        transform: 0,
+        upgrade: 0,
+        downgrade: 0,
+        enchant: 0,
+        duplicate: 0,
+        random: false,
+        curses: 0,
+        relics: 0,
+        potions: 0,
+        fight: false,
+    };
+}
+
+impl NewCards {
+    /// `count` cards of any type, rarity and color, each among `from`.
+    const fn any(count: u8, from: u8) -> Self {
+        NewCards { count, from, kind: None, rarity: None, colorless: false, upgraded: false }
+    }
+}
+
+const NOTHING: Shown = Shown::NOTHING;
 
 impl EventOption {
     /// An option on the first page.
@@ -50,7 +126,12 @@ impl EventOption {
     }
 
     fn on(page: &'static str, key: &'static str) -> Self {
-        EventOption { page, key, items: Vec::new(), locked: false }
+        EventOption { page, key, items: Vec::new(), locked: false, shown: NOTHING }
+    }
+
+    fn shows(mut self, shown: Shown) -> Self {
+        self.shown = shown;
+        self
     }
 
     /// A locked option on the first page, by the key the game gives it
@@ -450,7 +531,8 @@ impl RunState {
 /// `AbyssalBaths`: Immerse gains 2 max HP and deals 3 damage, one more each
 /// time; Linger immerses again until the player leaves (or dies).
 fn abyssal_baths(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> {
-    if ev.ask(run, vec![EventOption::new("IMMERSE"), EventOption::new("ABSTAIN")]) == "ABSTAIN" {
+    let immerse = EventOption::new("IMMERSE").shows(Shown { max_hp: 2, hp: -3, ..NOTHING });
+    if ev.ask(run, vec![immerse, EventOption::new("ABSTAIN").shows(Shown { hp: 10, ..NOTHING })]) == "ABSTAIN" {
         run.heal(10);
         return None;
     }
@@ -462,7 +544,7 @@ fn abyssal_baths(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> {
         if run.hp <= 0 {
             return None;
         }
-        let page = [EventOption::on("ALL", "LINGER"), EventOption::on("ALL", "EXIT_BATHS")];
+        let page = [EventOption::on("ALL", "LINGER").shows(Shown { max_hp: 2, hp: -damage, ..NOTHING }), EventOption::on("ALL", "EXIT_BATHS")];
         if ev.ask(run, page.to_vec()) == "EXIT_BATHS" {
             return None;
         }
@@ -472,7 +554,9 @@ fn abyssal_baths(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> {
 /// `BrainLeech`: Share Knowledge shows five of the character's cards to
 /// take one of; Rip deals 5 damage for a colorless card reward.
 fn brain_leech(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> {
-    match ev.ask(run, vec![EventOption::new("SHARE_KNOWLEDGE"), EventOption::new("RIP")]) {
+    let share = EventOption::new("SHARE_KNOWLEDGE").shows(Shown { cards: Some(NewCards::any(1, 5)), ..NOTHING });
+    let rip = EventOption::new("RIP").shows(Shown { hp: -5, cards: Some(NewCards { colorless: true, ..NewCards::any(1, 3) }), ..NOTHING });
+    match ev.ask(run, vec![share, rip]) {
         "SHARE_KNOWLEDGE" => {
             let cards = run.event_cards(5, IRONCLAD_CARDS, OddsType::Regular, |_| true);
             ev.grid(run, cards, 1);
@@ -490,21 +574,24 @@ fn brain_leech(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> {
 /// heals as a rest site does (`MimicRestSiteHeal`), then wakes a fight.
 fn dense_vegetation(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> {
     let gold = ev.rng.next_int_in(61, 100);
-    if ev.ask(run, vec![EventOption::new("TRUDGE_ON"), EventOption::new("REST")]) == "TRUDGE_ON" {
+    let trudge = EventOption::new("TRUDGE_ON").shows(Shown { hp: -8, gold, ..NOTHING });
+    let rest = EventOption::new("REST").shows(Shown { hp: run.rest_heal_amount(), fight: true, ..NOTHING });
+    if ev.ask(run, vec![trudge, rest]) == "TRUDGE_ON" {
         run.damage(8);
         run.gain_gold(gold);
         return None;
     }
     let offered = run.rest_heal();
     ev.settle(run, offered);
-    ev.ask(run, vec![EventOption::on("REST", "FIGHT")]);
+    ev.ask(run, vec![EventOption::on("REST", "FIGHT").shows(Shown { fight: true, ..NOTHING })]);
     Some(EventFight::new(Encounter::DenseVegetationEventEncounter))
 }
 
 /// `LostWisp`: Claim gives the Lost Wisp and a Decay; Search 45 to 75 gold.
 fn lost_wisp(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> {
     let gold = 60 + ev.rng.next_int_in(-15, 16);
-    match ev.ask(run, vec![EventOption::new("CLAIM"), EventOption::new("SEARCH")]) {
+    let claim = EventOption::new("CLAIM").shows(Shown { curses: 1, relics: 1, ..NOTHING });
+    match ev.ask(run, vec![claim, EventOption::new("SEARCH").shows(Shown { gold, ..NOTHING })]) {
         "CLAIM" => {
             run.add_card(DeckCard::new("DECAY"));
             ev.take(run, "LOST_WISP");
@@ -517,7 +604,8 @@ fn lost_wisp(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> {
 /// `PotionCourier`: Grab Potions offers three Foul Potions; Ransack an
 /// uncommon potion off the Rewards stream.
 fn potion_courier(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> {
-    let potions = match ev.ask(run, vec![EventOption::new("GRAB_POTIONS"), EventOption::new("RANSACK")]) {
+    let options = vec![EventOption::new("GRAB_POTIONS").shows(Shown { potions: 3, ..NOTHING }), EventOption::new("RANSACK").shows(Shown { potions: 1, ..NOTHING })];
+    let potions = match ev.ask(run, options) {
         "GRAB_POTIONS" => vec!["FOUL_POTION".to_string(); 3],
         _ => {
             let uncommon: Vec<&PoolPotion> = potions().filter(|p| p.rarity == PotionRarity::Uncommon).collect();
@@ -537,12 +625,12 @@ fn ranwid_the_elder(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> {
     let relic = ev.rng.pick(&tradable).map(|&i| run.relics[i].id.clone());
     let options = vec![
         match potion {
-            Some(slot) => EventOption::new("POTION").naming(run.potions[slot].clone().expect("a potion")),
+            Some(slot) => EventOption::new("POTION").naming(run.potions[slot].clone().expect("a potion")).shows(Shown { relics: 1, ..NOTHING }),
             None => EventOption::locked("POTION_LOCKED"),
         },
-        EventOption::new("GOLD"),
+        EventOption::new("GOLD").shows(Shown { gold: -100, relics: 1, ..NOTHING }),
         match &relic {
-            Some(id) => EventOption::new("RELIC").naming(id.clone()),
+            Some(id) => EventOption::new("RELIC").naming(id.clone()).shows(Shown { relics: 2, ..NOTHING }),
             None => EventOption::locked("RELIC_LOCKED"),
         },
     ];
@@ -567,7 +655,8 @@ fn ranwid_the_elder(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> {
 /// `RoomFullOfCheese`: Gorge shows eight commons to take two of; Search
 /// deals 14 damage for Chosen Cheese.
 fn room_full_of_cheese(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> {
-    match ev.ask(run, vec![EventOption::new("GORGE"), EventOption::new("SEARCH")]) {
+    let gorge = EventOption::new("GORGE").shows(Shown { cards: Some(NewCards { rarity: Some(Rarity::Common), ..NewCards::any(2, 8) }), ..NOTHING });
+    match ev.ask(run, vec![gorge, EventOption::new("SEARCH").shows(Shown { hp: -14, relics: 1, ..NOTHING })]) {
         "GORGE" => {
             let cards = run.event_cards(8, IRONCLAD_CARDS, OddsType::Uniform, |c| c.rarity == Rarity::Common);
             ev.grid(run, cards, 2);
@@ -583,7 +672,8 @@ fn room_full_of_cheese(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> {
 /// `RoundTeaParty`: Enjoy Tea gives Royal Poison and heals to full; Pick
 /// Fight deals 11 damage for a relic off the front of the bag.
 fn round_tea_party(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> {
-    match ev.ask(run, vec![EventOption::new("ENJOY_TEA"), EventOption::new("PICK_FIGHT")]) {
+    let tea = EventOption::new("ENJOY_TEA").shows(Shown { hp: run.max_hp - run.hp, relics: 1, ..NOTHING });
+    match ev.ask(run, vec![tea, EventOption::new("PICK_FIGHT").shows(Shown { hp: -11, relics: 1, ..NOTHING })]) {
         "ENJOY_TEA" => {
             ev.take(run, "ROYAL_POISON");
             run.heal(run.max_hp - run.hp);
@@ -609,7 +699,7 @@ fn self_help_book(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> {
         return None;
     }
     let locked = ["READ_THE_BACK_LOCKED", "READ_PASSAGE_LOCKED", "READ_ENTIRE_BOOK_LOCKED"];
-    let options = (0..3).map(|i| EventOption::or_locked(open[i], books[i].0, locked[i])).collect();
+    let options = (0..3).map(|i| EventOption::or_locked(open[i], books[i].0, locked[i]).shows(Shown { enchant: 1, ..NOTHING })).collect();
     let (_, id, kind) = books[ev.ask_at(run, options)];
     let action = DeckAction::Enchant(id, 2);
     let cards = run.pickable(action).into_iter().filter(|&i| run.deck[i].kind() == Some(kind)).collect();
@@ -648,7 +738,9 @@ fn slippery_bridge(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> {
         let lose = *ev.rng.pick(&cards).expect("a removable card");
         offered = Some(lose);
         let page = if holds == 0 { "INITIAL" } else { HOLD[(holds - 1).min(7)] };
-        let options = vec![EventOption::new("OVERCOME").naming(run.deck[lose].id.clone()), EventOption::on(page, HOLD[holds.min(7)])];
+        let overcome = EventOption::new("OVERCOME").naming(run.deck[lose].id.clone()).shows(Shown { remove: 1, random: true, ..NOTHING });
+        let hold = EventOption::on(page, HOLD[holds.min(7)]).shows(Shown { hp: -(3 + holds as i32), ..NOTHING });
+        let options = vec![overcome, hold];
         if ev.ask_at(run, options) == 0 {
             run.deck.remove(lose);
             return None;
@@ -665,7 +757,8 @@ fn slippery_bridge(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> {
 /// 121 gold for 7 damage.
 fn sunken_statue(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> {
     let gold = 111 + ev.rng.next_int_in(-10, 11);
-    match ev.ask(run, vec![EventOption::new("GRAB_SWORD"), EventOption::new("DIVE_INTO_WATER")]) {
+    let dive = EventOption::new("DIVE_INTO_WATER").shows(Shown { gold, hp: -7, ..NOTHING });
+    match ev.ask(run, vec![EventOption::new("GRAB_SWORD").shows(Shown { relics: 1, ..NOTHING }), dive]) {
         "GRAB_SWORD" => ev.take(run, "SWORD_OF_STONE"),
         _ => {
             run.gain_gold(gold);
@@ -679,7 +772,10 @@ fn sunken_statue(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> {
 /// it); Kill With Fire transforms one on the event's stream.
 fn symbiote(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> {
     let open = run.deck.iter().any(|c| c.can_enchant("CORRUPTED"));
-    let options = vec![EventOption::or_locked(open, "APPROACH", "APPROACH_LOCKED"), EventOption::new("KILL_WITH_FIRE")];
+    let options = vec![
+        EventOption::or_locked(open, "APPROACH", "APPROACH_LOCKED").shows(Shown { enchant: 1, ..NOTHING }),
+        EventOption::new("KILL_WITH_FIRE").shows(Shown { transform: 1, ..NOTHING }),
+    ];
     match ev.ask(run, options) {
         "APPROACH" => ev.enchant(run, "CORRUPTED", 1, 1),
         _ => ev.transform(run, 1),
@@ -705,7 +801,17 @@ fn the_future_of_potions(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> 
         HeldRarity::Pool(PotionRarity::Uncommon) => Rarity::Uncommon,
         HeldRarity::Pool(PotionRarity::Common) | HeldRarity::Token => Rarity::Common,
     };
-    let options: Vec<EventOption> = held.iter().take(3).map(|&slot| EventOption::new("POTION").naming(run.potions[slot].clone().expect("a potion"))).collect();
+    // "Lose {Potion}. Obtain an Upgraded {Rarity} {Type}": a reward of three.
+    let options: Vec<EventOption> = held
+        .iter()
+        .zip(&kinds)
+        .take(3)
+        .map(|(&slot, &kind)| {
+            let id = run.potions[slot].clone().expect("a potion");
+            let cards = NewCards { kind: Some(kind), rarity: Some(rarity_of(&id)), upgraded: true, ..NewCards::any(1, 3) };
+            EventOption::new("POTION").naming(id).shows(Shown { cards: Some(cards), ..NOTHING })
+        })
+        .collect();
     if options.is_empty() {
         // No option: the event is over as it starts.
         run.relics_entered(Room::Event(ev.name), true);
@@ -728,7 +834,8 @@ fn the_future_of_potions(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> 
 /// relic off the front of the bag and a Clumsy.
 fn this_or_that(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> {
     let gold = ev.rng.next_int_in(41, 69);
-    match ev.ask(run, vec![EventOption::new("PLAIN"), EventOption::new("ORNATE")]) {
+    let plain = EventOption::new("PLAIN").shows(Shown { hp: -6, gold, ..NOTHING });
+    match ev.ask(run, vec![plain, EventOption::new("ORNATE").shows(Shown { relics: 1, curses: 1, ..NOTHING })]) {
         "PLAIN" => {
             run.damage(6);
             run.gain_gold(gold);
@@ -744,15 +851,21 @@ fn this_or_that(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> {
 /// `Trial`: Accept draws the defendant, whose verdicts each add a curse and
 /// give something; Reject asks again, and doubling down abandons the run.
 fn trial(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> {
+    let lethal = EventOption::on("REJECT", "DOUBLE_DOWN").shows(Shown { hp: -run.hp, ..NOTHING });
     if ev.ask(run, vec![EventOption::new("ACCEPT"), EventOption::new("REJECT")]) == "REJECT"
-        && ev.ask(run, vec![EventOption::on("REJECT", "ACCEPT"), EventOption::on("REJECT", "DOUBLE_DOWN")]) == "DOUBLE_DOWN"
+        && ev.ask(run, vec![EventOption::on("REJECT", "ACCEPT"), lethal]) == "DOUBLE_DOWN"
     {
         // `NAbandonRunConfirmPopup`: the run ends there.
         run.hp = 0;
         return None;
     }
     let page = ["MERCHANT", "NOBLE", "NONDESCRIPT"][ev.rng.next_int(3) as usize];
-    let verdict = ev.ask(run, vec![EventOption::on(page, "GUILTY"), EventOption::on(page, "INNOCENT")]);
+    let (guilty, innocent) = match page {
+        "MERCHANT" => (Shown { curses: 1, relics: 2, ..NOTHING }, Shown { curses: 1, upgrade: 2, ..NOTHING }),
+        "NOBLE" => (Shown { hp: 10, ..NOTHING }, Shown { curses: 1, gold: 300, ..NOTHING }),
+        _ => (Shown { curses: 1, cards: Some(NewCards::any(2, 3)), ..NOTHING }, Shown { curses: 1, transform: 2, ..NOTHING }),
+    };
+    let verdict = ev.ask(run, vec![EventOption::on(page, "GUILTY").shows(guilty), EventOption::on(page, "INNOCENT").shows(innocent)]);
     match (page, verdict) {
         ("MERCHANT", "GUILTY") => {
             run.add_card(DeckCard::new("REGRET"));
@@ -899,7 +1012,8 @@ pub fn diff_oracle(text: &str) -> (usize, Vec<String>) {
 /// `Amalgamator`: two basic Strikes (or Defends) out for an Ultimate Strike
 /// (or Defend).
 fn amalgamator(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> {
-    let (basic, ultimate) = match ev.ask(run, vec![EventOption::new("COMBINE_STRIKES"), EventOption::new("COMBINE_DEFENDS")]) {
+    let options = ["COMBINE_STRIKES", "COMBINE_DEFENDS"].map(|key| EventOption::new(key).shows(Shown { remove: 2, ..NOTHING })).to_vec();
+    let (basic, ultimate) = match ev.ask(run, options) {
         "COMBINE_STRIKES" => ("STRIKE_IRONCLAD", "ULTIMATE_STRIKE"),
         _ => ("DEFEND_IRONCLAD", "ULTIMATE_DEFEND"),
     };
@@ -911,7 +1025,8 @@ fn amalgamator(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> {
 /// `AromaOfChaos`: Let Go transforms a card on the event's stream; Maintain
 /// Control upgrades one.
 fn aroma_of_chaos(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> {
-    match ev.ask(run, vec![EventOption::new("LET_GO"), EventOption::new("MAINTAIN_CONTROL")]) {
+    let options = vec![EventOption::new("LET_GO").shows(Shown { transform: 1, ..NOTHING }), EventOption::new("MAINTAIN_CONTROL").shows(Shown { upgrade: 1, ..NOTHING })];
+    match ev.ask(run, options) {
         "LET_GO" => ev.transform(run, 1),
         _ => ev.upgrade(run, 1),
     }
@@ -921,7 +1036,12 @@ fn aroma_of_chaos(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> {
 /// `BattlewornDummy`: each setting fights its dummy, and beating it gives
 /// what `dummy_beaten` says.
 fn battleworn_dummy(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> {
-    let options = ["SETTING_1", "SETTING_2", "SETTING_3"].map(EventOption::new).to_vec();
+    let fight = Shown { fight: true, ..NOTHING };
+    let options = vec![
+        EventOption::new("SETTING_1").shows(Shown { potions: 1, ..fight }),
+        EventOption::new("SETTING_2").shows(Shown { upgrade: 2, random: true, ..fight }),
+        EventOption::new("SETTING_3").shows(Shown { relics: 1, ..fight }),
+    ];
     let setting = ev.ask_at(run, options) as u8 + 1;
     Some(EventFight { dummy: Some(setting), ..EventFight::new(Encounter::BattlewornDummyEventEncounter) })
 }
@@ -938,7 +1058,7 @@ fn bugslayer(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> {
 
 /// `ByrdonisNest`: 7 max HP, or Byrdonis' egg.
 fn byrdonis_nest(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> {
-    match ev.ask(run, vec![EventOption::new("EAT"), EventOption::new("TAKE")]) {
+    match ev.ask(run, vec![EventOption::new("EAT").shows(Shown { max_hp: 7, ..NOTHING }), EventOption::new("TAKE")]) {
         "EAT" => run.gain_max_hp(7),
         _ => run.add_card(DeckCard::new("BYRDONIS_EGG")),
     }
@@ -954,14 +1074,20 @@ fn colossal_flower(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> {
     const EXTRACT: [&str; 2] = ["EXTRACT_CURRENT_PRIZE_1", "EXTRACT_CURRENT_PRIZE_2"];
     const DEEPER: [&str; 2] = ["REACH_DEEPER_1", "REACH_DEEPER_2"];
     for digs in 0..2 {
-        let page = vec![EventOption::on(PAGES[digs], EXTRACT[digs]), EventOption::on(PAGES[digs], DEEPER[digs])];
+        let page = vec![
+            EventOption::on(PAGES[digs], EXTRACT[digs]).shows(Shown { gold: PRIZE[digs], ..NOTHING }),
+            EventOption::on(PAGES[digs], DEEPER[digs]).shows(Shown { hp: -DAMAGE[digs], ..NOTHING }),
+        ];
         if ev.ask_at(run, page) == 0 {
             run.gain_gold(PRIZE[digs]);
             return None;
         }
         run.damage(DAMAGE[digs]);
     }
-    let page = vec![EventOption::on("REACH_DEEPER_2", "EXTRACT_INSTEAD"), EventOption::on("REACH_DEEPER_2", "POLLINOUS_CORE")];
+    let page = vec![
+        EventOption::on("REACH_DEEPER_2", "EXTRACT_INSTEAD").shows(Shown { gold: PRIZE[2], ..NOTHING }),
+        EventOption::on("REACH_DEEPER_2", "POLLINOUS_CORE").shows(Shown { hp: -DAMAGE[2], relics: 1, ..NOTHING }),
+    ];
     match ev.ask(run, page) {
         "EXTRACT_INSTEAD" => run.gain_gold(PRIZE[2]),
         _ => {
@@ -977,7 +1103,12 @@ fn colossal_flower(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> {
 fn doll_room(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> {
     // `_dolls`, and sorted as `StableShuffle` sorts them, by relic id.
     const DOLLS: [&str; 3] = ["DAUGHTER_OF_THE_WIND", "MR_STRUGGLES", "BING_BONG"];
-    let options = vec![EventOption::new("RANDOM"), EventOption::new("TAKE_SOME_TIME"), EventOption::new("EXAMINE")];
+    let doll = Shown { relics: 1, ..NOTHING };
+    let options = vec![
+        EventOption::new("RANDOM").shows(doll),
+        EventOption::new("TAKE_SOME_TIME").shows(Shown { hp: -5, ..doll }),
+        EventOption::new("EXAMINE").shows(Shown { hp: -15, ..doll }),
+    ];
     let doll = match ev.ask(run, options) {
         "RANDOM" => *ev.rng.pick(&DOLLS).expect("a doll"),
         way => {
@@ -986,7 +1117,7 @@ fn doll_room(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> {
             let mut dolls = DOLLS;
             dolls.sort_unstable();
             ev.rng.shuffle(&mut dolls);
-            let options = dolls[..count].iter().map(|&d| EventOption::on("", d)).collect();
+            let options = dolls[..count].iter().map(|&d| EventOption::on("", d).shows(doll)).collect();
             ev.ask(run, options)
         }
     };
@@ -997,7 +1128,8 @@ fn doll_room(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> {
 /// `DoorsOfLightAndDark`: Light upgrades two random cards on the event's
 /// stream; Dark removes one.
 fn doors_of_light_and_dark(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> {
-    match ev.ask(run, vec![EventOption::new("LIGHT"), EventOption::new("DARK")]) {
+    let light = EventOption::new("LIGHT").shows(Shown { upgrade: 2, random: true, ..NOTHING });
+    match ev.ask(run, vec![light, EventOption::new("DARK").shows(Shown { remove: 1, ..NOTHING })]) {
         "LIGHT" => {
             for i in stable_shuffle(run, &mut ev.rng, DeckCard::upgradable).into_iter().take(2) {
                 run.upgrade_card(i);
@@ -1020,7 +1152,8 @@ fn stable_shuffle(run: &RunState, rng: &mut GameRng, keep: impl Fn(&DeckCard) ->
 
 /// `DrowningBeacon`: a Glowwater Potion, or Fresnel Lens for 13 max HP.
 fn drowning_beacon(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> {
-    match ev.ask(run, vec![EventOption::new("BOTTLE"), EventOption::new("CLIMB")]) {
+    let options = vec![EventOption::new("BOTTLE").shows(Shown { potions: 1, ..NOTHING }), EventOption::new("CLIMB").shows(Shown { max_hp: -13, relics: 1, ..NOTHING })];
+    match ev.ask(run, options) {
         "BOTTLE" => ev.settle(run, vec![Offered::Potions(vec!["GLOWWATER_POTION".into()])]),
         _ => {
             run.lose_max_hp(13);
@@ -1039,9 +1172,9 @@ fn endless_conveyor(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> {
     let mut last: &str = "";
     let mut dish = roll_dish(run, &mut ev.rng, &mut grabs, &mut last);
     let grab = |run: &RunState, dish: &'static str| {
-        if run.gold >= 40 { EventOption::on("ALL", dish) } else { EventOption { locked: true, ..EventOption::on("ALL", "LOCKED") } }
+        if run.gold >= 40 { EventOption::on("ALL", dish).shows(dish_shown(dish)) } else { EventOption { locked: true, ..EventOption::on("ALL", "LOCKED") } }
     };
-    let options = vec![grab(run, dish), EventOption::new("OBSERVE_CHEF")];
+    let options = vec![grab(run, dish), EventOption::new("OBSERVE_CHEF").shows(Shown { upgrade: 1, random: true, ..NOTHING })];
     if ev.ask(run, options) == "OBSERVE_CHEF" {
         let upgradable: Vec<usize> = (0..run.deck.len()).filter(|&i| run.deck[i].upgradable()).collect();
         if let Some(&i) = ev.rng.pick(&upgradable) {
@@ -1079,6 +1212,23 @@ fn endless_conveyor(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> {
         if ev.ask(run, options) == "LEAVE" {
             return None;
         }
+    }
+}
+
+/// What a dish's option says it does (`ENDLESS_CONVEYOR.pages.ALL.options`):
+/// each costs 40 gold but the Golden Fysh, which pays 75.
+fn dish_shown(dish: &str) -> Shown {
+    let paid = Shown { gold: -40, ..NOTHING };
+    match dish {
+        "CLAM_ROLL" => Shown { hp: 10, ..paid },
+        "CAVIAR" => Shown { max_hp: 4, ..paid },
+        "SUSPICIOUS_CONDIMENT" => Shown { potions: 1, ..paid },
+        "JELLY_LIVER" => Shown { transform: 1, ..paid },
+        "FRIED_EEL" => Shown { cards: Some(NewCards { colorless: true, ..NewCards::any(1, 1) }), ..paid },
+        "GOLDEN_FYSH" => Shown { gold: 75, ..NOTHING },
+        "SPICY_SNAPPY" => Shown { upgrade: 1, random: true, ..paid },
+        // Seapunk Salad: Feeding Frenzy, the option's own card.
+        _ => paid,
     }
 }
 
@@ -1135,7 +1285,7 @@ fn fake_merchant(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> {
     let mut shop = EventOption::on("", "SHOP");
     shop.items = shelf.iter().flatten().map(|(r, price)| format!("{r}:{price}")).collect();
     let options = match foul {
-        Some(_) => vec![EventOption::on("", "THROW"), shop],
+        Some(_) => vec![EventOption::on("", "THROW").shows(Shown { fight: true, ..NOTHING }), shop],
         None => vec![shop],
     };
     if ev.ask(run, options) == "THROW" {
@@ -1163,7 +1313,8 @@ fn fake_merchant(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> {
 /// `FieldOfManSizedHoles`: Resist removes two cards and adds a Normality;
 /// Enter Your Hole puts Perfect Fit on a card.
 fn field_of_man_sized_holes(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> {
-    match ev.ask(run, vec![EventOption::new("RESIST"), EventOption::new("ENTER_YOUR_HOLE")]) {
+    let resist = EventOption::new("RESIST").shows(Shown { remove: 2, curses: 1, ..NOTHING });
+    match ev.ask(run, vec![resist, EventOption::new("ENTER_YOUR_HOLE").shows(Shown { enchant: 1, ..NOTHING })]) {
         "RESIST" => {
             ev.remove(run, 2, |_| true);
             run.add_card(DeckCard::new("NORMALITY"));
@@ -1177,7 +1328,8 @@ fn field_of_man_sized_holes(run: &mut RunState, ev: &mut Ev) -> Option<EventFigh
 /// card (locked if none takes it); Accept gives Forgotten Soul.
 fn grave_of_the_forgotten(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> {
     let open = run.deck.iter().any(|c| c.can_enchant("SOULS_POWER"));
-    match ev.ask(run, vec![EventOption::or_locked(open, "CONFRONT", "CONFRONT_LOCKED"), EventOption::new("ACCEPT")]) {
+    let confront = EventOption::or_locked(open, "CONFRONT", "CONFRONT_LOCKED").shows(Shown { curses: 1, enchant: 1, ..NOTHING });
+    match ev.ask(run, vec![confront, EventOption::new("ACCEPT").shows(Shown { relics: 1, ..NOTHING })]) {
         "CONFRONT" => {
             run.add_card(DeckCard::new("DECAY"));
             ev.enchant(run, "SOULS_POWER", 1, 1);
@@ -1190,7 +1342,8 @@ fn grave_of_the_forgotten(run: &mut RunState, ev: &mut Ev) -> Option<EventFight>
 /// `HungryForMushrooms`: Big Mushroom or Fragrant Mushroom, options titled
 /// by their relic (`RelicOption`).
 fn hungry_for_mushrooms(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> {
-    let relic = ev.ask(run, vec![EventOption::new("BIG_MUSHROOM"), EventOption::new("FRAGRANT_MUSHROOM")]);
+    let options = ["BIG_MUSHROOM", "FRAGRANT_MUSHROOM"].map(|key| EventOption::new(key).shows(Shown { relics: 1, ..NOTHING })).to_vec();
+    let relic = ev.ask(run, options);
     ev.take(run, relic);
     None
 }
@@ -1199,7 +1352,9 @@ fn hungry_for_mushrooms(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> {
 /// Core one of their cards that costs 0.
 fn infested_automaton(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> {
     let free = |c: &PoolCard| sim_card(c.id).is_some_and(|id| def(id).cost == 0 && !def(id).x_cost);
-    let cards = match ev.ask(run, vec![EventOption::new("STUDY"), EventOption::new("TOUCH_CORE")]) {
+    let study = EventOption::new("STUDY").shows(Shown { cards: Some(NewCards { kind: Some(CardType::Power), ..NewCards::any(1, 1) }), ..NOTHING });
+    let touch = EventOption::new("TOUCH_CORE").shows(Shown { cards: Some(NewCards::any(1, 1)), ..NOTHING });
+    let cards = match ev.ask(run, vec![study, touch]) {
         "STUDY" => run.event_cards(1, IRONCLAD_CARDS, OddsType::Regular, |c| c.kind == CardType::Power),
         _ => run.event_cards(1, IRONCLAD_CARDS, OddsType::Regular, free),
     };
@@ -1214,7 +1369,11 @@ fn jungle_maze_adventure(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> 
     let decimal = |f: f32| -> f64 { format!("{f:.6e}").parse().expect("a float") };
     let solo = 150.0 + decimal(ev.rng.next_float_in(-15.0, 15.0));
     let join = 50.0 + decimal(ev.rng.next_float_in(-15.0, 15.0));
-    match ev.ask(run, vec![EventOption::new("SOLO_QUEST"), EventOption::new("JOIN_FORCES")]) {
+    let options = vec![
+        EventOption::new("SOLO_QUEST").shows(Shown { gold: solo as i32, hp: -18, ..NOTHING }),
+        EventOption::new("JOIN_FORCES").shows(Shown { gold: join as i32, ..NOTHING }),
+    ];
+    match ev.ask(run, options) {
         "SOLO_QUEST" => {
             // The three hit effects, `StableShuffle`d on the event's stream.
             ev.rng.shuffle(&mut [0, 1, 2]);
@@ -1230,7 +1389,10 @@ fn jungle_maze_adventure(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> 
 /// a relic off the front of the bag.
 fn luminous_choir(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> {
     let tribute = 149 - ev.rng.next_int_in(0, 50);
-    let options = vec![EventOption::new("REACH_INTO_THE_FLESH"), EventOption::or_locked(run.gold >= tribute, "OFFER_TRIBUTE", "OFFER_TRIBUTE_LOCKED")];
+    let options = vec![
+        EventOption::new("REACH_INTO_THE_FLESH").shows(Shown { remove: 2, curses: 1, ..NOTHING }),
+        EventOption::or_locked(run.gold >= tribute, "OFFER_TRIBUTE", "OFFER_TRIBUTE_LOCKED").shows(Shown { gold: -tribute, relics: 1, ..NOTHING }),
+    ];
     match ev.ask(run, options) {
         "REACH_INTO_THE_FLESH" => {
             ev.remove(run, 2, |_| true);
@@ -1247,7 +1409,8 @@ fn luminous_choir(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> {
 /// `MorphicGrove`: Group takes all the gold and transforms two cards on the
 /// event's stream; Loner gives 5 max HP.
 fn morphic_grove(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> {
-    match ev.ask(run, vec![EventOption::new("GROUP"), EventOption::new("LONER")]) {
+    let group = EventOption::new("GROUP").shows(Shown { gold: -run.gold, transform: 2, ..NOTHING });
+    match ev.ask(run, vec![group, EventOption::new("LONER").shows(Shown { max_hp: 5, ..NOTHING })]) {
         "GROUP" => {
             run.lose_gold(run.gold);
             ev.transform(run, 2);
@@ -1263,13 +1426,15 @@ fn morphic_grove(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> {
 fn punch_off(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> {
     run.enemies_created(2);
     ev.rng.next_int_in(91, 99);
-    if ev.ask(run, vec![EventOption::new("NAB"), EventOption::new("I_CAN_TAKE_THEM")]) == "NAB" {
+    let fight = Shown { fight: true, ..NOTHING };
+    let options = vec![EventOption::new("NAB").shows(Shown { curses: 1, relics: 1, ..NOTHING }), EventOption::new("I_CAN_TAKE_THEM").shows(fight)];
+    if ev.ask(run, options) == "NAB" {
         run.add_card(DeckCard::new("INJURY"));
         let relic = run.relic_reward().game_id();
         ev.settle(run, vec![Offered::Relics(vec![relic])]);
         return None;
     }
-    ev.ask(run, vec![EventOption::on("I_CAN_TAKE_THEM", "FIGHT")]);
+    ev.ask(run, vec![EventOption::on("I_CAN_TAKE_THEM", "FIGHT").shows(fight)]);
     Some(EventFight { created: true, extra: vec![Extra::Relic, Extra::Potion], ..EventFight::new(Encounter::PunchOffEventEncounter) })
 }
 
@@ -1277,7 +1442,9 @@ fn punch_off(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> {
 /// upgrades four random upgradable ones, on the event's stream; Shatter
 /// copies the deck and adds Bad Luck.
 fn reflections(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> {
-    match ev.ask(run, vec![EventOption::new("TOUCH_A_MIRROR"), EventOption::new("SHATTER")]) {
+    let touch = EventOption::new("TOUCH_A_MIRROR").shows(Shown { downgrade: 2, upgrade: 4, random: true, ..NOTHING });
+    let shatter = EventOption::new("SHATTER").shows(Shown { duplicate: run.deck.len().min(u8::MAX as usize) as u8, curses: 1, ..NOTHING });
+    match ev.ask(run, vec![touch, shatter]) {
         "TOUCH_A_MIRROR" => {
             let mut upgraded: Vec<usize> = (0..run.deck.len()).filter(|&i| run.deck[i].upgraded).collect();
             for _ in 0..2 {
@@ -1318,7 +1485,8 @@ fn relic_trader(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> {
     }
     let new: Vec<String> = (0..3).map(|_| run.relic_reward().game_id()).collect();
     let keys = ["TOP", "MIDDLE", "BOTTOM"];
-    let options = (0..owned.len()).map(|i| EventOption::new(keys[i]).naming(owned[i].clone()).naming(new[i].clone())).collect();
+    let options =
+        (0..owned.len()).map(|i| EventOption::new(keys[i]).naming(owned[i].clone()).naming(new[i].clone()).shows(Shown { relics: 1, ..NOTHING })).collect();
     let i = ev.ask_at(run, options);
     run.remove_relic(&owned[i]);
     ev.take(run, new[i].clone());
@@ -1327,7 +1495,8 @@ fn relic_trader(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> {
 
 /// `SapphireSeed`: Eat heals 9 and upgrades a card; Plant puts Sown on one.
 fn sapphire_seed(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> {
-    match ev.ask(run, vec![EventOption::new("EAT"), EventOption::new("PLANT")]) {
+    let eat = EventOption::new("EAT").shows(Shown { hp: 9, upgrade: 1, ..NOTHING });
+    match ev.ask(run, vec![eat, EventOption::new("PLANT").shows(Shown { enchant: 1, ..NOTHING })]) {
         "EAT" => {
             run.heal(9);
             ev.upgrade(run, 1);
@@ -1340,7 +1509,8 @@ fn sapphire_seed(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> {
 /// `SpiralingWhirlpool`: Spiral on a card, or a third of max HP healed.
 fn spiraling_whirlpool(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> {
     let heal = run.max_hp * 33 / 100;
-    match ev.ask(run, vec![EventOption::new("OBSERVE"), EventOption::new("DRINK")]) {
+    let options = vec![EventOption::new("OBSERVE").shows(Shown { enchant: 1, ..NOTHING }), EventOption::new("DRINK").shows(Shown { hp: heal, ..NOTHING })];
+    match ev.ask(run, options) {
         "OBSERVE" => ev.enchant(run, "SPIRAL", 1, 1),
         _ => run.heal(heal),
     }
@@ -1350,7 +1520,8 @@ fn spiraling_whirlpool(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> {
 /// `SpiritGrafter`: Let It In heals 25 and adds a Metamorphosis; Rejection
 /// upgrades a card for 10 damage.
 fn spirit_grafter(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> {
-    match ev.ask(run, vec![EventOption::new("LET_IT_IN"), EventOption::new("REJECTION")]) {
+    let options = vec![EventOption::new("LET_IT_IN").shows(Shown { hp: 25, ..NOTHING }), EventOption::new("REJECTION").shows(Shown { hp: -10, upgrade: 1, ..NOTHING })];
+    match ev.ask(run, options) {
         "LET_IT_IN" => {
             run.heal(25);
             run.add_card(DeckCard::new("METAMORPHOSIS"));
@@ -1370,10 +1541,10 @@ fn stone_of_all_time(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> {
     let held: Vec<usize> = (0..run.potions.len()).filter(|&i| run.potions[i].is_some()).collect();
     let potion = ev.rng.pick(&held).copied();
     let lift = match potion {
-        Some(slot) => EventOption::new("LIFT").naming(run.potions[slot].clone().expect("a potion")),
+        Some(slot) => EventOption::new("LIFT").naming(run.potions[slot].clone().expect("a potion")).shows(Shown { max_hp: 10, ..NOTHING }),
         None => EventOption::locked("LIFT_LOCKED"),
     };
-    let push = EventOption::or_locked(run.deck.iter().any(|c| c.can_enchant("VIGOROUS")), "PUSH", "PUSH_LOCKED");
+    let push = EventOption::or_locked(run.deck.iter().any(|c| c.can_enchant("VIGOROUS")), "PUSH", "PUSH_LOCKED").shows(Shown { hp: -6, enchant: 1, ..NOTHING });
     match ev.ask(run, vec![lift, push]) {
         "LIFT" => {
             run.discard_potion(potion.expect("the potion offered"));
@@ -1392,7 +1563,11 @@ fn stone_of_all_time(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> {
 fn sunken_treasury(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> {
     let small = 60 + ev.rng.next_int(16) - 8;
     let large = 333 + ev.rng.next_int(61) - 30;
-    match ev.ask(run, vec![EventOption::new("FIRST_CHEST"), EventOption::new("SECOND_CHEST")]) {
+    let options = vec![
+        EventOption::new("FIRST_CHEST").shows(Shown { gold: small, ..NOTHING }),
+        EventOption::new("SECOND_CHEST").shows(Shown { gold: large, curses: 1, ..NOTHING }),
+    ];
+    match ev.ask(run, options) {
         "FIRST_CHEST" => run.gain_gold(small),
         _ => {
             run.gain_gold(large);
@@ -1406,7 +1581,8 @@ fn sunken_treasury(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> {
 /// one) and upgrades a random card on the event's stream, the fifth every
 /// card; Smash heals 20. A decipher that would take the last max HP kills.
 fn tablet_of_truth(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> {
-    if ev.ask(run, vec![EventOption::new("DECIPHER_1"), EventOption::new("SMASH")]) == "SMASH" {
+    let decipher = EventOption::new("DECIPHER_1").shows(Shown { max_hp: -3, upgrade: 1, random: true, ..NOTHING });
+    if ev.ask(run, vec![decipher, EventOption::new("SMASH").shows(Shown { hp: 20, ..NOTHING })]) == "SMASH" {
         run.heal(20);
         return None;
     }
@@ -1428,7 +1604,10 @@ fn tablet_of_truth(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> {
             run.upgrade_card(i);
         }
         cost = [6, 12, 24, run.max_hp - 1][count];
-        let page = vec![EventOption::on(PAGES[count], "DECIPHER"), EventOption::on("DECIPHER", "GIVE_UP")];
+        // The fifth upgrades every card (`DECIPHER_4`'s text says so).
+        let upgrades = if count == 3 { run.deck.iter().filter(|c| c.upgradable()).count().min(u8::MAX as usize) as u8 } else { 1 };
+        let decipher = EventOption::on(PAGES[count], "DECIPHER").shows(Shown { max_hp: -cost, upgrade: upgrades, random: true, ..NOTHING });
+        let page = vec![decipher, EventOption::on("DECIPHER", "GIVE_UP")];
         if ev.ask(run, page) == "GIVE_UP" {
             return None;
         }
@@ -1440,9 +1619,9 @@ fn tablet_of_truth(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> {
 /// without the gold), or Tea of Discourtesy for nothing.
 fn tea_master(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> {
     let options = vec![
-        EventOption::or_locked(run.gold >= 50, "BONE_TEA", "BONE_TEA_LOCKED"),
-        EventOption::or_locked(run.gold >= 150, "EMBER_TEA", "EMBER_TEA_LOCKED"),
-        EventOption::new("TEA_OF_DISCOURTESY"),
+        EventOption::or_locked(run.gold >= 50, "BONE_TEA", "BONE_TEA_LOCKED").shows(Shown { gold: -50, relics: 1, ..NOTHING }),
+        EventOption::or_locked(run.gold >= 150, "EMBER_TEA", "EMBER_TEA_LOCKED").shows(Shown { gold: -150, relics: 1, ..NOTHING }),
+        EventOption::new("TEA_OF_DISCOURTESY").shows(Shown { relics: 1, ..NOTHING }),
     ];
     let tea = ev.ask(run, options);
     run.lose_gold(match tea {
@@ -1459,18 +1638,21 @@ fn tea_master(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> {
 /// knight as the event is entered.
 fn the_lantern_key(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> {
     run.enemies_created(1);
-    if ev.ask(run, vec![EventOption::new("RETURN_THE_KEY"), EventOption::new("KEEP_THE_KEY")]) == "RETURN_THE_KEY" {
+    let fight = Shown { fight: true, ..NOTHING };
+    let options = vec![EventOption::new("RETURN_THE_KEY").shows(Shown { gold: 100, ..NOTHING }), EventOption::new("KEEP_THE_KEY").shows(fight)];
+    if ev.ask(run, options) == "RETURN_THE_KEY" {
         run.gain_gold(100);
         return None;
     }
-    ev.ask(run, vec![EventOption::on("KEEP_THE_KEY", "FIGHT")]);
+    ev.ask(run, vec![EventOption::on("KEEP_THE_KEY", "FIGHT").shows(fight)]);
     Some(EventFight { created: true, extra: vec![Extra::Card(Offer::new("LANTERN_KEY"))], ..EventFight::new(Encounter::MysteriousKnightEventEncounter) })
 }
 
 /// `TheLegendsWereTrue`: Nab the Map adds Spoils Map; Slowly Find an Exit
 /// deals 8 damage for a random potion.
 fn the_legends_were_true(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> {
-    match ev.ask(run, vec![EventOption::new("NAB_THE_MAP"), EventOption::new("SLOWLY_FIND_AN_EXIT")]) {
+    let exit = EventOption::new("SLOWLY_FIND_AN_EXIT").shows(Shown { hp: -8, potions: 1, ..NOTHING });
+    match ev.ask(run, vec![EventOption::new("NAB_THE_MAP"), exit]) {
         "NAB_THE_MAP" => run.add_card(DeckCard::new("SPOILS_MAP")),
         _ => {
             run.damage(8);
@@ -1487,7 +1669,11 @@ fn trash_heap(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> {
     const RELICS: [&str; 5] = ["DARKSTONE_PERIAPT", "DREAM_CATCHER", "HAND_DRILL", "MAW_BANK", "THE_BOOT"];
     const CARDS: [&str; 10] =
         ["CALTROPS", "CLASH", "DISTRACTION", "DUAL_WIELD", "ENTRENCH", "HELLO_WORLD", "OUTMANEUVER", "REBOUND", "RIP_AND_TEAR", "STACK"];
-    match ev.ask(run, vec![EventOption::new("DIVE_IN"), EventOption::new("GRAB")]) {
+    let options = vec![
+        EventOption::new("DIVE_IN").shows(Shown { hp: -8, relics: 1, ..NOTHING }),
+        EventOption::new("GRAB").shows(Shown { gold: 100, cards: Some(NewCards::any(1, 1)), ..NOTHING }),
+    ];
+    match ev.ask(run, options) {
         "DIVE_IN" => {
             run.damage(8);
             let relic = *ev.rng.pick(&RELICS).expect("a relic");
@@ -1506,7 +1692,8 @@ fn trash_heap(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> {
 /// Poor Sleep; Kill gives a relic off the front of the bag for 8 max HP.
 fn unrest_site(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> {
     let missing = run.max_hp - run.hp;
-    match ev.ask(run, vec![EventOption::new("REST"), EventOption::new("KILL")]) {
+    let options = vec![EventOption::new("REST").shows(Shown { hp: missing, curses: 1, ..NOTHING }), EventOption::new("KILL").shows(Shown { max_hp: -8, relics: 1, ..NOTHING })];
+    match ev.ask(run, options) {
         "REST" => {
             run.heal(missing);
             run.add_card(DeckCard::new("POOR_SLEEP"));
@@ -1523,9 +1710,9 @@ fn unrest_site(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> {
 /// two for 99 (each locked without the gold).
 fn waterlogged_scriptorium(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> {
     let options = vec![
-        EventOption::new("BLOODY_INK"),
-        EventOption::or_locked(run.gold >= 55, "TENTACLE_QUILL", "TENTACLE_QUILL_LOCKED"),
-        EventOption::or_locked(run.gold >= 99, "PRICKLY_SPONGE", "PRICKLY_SPONGE_LOCKED"),
+        EventOption::new("BLOODY_INK").shows(Shown { max_hp: 6, ..NOTHING }),
+        EventOption::or_locked(run.gold >= 55, "TENTACLE_QUILL", "TENTACLE_QUILL_LOCKED").shows(Shown { gold: -55, enchant: 1, ..NOTHING }),
+        EventOption::or_locked(run.gold >= 99, "PRICKLY_SPONGE", "PRICKLY_SPONGE_LOCKED").shows(Shown { gold: -99, enchant: 2, ..NOTHING }),
     ];
     match ev.ask(run, options) {
         "BLOODY_INK" => run.gain_max_hp(6),
@@ -1550,10 +1737,11 @@ fn waterlogged_scriptorium(run: &mut RunState, ev: &mut Ev) -> Option<EventFight
 fn welcome_to_wongos(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> {
     let featured = run.pull_for_shop(RelicRarity::Rare).game_id();
     let options = vec![
-        EventOption::or_locked(run.gold >= 100, "BARGAIN_BIN", "BARGAIN_BIN_LOCKED"),
-        EventOption::or_locked(run.gold >= 200, "FEATURED_ITEM", "FEATURED_ITEM_LOCKED").naming(featured.clone()),
-        EventOption::or_locked(run.gold >= 300, "MYSTERY_BOX", "MYSTERY_BOX_LOCKED"),
-        EventOption::new("LEAVE"),
+        EventOption::or_locked(run.gold >= 100, "BARGAIN_BIN", "BARGAIN_BIN_LOCKED").shows(Shown { gold: -100, relics: 1, ..NOTHING }),
+        EventOption::or_locked(run.gold >= 200, "FEATURED_ITEM", "FEATURED_ITEM_LOCKED").naming(featured.clone()).shows(Shown { gold: -200, relics: 1, ..NOTHING }),
+        // The ticket gives `MysteryBoxRelicCount` relics, combats later.
+        EventOption::or_locked(run.gold >= 300, "MYSTERY_BOX", "MYSTERY_BOX_LOCKED").shows(Shown { gold: -300, relics: 3, ..NOTHING }),
+        EventOption::new("LEAVE").shows(Shown { downgrade: 1, random: true, ..NOTHING }),
     ];
     match ev.ask(run, options) {
         "BARGAIN_BIN" => {
@@ -1582,7 +1770,8 @@ fn welcome_to_wongos(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> {
 /// `Wellspring`: Bottle offers a random potion; Bathe removes a card and
 /// adds a Guilty.
 fn wellspring(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> {
-    match ev.ask(run, vec![EventOption::new("BOTTLE"), EventOption::new("BATHE")]) {
+    let options = vec![EventOption::new("BOTTLE").shows(Shown { potions: 1, ..NOTHING }), EventOption::new("BATHE").shows(Shown { remove: 1, curses: 1, ..NOTHING })];
+    match ev.ask(run, options) {
         "BOTTLE" => {
             let potion = run.any_potion().to_string();
             ev.settle(run, vec![Offered::Potions(vec![potion])]);
@@ -1599,7 +1788,8 @@ fn wellspring(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> {
 /// a card on the event's stream for 9 damage.
 fn whispering_hollow(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> {
     let gold = 35 + ev.rng.next_int_in(-9, 10);
-    match ev.ask(run, vec![EventOption::new("GOLD"), EventOption::new("HUG")]) {
+    let options = vec![EventOption::new("GOLD").shows(Shown { gold: -gold, potions: 2, ..NOTHING }), EventOption::new("HUG").shows(Shown { hp: -9, transform: 1, ..NOTHING })];
+    match ev.ask(run, options) {
         "GOLD" => {
             run.lose_gold(gold);
             let potions = (0..2).map(|_| create_potion(run.rewards()).to_string()).collect();
@@ -1616,8 +1806,9 @@ fn whispering_hollow(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> {
 /// `WoodCarvings`: a basic card into a Peck or a Toric Toughness, or
 /// Slither on a card (locked if none takes it).
 fn wood_carvings(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> {
-    let snake = EventOption::or_locked(run.deck.iter().any(|c| c.can_enchant("SLITHER")), "SNAKE", "SNAKE_LOCKED");
-    let into = match ev.ask(run, vec![EventOption::new("BIRD"), snake, EventOption::new("TORUS")]) {
+    let snake = EventOption::or_locked(run.deck.iter().any(|c| c.can_enchant("SLITHER")), "SNAKE", "SNAKE_LOCKED").shows(Shown { enchant: 1, ..NOTHING });
+    let carve = Shown { transform: 1, ..NOTHING };
+    let into = match ev.ask(run, vec![EventOption::new("BIRD").shows(carve), snake, EventOption::new("TORUS").shows(carve)]) {
         "SNAKE" => {
             ev.enchant(run, "SLITHER", 1, 1);
             return None;
@@ -1638,9 +1829,9 @@ fn wood_carvings(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> {
 /// two for 250 (each locked without the gold).
 fn zen_weaver(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> {
     let options = vec![
-        EventOption::new("BREATHING_TECHNIQUES"),
-        EventOption::or_locked(run.gold >= 125, "EMOTIONAL_AWARENESS", "LOCKED"),
-        EventOption::or_locked(run.gold >= 250, "ARACHNID_ACUPUNCTURE", "LOCKED"),
+        EventOption::new("BREATHING_TECHNIQUES").shows(Shown { gold: -50, ..NOTHING }),
+        EventOption::or_locked(run.gold >= 125, "EMOTIONAL_AWARENESS", "LOCKED").shows(Shown { gold: -125, remove: 1, ..NOTHING }),
+        EventOption::or_locked(run.gold >= 250, "ARACHNID_ACUPUNCTURE", "LOCKED").shows(Shown { gold: -250, remove: 2, ..NOTHING }),
     ];
     match ev.ask(run, options) {
         "BREATHING_TECHNIQUES" => {

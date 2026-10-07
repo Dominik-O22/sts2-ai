@@ -24,7 +24,8 @@ The file's first line is `{"argv": [...]}`; each other line is a run:
                ("BASH+", "STRIKE~SHARP2" for an enchantment), relics, potions
 
 A run whose decisions the sim makes (`--choices`) has no decisions. Event
-options carry only a hash of their key (`Event#417`) and what they name.
+options read as their event, page and key ("Event Reflections
+INITIAL.SHATTER") and what they name.
 """
 
 from __future__ import annotations
@@ -65,7 +66,7 @@ def option_text(L: RunLayout, floats: np.ndarray, ids: np.ndarray, k: int, paths
     if ids[i + 4 + C]:
         parts.append(NAMES["room"][ids[i + 4 + C]])
     if kind == "Event":
-        parts[0] = f"Event#{ids[i + 5 + C]}"
+        parts[0] = f"Event {NAMES['eventoption'][ids[i + 5 + C]]}"
     if price := floats[f + 2 + C]:
         parts.append(f"{price * 100:.0f}g")
     if paths and kind == "Path":

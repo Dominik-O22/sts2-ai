@@ -1132,7 +1132,7 @@ fn run_layout(py: Python<'_>) -> PyResult<Bound<'_, PyDict>> {
         ("act_vocab", ACT_VOCAB),
         ("event_vocab", EVENT_VOCAB),
         ("boss_vocab", BOSS_VOCAB),
-        ("event_key_vocab", EVENT_KEY_VOCAB),
+        ("event_option_vocab", EVENT_OPTION_VOCAB),
     ] {
         d.set_item(k, v)?;
     }
@@ -1140,8 +1140,9 @@ fn run_layout(py: Python<'_>) -> PyResult<Bound<'_, PyDict>> {
 }
 
 /// The run vocabularies' names by id, id 0 the pad: "decision", "option",
-/// "room", "act", "event", "boss", and "relic" with the relics the combat
-/// sim leaves out after its own (`sim::runobs`).
+/// "room", "act", "event", "boss", "eventoption" ("Reflections
+/// INITIAL.SHATTER", by an event option token's id), and "relic" with the
+/// relics the combat sim leaves out after its own (`sim::runobs`).
 #[pyfunction]
 fn run_names() -> std::collections::HashMap<&'static str, Vec<String>> {
     use runobs::*;
@@ -1153,6 +1154,7 @@ fn run_names() -> std::collections::HashMap<&'static str, Vec<String>> {
         ("act", named(ACTS.iter().map(|a| format!("{a:?}")).collect())),
         ("event", named(RUN_EVENTS.iter().map(|e| e.to_string()).collect())),
         ("boss", named(RUN_BOSSES.iter().map(|b| format!("{b:?}")).collect())),
+        ("eventoption", named(EVENT_OPTIONS.iter().map(|&(e, p, k)| event_option_name(e, p, k)).collect())),
         (
             "relic",
             named(sim::relic::ALL.iter().map(|r| sim::replay::slug(&format!("{r:?}"))).chain(RUN_RELICS.iter().map(|r| r.to_string())).collect()),

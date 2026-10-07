@@ -21,6 +21,9 @@
 use crate::effects::{DeckAction, RestOption};
 use crate::encode::N_RELICS;
 use crate::encounter::{Act, Encounter, Kind};
+use crate::events::Shown;
+use crate::pools::Rarity;
+use crate::types::CardType;
 use crate::gen::FightSetup;
 use crate::rng::Rng;
 use crate::map::{ActMap, PointId, PointType};
@@ -37,9 +40,6 @@ pub const MAX_POTIONS: usize = 5;
 pub const MAX_OPTIONS: usize = MAX_DECK + 8;
 /// Cards an option can name: a bundle's, or an event's.
 pub const OPTION_CARDS: usize = 3;
-/// Event options by a hash of event, page and key, which needs no
-/// vocabulary to stay stable as events are ported.
-pub const EVENT_KEY_BUCKETS: usize = 1024;
 
 /// Ids per token of each segment, then floats. Each segment's first float
 /// is its presence flag, except the global token's, which is always there.
@@ -58,11 +58,18 @@ pub const RELIC_FLOATS: usize = 3;
 pub const POTION_IDS: usize = 1;
 pub const POTION_FLOATS: usize = 1;
 /// kind, cards (`OPTION_CARDS`), enchantment, relic, potion, room, event
-/// key, and a map point's column + 1 (its node in the first row of
-/// `map_ahead`).
+/// option (`EVENT_OPTIONS`), and a map point's column + 1 (its node in the
+/// first row of `map_ahead`).
 pub const OPTION_IDS: usize = 5 + OPTION_CARDS + 2;
-/// present, upgraded per card, enchantment amount, price, the map summary.
-pub const OPTION_FLOATS: usize = 3 + OPTION_CARDS + MAP_FEATS;
+/// present, upgraded per card, enchantment amount, price, the map summary,
+/// what an event option's text says it does (`shown_feats`).
+pub const OPTION_FLOATS: usize = 3 + OPTION_CARDS + MAP_FEATS + EVENT_FEATS;
+/// An event option's `events::Shown`: HP, max HP and gold; the cards it
+/// adds (how many, among how many each, attack / skill / power, common /
+/// uncommon / rare, colorless, upgraded); deck cards removed, transformed,
+/// upgraded, downgraded, enchanted and duplicated, and whether the game
+/// picks them; curses, relics and potions gained; a fight.
+pub const EVENT_FEATS: usize = 24;
 /// Per map point type a path can pass (`PATH_POINTS`), the fewest and the
 /// most on paths through a point; then the rows to the nearest rest site
 /// and shop; then the fewest and most elites before the next rest site.
@@ -187,6 +194,173 @@ pub const RUN_EVENTS: &[&str] = &[
     "Nonupeipe", "Tanx",
 ];
 
+/// Every option a ported event can ask, as (event, page, key) the way
+/// `events::EventOption` keeps them, append-only: its index + 1 is the
+/// option token's event option id, and `sim/vocab.txt` pins the order. A
+/// test walks every event and holds each option it asks to this list.
+pub const EVENT_OPTIONS: &[(&str, &str, &str)] = &[
+    ("AbyssalBaths", "ALL", "EXIT_BATHS"),
+    ("AbyssalBaths", "ALL", "LINGER"),
+    ("AbyssalBaths", "INITIAL", "ABSTAIN"),
+    ("AbyssalBaths", "INITIAL", "IMMERSE"),
+    ("Amalgamator", "INITIAL", "COMBINE_DEFENDS"),
+    ("Amalgamator", "INITIAL", "COMBINE_STRIKES"),
+    ("AromaOfChaos", "INITIAL", "LET_GO"),
+    ("AromaOfChaos", "INITIAL", "MAINTAIN_CONTROL"),
+    ("BattlewornDummy", "INITIAL", "SETTING_1"),
+    ("BattlewornDummy", "INITIAL", "SETTING_2"),
+    ("BattlewornDummy", "INITIAL", "SETTING_3"),
+    ("BrainLeech", "INITIAL", "RIP"),
+    ("BrainLeech", "INITIAL", "SHARE_KNOWLEDGE"),
+    ("Bugslayer", "INITIAL", "EXTERMINATION"),
+    ("Bugslayer", "INITIAL", "SQUASH"),
+    ("ByrdonisNest", "INITIAL", "EAT"),
+    ("ByrdonisNest", "INITIAL", "TAKE"),
+    ("ColossalFlower", "INITIAL", "EXTRACT_CURRENT_PRIZE_1"),
+    ("ColossalFlower", "INITIAL", "REACH_DEEPER_1"),
+    ("ColossalFlower", "REACH_DEEPER_1", "EXTRACT_CURRENT_PRIZE_2"),
+    ("ColossalFlower", "REACH_DEEPER_1", "REACH_DEEPER_2"),
+    ("ColossalFlower", "REACH_DEEPER_2", "EXTRACT_INSTEAD"),
+    ("ColossalFlower", "REACH_DEEPER_2", "POLLINOUS_CORE"),
+    ("DenseVegetation", "INITIAL", "REST"),
+    ("DenseVegetation", "INITIAL", "TRUDGE_ON"),
+    ("DenseVegetation", "REST", "FIGHT"),
+    ("DollRoom", "", "BING_BONG"),
+    ("DollRoom", "", "DAUGHTER_OF_THE_WIND"),
+    ("DollRoom", "", "MR_STRUGGLES"),
+    ("DollRoom", "INITIAL", "EXAMINE"),
+    ("DollRoom", "INITIAL", "RANDOM"),
+    ("DollRoom", "INITIAL", "TAKE_SOME_TIME"),
+    ("DoorsOfLightAndDark", "INITIAL", "DARK"),
+    ("DoorsOfLightAndDark", "INITIAL", "LIGHT"),
+    ("DrowningBeacon", "INITIAL", "BOTTLE"),
+    ("DrowningBeacon", "INITIAL", "CLIMB"),
+    ("EndlessConveyor", "ALL", "CAVIAR"),
+    ("EndlessConveyor", "ALL", "CLAM_ROLL"),
+    ("EndlessConveyor", "ALL", "FRIED_EEL"),
+    ("EndlessConveyor", "ALL", "GOLDEN_FYSH"),
+    ("EndlessConveyor", "ALL", "JELLY_LIVER"),
+    ("EndlessConveyor", "ALL", "SEAPUNK_SALAD"),
+    ("EndlessConveyor", "ALL", "SPICY_SNAPPY"),
+    ("EndlessConveyor", "ALL", "SUSPICIOUS_CONDIMENT"),
+    ("EndlessConveyor", "GRAB_SOMETHING_OFF_THE_BELT", "LEAVE"),
+    ("EndlessConveyor", "INITIAL", "OBSERVE_CHEF"),
+    ("FakeMerchant", "", "SHOP"),
+    ("FakeMerchant", "", "THROW"),
+    ("FieldOfManSizedHoles", "INITIAL", "ENTER_YOUR_HOLE"),
+    ("FieldOfManSizedHoles", "INITIAL", "RESIST"),
+    ("GraveOfTheForgotten", "INITIAL", "ACCEPT"),
+    ("GraveOfTheForgotten", "INITIAL", "CONFRONT"),
+    ("HungryForMushrooms", "INITIAL", "BIG_MUSHROOM"),
+    ("HungryForMushrooms", "INITIAL", "FRAGRANT_MUSHROOM"),
+    ("InfestedAutomaton", "INITIAL", "STUDY"),
+    ("InfestedAutomaton", "INITIAL", "TOUCH_CORE"),
+    ("JungleMazeAdventure", "INITIAL", "JOIN_FORCES"),
+    ("JungleMazeAdventure", "INITIAL", "SOLO_QUEST"),
+    ("LostWisp", "INITIAL", "CLAIM"),
+    ("LostWisp", "INITIAL", "SEARCH"),
+    ("LuminousChoir", "INITIAL", "OFFER_TRIBUTE"),
+    ("LuminousChoir", "INITIAL", "REACH_INTO_THE_FLESH"),
+    ("MorphicGrove", "INITIAL", "GROUP"),
+    ("MorphicGrove", "INITIAL", "LONER"),
+    ("PotionCourier", "INITIAL", "GRAB_POTIONS"),
+    ("PotionCourier", "INITIAL", "RANSACK"),
+    ("PunchOff", "INITIAL", "I_CAN_TAKE_THEM"),
+    ("PunchOff", "INITIAL", "NAB"),
+    ("PunchOff", "I_CAN_TAKE_THEM", "FIGHT"),
+    ("RanwidTheElder", "INITIAL", "GOLD"),
+    ("RanwidTheElder", "INITIAL", "POTION"),
+    ("RanwidTheElder", "INITIAL", "RELIC"),
+    ("Reflections", "INITIAL", "SHATTER"),
+    ("Reflections", "INITIAL", "TOUCH_A_MIRROR"),
+    ("RelicTrader", "", "PROCEED"),
+    ("RelicTrader", "INITIAL", "BOTTOM"),
+    ("RelicTrader", "INITIAL", "MIDDLE"),
+    ("RelicTrader", "INITIAL", "TOP"),
+    ("RoomFullOfCheese", "INITIAL", "GORGE"),
+    ("RoomFullOfCheese", "INITIAL", "SEARCH"),
+    ("RoundTeaParty", "INITIAL", "ENJOY_TEA"),
+    ("RoundTeaParty", "INITIAL", "PICK_FIGHT"),
+    ("RoundTeaParty", "PICK_FIGHT", "CONTINUE_FIGHT"),
+    ("SapphireSeed", "INITIAL", "EAT"),
+    ("SapphireSeed", "INITIAL", "PLANT"),
+    ("SelfHelpBook", "INITIAL", "NO_OPTIONS"),
+    ("SelfHelpBook", "INITIAL", "READ_ENTIRE_BOOK"),
+    ("SelfHelpBook", "INITIAL", "READ_PASSAGE"),
+    ("SelfHelpBook", "INITIAL", "READ_THE_BACK"),
+    ("SlipperyBridge", "HOLD_ON_0", "HOLD_ON_1"),
+    ("SlipperyBridge", "HOLD_ON_1", "HOLD_ON_2"),
+    ("SlipperyBridge", "HOLD_ON_2", "HOLD_ON_3"),
+    ("SlipperyBridge", "HOLD_ON_3", "HOLD_ON_4"),
+    ("SlipperyBridge", "HOLD_ON_4", "HOLD_ON_5"),
+    ("SlipperyBridge", "HOLD_ON_5", "HOLD_ON_6"),
+    ("SlipperyBridge", "HOLD_ON_6", "HOLD_ON_LOOP"),
+    ("SlipperyBridge", "HOLD_ON_LOOP", "HOLD_ON_LOOP"),
+    ("SlipperyBridge", "INITIAL", "HOLD_ON_0"),
+    ("SlipperyBridge", "INITIAL", "OVERCOME"),
+    ("SpiralingWhirlpool", "INITIAL", "DRINK"),
+    ("SpiralingWhirlpool", "INITIAL", "OBSERVE"),
+    ("SpiritGrafter", "INITIAL", "LET_IT_IN"),
+    ("SpiritGrafter", "INITIAL", "REJECTION"),
+    ("StoneOfAllTime", "INITIAL", "LIFT"),
+    ("StoneOfAllTime", "INITIAL", "PUSH"),
+    ("SunkenStatue", "INITIAL", "DIVE_INTO_WATER"),
+    ("SunkenStatue", "INITIAL", "GRAB_SWORD"),
+    ("SunkenTreasury", "INITIAL", "FIRST_CHEST"),
+    ("SunkenTreasury", "INITIAL", "SECOND_CHEST"),
+    ("Symbiote", "INITIAL", "APPROACH"),
+    ("Symbiote", "INITIAL", "KILL_WITH_FIRE"),
+    ("TabletOfTruth", "DECIPHER", "GIVE_UP"),
+    ("TabletOfTruth", "DECIPHER_1", "DECIPHER"),
+    ("TabletOfTruth", "DECIPHER_2", "DECIPHER"),
+    ("TabletOfTruth", "DECIPHER_3", "DECIPHER"),
+    ("TabletOfTruth", "DECIPHER_4", "DECIPHER"),
+    ("TabletOfTruth", "INITIAL", "DECIPHER_1"),
+    ("TabletOfTruth", "INITIAL", "SMASH"),
+    ("TeaMaster", "INITIAL", "BONE_TEA"),
+    ("TeaMaster", "INITIAL", "EMBER_TEA"),
+    ("TeaMaster", "INITIAL", "TEA_OF_DISCOURTESY"),
+    ("TheFutureOfPotions", "INITIAL", "POTION"),
+    ("TheLanternKey", "INITIAL", "KEEP_THE_KEY"),
+    ("TheLanternKey", "INITIAL", "RETURN_THE_KEY"),
+    ("TheLanternKey", "KEEP_THE_KEY", "FIGHT"),
+    ("TheLegendsWereTrue", "INITIAL", "NAB_THE_MAP"),
+    ("TheLegendsWereTrue", "INITIAL", "SLOWLY_FIND_AN_EXIT"),
+    ("ThisOrThat", "INITIAL", "ORNATE"),
+    ("ThisOrThat", "INITIAL", "PLAIN"),
+    ("TrashHeap", "INITIAL", "DIVE_IN"),
+    ("TrashHeap", "INITIAL", "GRAB"),
+    ("Trial", "INITIAL", "ACCEPT"),
+    ("Trial", "INITIAL", "REJECT"),
+    ("Trial", "MERCHANT", "GUILTY"),
+    ("Trial", "MERCHANT", "INNOCENT"),
+    ("Trial", "NOBLE", "GUILTY"),
+    ("Trial", "NOBLE", "INNOCENT"),
+    ("Trial", "NONDESCRIPT", "GUILTY"),
+    ("Trial", "NONDESCRIPT", "INNOCENT"),
+    ("Trial", "REJECT", "ACCEPT"),
+    ("Trial", "REJECT", "DOUBLE_DOWN"),
+    ("UnrestSite", "INITIAL", "KILL"),
+    ("UnrestSite", "INITIAL", "REST"),
+    ("WaterloggedScriptorium", "INITIAL", "BLOODY_INK"),
+    ("WaterloggedScriptorium", "INITIAL", "PRICKLY_SPONGE"),
+    ("WaterloggedScriptorium", "INITIAL", "TENTACLE_QUILL"),
+    ("WelcomeToWongos", "INITIAL", "BARGAIN_BIN"),
+    ("WelcomeToWongos", "INITIAL", "FEATURED_ITEM"),
+    ("WelcomeToWongos", "INITIAL", "LEAVE"),
+    ("WelcomeToWongos", "INITIAL", "MYSTERY_BOX"),
+    ("Wellspring", "INITIAL", "BATHE"),
+    ("Wellspring", "INITIAL", "BOTTLE"),
+    ("WhisperingHollow", "INITIAL", "GOLD"),
+    ("WhisperingHollow", "INITIAL", "HUG"),
+    ("WoodCarvings", "INITIAL", "BIRD"),
+    ("WoodCarvings", "INITIAL", "SNAKE"),
+    ("WoodCarvings", "INITIAL", "TORUS"),
+    ("ZenWeaver", "INITIAL", "ARACHNID_ACUPUNCTURE"),
+    ("ZenWeaver", "INITIAL", "BREATHING_TECHNIQUES"),
+    ("ZenWeaver", "INITIAL", "EMOTIONAL_AWARENESS"),
+];
+
 /// The encounters an act can end with, append-only. A test holds every boss
 /// encounter to it.
 pub const RUN_BOSSES: &[Encounter] = &[
@@ -212,7 +386,7 @@ pub const ROOM_VOCAB: usize = ROOMS.len() + 1;
 pub const ACT_VOCAB: usize = ACTS.len() + 1;
 pub const EVENT_VOCAB: usize = RUN_EVENTS.len() + 1;
 pub const BOSS_VOCAB: usize = RUN_BOSSES.len() + 1;
-pub const EVENT_KEY_VOCAB: usize = EVENT_KEY_BUCKETS + 1;
+pub const EVENT_OPTION_VOCAB: usize = EVENT_OPTIONS.len() + 1;
 
 /// A run decision encoded: one row of the run buffers, and the chooser's
 /// answer for each option token (the index `rooms::Decision` reads, where a
@@ -271,13 +445,53 @@ fn point_id(kind: PointType) -> i64 {
     position(&ROOMS, &format!("{kind:?}").as_str())
 }
 
-/// FNV-1a of the option's event, page and key, into `EVENT_KEY_BUCKETS`.
-fn event_key(event: &str, page: &str, key: &str) -> i64 {
-    let mut h: u32 = 0x811C_9DC5;
-    for b in event.bytes().chain(*b".").chain(page.bytes()).chain(*b".").chain(key.bytes()) {
-        h = (h ^ b as u32).wrapping_mul(0x0100_0193);
-    }
-    (h as usize % EVENT_KEY_BUCKETS) as i64 + 1
+/// An event option's id: its `EVENT_OPTIONS` index + 1, 0 if not listed.
+fn event_option_id(event: &str, page: &str, key: &str) -> i64 {
+    static INDEX: std::sync::OnceLock<std::collections::HashMap<(&str, &str, &str), i64>> = std::sync::OnceLock::new();
+    let index = INDEX.get_or_init(|| EVENT_OPTIONS.iter().enumerate().map(|(i, &o)| (o, i as i64 + 1)).collect());
+    index.get(&(event, page, key)).copied().unwrap_or(0)
+}
+
+/// An event option in words, as `sim/vocab.txt` and `option_names` give
+/// it: "Reflections INITIAL.SHATTER", or "DollRoom BING_BONG" for an option
+/// on no page.
+pub fn event_option_name(event: &str, page: &str, key: &str) -> String {
+    if page.is_empty() { format!("{event} {key}") } else { format!("{event} {page}.{key}") }
+}
+
+/// An event option's `Shown` as the option token's last `EVENT_FEATS`
+/// floats.
+fn shown_feats(s: &Shown) -> [f32; EVENT_FEATS] {
+    let c = s.cards;
+    let kind = |k: CardType| c.is_some_and(|c| c.kind == Some(k)) as u8 as f32;
+    let rarity = |r: Rarity| c.is_some_and(|c| c.rarity == Some(r)) as u8 as f32;
+    let flag = |b: bool| b as u8 as f32;
+    [
+        s.hp as f32 / 10.0,
+        s.max_hp as f32 / 10.0,
+        s.gold as f32 / 100.0,
+        c.map_or(0.0, |c| c.count as f32 / 2.0),
+        c.map_or(0.0, |c| c.from as f32 / 8.0),
+        kind(CardType::Attack),
+        kind(CardType::Skill),
+        kind(CardType::Power),
+        rarity(Rarity::Common),
+        rarity(Rarity::Uncommon),
+        rarity(Rarity::Rare),
+        flag(c.is_some_and(|c| c.colorless)),
+        flag(c.is_some_and(|c| c.upgraded)),
+        s.remove as f32 / 4.0,
+        s.transform as f32 / 4.0,
+        s.upgrade as f32 / 4.0,
+        s.downgrade as f32 / 4.0,
+        s.enchant as f32 / 4.0,
+        s.duplicate as f32 / 20.0,
+        flag(s.random),
+        s.curses as f32 / 2.0,
+        s.relics as f32 / 2.0,
+        s.potions as f32 / 2.0,
+        flag(s.fight),
+    ]
 }
 
 /// One option token, before it is written.
@@ -289,10 +503,11 @@ struct Opt {
     relic: i64,
     potion: i64,
     room: i64,
-    event_key: i64,
+    event_option: i64,
     column: i64,
     price: i32,
     map: [f32; MAP_FEATS],
+    shown: [f32; EVENT_FEATS],
     answer: usize,
 }
 
@@ -534,7 +749,7 @@ fn options(run: &RunState, decision: Decision<'_>) -> (usize, Vec<Opt>) {
                 .iter()
                 .enumerate()
                 .map(|(i, o)| {
-                    let mut opt = Opt { event_key: event_key(event, o.page, o.key), ..Opt::new(K::Event, i) };
+                    let mut opt = Opt { event_option: event_option_id(event, o.page, o.key), shown: shown_feats(&o.shown), ..Opt::new(K::Event, i) };
                     for item in &o.items {
                         if sim_card(item).is_some() {
                             opt = opt.card(item, false, None);
@@ -580,7 +795,9 @@ pub fn option_names(run: &RunState, decision: Decision<'_>) -> Vec<String> {
             })
             .chain(["leave".into()])
             .collect(),
-        Decision::Event { options, .. } => options.iter().map(|o| [format!("{}.{}", o.page, o.key)].into_iter().chain(o.items.iter().cloned()).collect::<Vec<_>>().join(" ")).collect(),
+        Decision::Event { event, options } => {
+            options.iter().map(|o| [event_option_name(event, o.page, o.key)].into_iter().chain(o.items.iter().cloned()).collect::<Vec<_>>().join(" ")).collect()
+        }
     };
     cut_options(&mut names);
     names
@@ -685,7 +902,7 @@ pub fn observe(run: &RunState, decision: Decision<'_>) -> RunObs {
         for (c, &(id, _)) in o.cards.iter().enumerate() {
             row[1 + c] = id;
         }
-        row[1 + OPTION_CARDS..].copy_from_slice(&[o.enchant.0, o.relic, o.potion, o.room, o.event_key, o.column]);
+        row[1 + OPTION_CARDS..].copy_from_slice(&[o.enchant.0, o.relic, o.potion, o.room, o.event_option, o.column]);
         let row = &mut f[x..x + OPTION_FLOATS];
         row[0] = 1.0;
         for (c, &(_, up)) in o.cards.iter().enumerate() {
@@ -693,7 +910,8 @@ pub fn observe(run: &RunState, decision: Decision<'_>) -> RunObs {
         }
         row[1 + OPTION_CARDS] = o.enchant.1 as f32 / 10.0;
         row[2 + OPTION_CARDS] = o.price as f32 / 100.0;
-        row[3 + OPTION_CARDS..].copy_from_slice(&o.map);
+        row[3 + OPTION_CARDS..3 + OPTION_CARDS + MAP_FEATS].copy_from_slice(&o.map);
+        row[3 + OPTION_CARDS + MAP_FEATS..].copy_from_slice(&o.shown);
     }
     let mut forecast = Vec::new();
     if let Decision::Path(map, points) = decision {
@@ -801,6 +1019,9 @@ pub fn vocab_text() -> String {
     }
     for r in RUN_RELICS {
         out += &format!("runrelic {r}\n");
+    }
+    for &(event, page, key) in EVENT_OPTIONS {
+        out += &format!("eventoption {}\n", event_option_name(event, page, key));
     }
     out
 }
@@ -985,6 +1206,103 @@ mod tests {
         assert_eq!(ea, eb);
         let unknown = point_id(PointType::Unknown);
         assert!(ea.ids[I_MAP..].chunks(MAP_NODE_IDS).any(|n| n[0] == unknown), "the map ahead shows its ? rooms");
+    }
+
+    /// Takes a random option at every decision, leaning on one index per
+    /// run so a long event (Slippery Bridge's holds, Tablet of Truth's
+    /// deciphers) goes deep, and keeps every event option asked.
+    struct Wander {
+        rng: Rng,
+        lean: usize,
+        asked: std::collections::BTreeSet<(usize, &'static str, &'static str, &'static str)>,
+    }
+
+    impl crate::rooms::Chooser for Wander {
+        fn choose(&mut self, _: &RunState, decision: Decision<'_>) -> usize {
+            if let Decision::Event { event, options } = decision {
+                let at = RUN_EVENTS.iter().position(|&e| e == event).unwrap_or(usize::MAX);
+                self.asked.extend(options.iter().map(|o| (at, event, o.page, o.key)));
+            }
+            let n = option_count(decision).max(1);
+            if self.rng.next_int(5) == 0 { self.rng.next_int(n) } else { self.lean.min(n - 1) }
+        }
+    }
+
+    /// Every option an event asks has an id: each ported event walked many
+    /// times over decks, gold, relics and potions that open and lock its
+    /// options. A missing one fails with the lines to append.
+    #[test]
+    fn every_event_option_has_an_id() {
+        let unlocks = Unlocks::default();
+        let mut wander = Wander { rng: Rng::new(7), lean: 0, asked: Default::default() };
+        for name in crate::events::ported() {
+            for seed in 0..300 {
+                let acts = select_acts(crate::game_rng::RunRngs::new("WANDER").seed, &unlocks);
+                let mut run = RunState::new(&format!("WANDER{seed}"), acts, Ascension(10), &unlocks);
+                run.enter_act(seed / 9 % 3);
+                (run.max_hp, run.hp) = (300, 300 - (seed as i32 % 7) * 10);
+                match seed % 3 {
+                    0 => {
+                        run.gold = 999;
+                        run.deck.push(DeckCard { id: "INFLAME".into(), upgraded: false, enchantment: None });
+                        run.deck.push(DeckCard { id: "BASH".into(), upgraded: true, enchantment: None });
+                        run.deck.push(DeckCard { id: "IMPERVIOUS".into(), upgraded: false, enchantment: None });
+                        run.relics.extend(["ANCHOR", "LANTERN", "VAJRA"].map(RunRelic::new));
+                        for (slot, potion) in run.potions.iter_mut().zip(["FOUL_POTION", "FIRE_POTION", "FAIRY_IN_A_BOTTLE"]) {
+                            *slot = Some(potion.into());
+                        }
+                    }
+                    1 => run.gold = 0,
+                    _ => {
+                        // Nothing to enchant (Self-Help Book's NO_OPTIONS), and a
+                        // potion so Stone of All Time has an open option.
+                        run.gold = 60;
+                        run.deck = vec![DeckCard { id: "CLUMSY".into(), upgraded: false, enchantment: None }];
+                        run.potions[0] = Some("FIRE_POTION".into());
+                    }
+                }
+                wander.lean = seed / 3 % 3;
+                run.event(name, &mut wander, &mut Vec::new());
+            }
+        }
+        let missing: Vec<String> = wander
+            .asked
+            .iter()
+            .filter(|&&(_, event, page, key)| event_option_id(event, page, key) == 0)
+            .map(|&(_, event, page, key)| format!("    (\"{event}\", \"{page}\", \"{key}\"),"))
+            .collect();
+        assert!(missing.is_empty(), "event options with no id; append to EVENT_OPTIONS:\n{}", missing.join("\n"));
+    }
+
+    /// Encodes the first event decision it is put, and takes option 0.
+    struct Look(Option<RunObs>);
+
+    impl crate::rooms::Chooser for Look {
+        fn choose(&mut self, run: &RunState, decision: Decision<'_>) -> usize {
+            if matches!(decision, Decision::Event { .. }) && self.0.is_none() {
+                self.0 = Some(observe(run, decision));
+            }
+            0
+        }
+    }
+
+    /// Reflections' two options read as themselves: each its own id and
+    /// name, Shatter duplicating the deck for a curse, Touch a Mirror
+    /// changing cards the game picks.
+    #[test]
+    fn an_event_option_carries_its_id_and_what_it_shows() {
+        let mut run = visible("SEEDA");
+        let mut look = Look(None);
+        run.event("Reflections", &mut look, &mut Vec::new());
+        let obs = look.0.expect("an event decision");
+        let id = |k: usize| obs.ids[I_OPTIONS + k * OPTION_IDS + 5 + OPTION_CARDS];
+        assert_eq!([id(0), id(1)], [event_option_id("Reflections", "INITIAL", "TOUCH_A_MIRROR"), event_option_id("Reflections", "INITIAL", "SHATTER")]);
+        assert!(id(0) > 0 && id(1) > 0 && id(0) != id(1));
+        assert_eq!(obs.names, ["Reflections INITIAL.TOUCH_A_MIRROR", "Reflections INITIAL.SHATTER"]);
+        let shown = |k: usize| &obs.floats[F_OPTIONS + (k + 1) * OPTION_FLOATS - EVENT_FEATS..F_OPTIONS + (k + 1) * OPTION_FLOATS];
+        assert_eq!(shown(1)[18], run.deck.len() as f32 / 20.0, "Shatter duplicates the deck");
+        assert_eq!((shown(1)[19], shown(1)[20]), (0.0, 0.5), "chosen by no one, one curse");
+        assert_eq!((shown(0)[15], shown(0)[16], shown(0)[19]), (1.0, 0.5, 1.0), "four upgrades, two downgrades, at random");
     }
 
     #[test]

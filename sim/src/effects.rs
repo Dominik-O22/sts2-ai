@@ -902,6 +902,11 @@ impl RunState {
         }
     }
 
+    /// `HealRestSiteOption.GetHealAmount`: what a rest site heals.
+    pub fn rest_heal_amount(&self) -> i32 {
+        self.max_hp * 3 / 10 + if self.has_relic("REGAL_PILLOW") { 15 } else { 0 }
+    }
+
     /// `HealRestSiteOption.ExecuteRestSiteHeal`, which Dense Vegetation
     /// mimics too: three tenths of max HP plus Regal Pillow's 15
     /// (`ModifyRestSiteHealAmount`), Stone Humidifier's max HP
@@ -909,8 +914,7 @@ impl RunState {
     /// they came (`ModifyRestSiteHealRewards`): Tiny Mailbox's two potions,
     /// Dream Catcher's card reward, a monster fight's.
     pub fn rest_heal(&mut self) -> Vec<Offered> {
-        let pillow = if self.has_relic("REGAL_PILLOW") { 15 } else { 0 };
-        self.heal(self.max_hp * 3 / 10 + pillow);
+        self.heal(self.rest_heal_amount());
         if self.has_relic("STONE_HUMIDIFIER") {
             self.gain_max_hp(5);
         }
