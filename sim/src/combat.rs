@@ -149,9 +149,23 @@ pub struct Enemy {
     pub reviving: bool,
     /// Fled the fight (`CreatureCmd.Escape`). Neither alive nor a corpse.
     pub escaped: bool,
+    /// What it stole, kept past its death for the run to read.
+    pub loot: Option<Loot>,
 }
 
-clone_by_fields!(Enemy { creature, monster, slot, reviving, escaped });
+clone_by_fields!(Enemy { creature, monster, slot, reviving, escaped, loot });
+
+/// What a thief carries off: lost with it if it escapes, a reward if it
+/// dies (`CombatRoom.AddExtraReward` in its power's `BeforeDeath`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Loot {
+    /// The uid of a card the combat started with (`SwipePower.StolenCard`),
+    /// gone from the deck since it was taken.
+    Card(u32),
+    /// The gold Gremlin Merc stole, which the Fat Gremlin runs off with
+    /// (`HeistPower`).
+    Gold(i32),
+}
 
 impl Enemy {
     /// `Creature.IsPrimaryEnemy`: combat ends when no primary enemy lives.
@@ -763,7 +777,7 @@ impl Combat {
         // arrive at the back.
         let last = matches!(id, MonsterId::TwoTailedRat | MonsterId::ToughEgg);
         let slot = if flags.slot != 0 { flags.slot } else { self.free_slot(last) };
-        self.enemies.push(Enemy { creature, monster, slot, reviving: false, escaped: false });
+        self.enemies.push(Enemy { creature, monster, slot, reviving: false, escaped: false, loot: None });
         let idx = self.enemies.len() - 1;
         let at = self.order.iter().position(|&j| self.enemies[j].slot > slot).unwrap_or(self.order.len());
         self.order.insert(at, idx);
@@ -3343,6 +3357,7 @@ impl Combat {
             if loot > 0 {
                 if let Some(fat) = self.enemies.last_mut() {
                     fat.creature.powers.push(Power::new(PowerId::Heist, loot));
+                    fat.loot = Some(Loot::Gold(loot));
                 }
             }
         }
@@ -3761,6 +3776,7 @@ impl Combat {
     /// `ThievingHopper.ThieveryMove`: take a card the combat started with
     /// from the draw or discard pile, the rarest first (uncommon, then
     /// common or rare, then basic, then the rest), and hold it in a Swipe.
+    /// The card leaves the run's deck (`SwipePower.Steal`, `end_fight`).
     fn steal_card(&mut self, i: usize) -> Vec<Effect> {
         use crate::types::CardRarity;
         let deck = self.stats.deck_size;
@@ -3779,6 +3795,7 @@ impl Combat {
             .unwrap_or_else(|| cards.iter().map(|c| c.uid).collect());
         let Some(&uid) = self.rngs.card_generation.pick(&pool) else { return vec![] };
         self.take_card(uid);
+        self.enemies[i].loot = Some(Loot::Card(uid));
         let me = CreatureRef::Enemy(i);
         vec![Effect::ApplyPower { target: me, id: PowerId::Swipe, amount: 1, applier: Some(me) }]
     }

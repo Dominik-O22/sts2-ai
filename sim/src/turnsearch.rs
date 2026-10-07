@@ -519,7 +519,8 @@ impl Fp for Monster {
 
 impl Fp for Enemy {
     fn fp(&self, h: &mut Fx) {
-        let Enemy { creature, monster, slot, reviving, escaped } = self;
+        // Only the run reads the loot.
+        let Enemy { creature, monster, slot, reviving, escaped, loot: _ } = self;
         creature.fp(h);
         monster.fp(h);
         slot.fp(h);

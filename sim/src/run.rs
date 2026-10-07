@@ -13,9 +13,11 @@
 //! rooms besides Juzu Bracelet's (Golden Compass, the Lantern Key card).
 
 use crate::card::{Card, UNSUPPORTED_CARDS};
-use crate::combat::{Combat, EnemySpec, RoomKind};
+use crate::combat::{Combat, Enemy, EnemySpec, Loot, Outcome, RoomKind};
 use crate::enchant::Enchantment;
 use crate::encounter::{Act, Encounter, Kind};
+use crate::events::Extra;
+use crate::forward::Fought;
 use crate::gen::{FightSetup, INERT_RELICS};
 use crate::ids::MonsterId;
 use crate::pools::{sim_card, sim_enchantment, sim_potion, sim_relic};
@@ -605,13 +607,18 @@ impl RunState {
     }
 
     /// Writes a fight `setup` started back into the run once it is over:
-    /// HP, max HP, gold, the potion slots and the relics' counters. The sim
-    /// never changes the deck, and its post-victory heals (Burning Blood)
-    /// are already in the HP. Returns `CombatRoom.GoldProportion` for the
-    /// rewards (`EncounterModel.CalculateGoldProportion`): the share of the
+    /// HP, max HP, gold, the potion slots, the relics' counters, and a card
+    /// a thief stole, which left the deck as it was taken
+    /// (`SwipePower.Steal`). The sim changes the deck no other way, and its
+    /// post-victory heals (Burning Blood) are already in the HP. Returns
+    /// `CombatRoom.GoldProportion` for the rewards
+    /// (`EncounterModel.CalculateGoldProportion`): the share of the
     /// monsters that did not escape; Gremlin Merc's none if its Fat Gremlin
-    /// fled with stolen gold, half if with none.
-    pub fn end_fight(&mut self, setup: &FightSetup, combat: &Combat) -> f32 {
+    /// fled with stolen gold, half if with none. And the loot of a thief
+    /// that died, which its `BeforeDeath` adds to the rewards: the card to
+    /// take back or leave (`SwipePower`, a `SpecialCardReward`), the gold
+    /// (`HeistPower`).
+    pub fn end_fight(&mut self, setup: &FightSetup, combat: &Combat) -> Fought {
         self.hp = combat.player.creature.hp.max(0);
         self.max_hp = combat.player.creature.max_hp;
         self.gold = combat.gold;
@@ -621,15 +628,32 @@ impl RunState {
                 *held = RunRelic::of_sim(std::mem::take(&mut held.id), relic);
             }
         }
-        let escaped: Vec<MonsterId> = combat.enemies.iter().filter(|e| e.escaped).map(|e| e.monster.id).collect();
-        if setup.encounter == Encounter::GremlinMercNormal {
-            return match (escaped.contains(&MonsterId::FatGremlin), combat.gold < setup.gold) {
-                (false, _) => 1.0,
-                (true, false) => 0.5,
-                (true, true) => 0.0,
-            };
+        let mut extra = Vec::new();
+        for e in &combat.enemies {
+            let died = !e.escaped && !e.creature.alive();
+            match e.loot {
+                // The combat's uids 1..=deck_size are the deck's cards in order.
+                Some(Loot::Card(uid)) => {
+                    let card = self.deck.remove(uid as usize - 1);
+                    if died {
+                        extra.push(Extra::Card(card.offer().expect("a card the fight was built from")));
+                    }
+                }
+                Some(Loot::Gold(gold)) if died => extra.push(Extra::Gold(gold)),
+                _ => {}
+            }
         }
-        1.0 - escaped.len() as f32 / setup.enemies.len() as f32
+        let escaped: Vec<&Enemy> = combat.enemies.iter().filter(|e| e.escaped).collect();
+        let gold_proportion = if setup.encounter == Encounter::GremlinMercNormal {
+            match escaped.iter().find(|e| e.monster.id == MonsterId::FatGremlin) {
+                None => 1.0,
+                Some(fat) if fat.loot.is_none() => 0.5,
+                Some(_) => 0.0,
+            }
+        } else {
+            1.0 - escaped.len() as f32 / setup.enemies.len() as f32
+        };
+        Fought { won: combat.outcome == Some(Outcome::Won), gold_proportion, extra }
     }
 }
 
@@ -697,5 +721,98 @@ mod tests {
             }
             assert_eq!(potions, recorded.potions);
         }
+    }
+
+    /// Inflame+ with Swift 2, the one uncommon card and so the one Thieving
+    /// Hopper steals, among four Strikes.
+    fn inflame() -> DeckCard {
+        DeckCard { id: "INFLAME".into(), upgraded: true, enchantment: Some(Enchant { id: "SWIFT".into(), amount: 2 }) }
+    }
+
+    /// A run with `deck`, 999 HP and 100 gold, and a fight against
+    /// `monster` built from it, with the first turn ended (the thief has
+    /// stolen).
+    fn robbed(deck: Vec<DeckCard>, encounter: Encounter, monster: MonsterId) -> (RunState, FightSetup, Combat) {
+        let mut run = RunState::new("SEED", [Act::Overgrowth, Act::Hive, Act::Glory], Ascension(0), &Unlocks::default());
+        (run.hp, run.max_hp, run.gold, run.deck) = (999, 999, 100, deck);
+        let setup = run.fight_setup(encounter, vec![EnemySpec { id: monster, flags: Default::default() }]).unwrap();
+        let mut combat = setup.combat(1);
+        combat.step(crate::combat::Action::EndTurn);
+        (run, setup, combat)
+    }
+
+    /// Kills enemy `i` with a Strike.
+    fn strike_dead(combat: &mut Combat, i: usize) {
+        combat.enemies[i].creature.hp = 1;
+        let hand_idx = combat.player.hand.iter().position(|c| c.id == crate::ids::CardId::StrikeIronclad).expect("a Strike in hand");
+        combat.step(crate::combat::Action::PlayCard { hand_idx, target: Some(i) });
+    }
+
+    /// `SwipePower.Steal` takes the card out of the deck, and a hopper that
+    /// escapes keeps it.
+    #[test]
+    fn a_card_the_hopper_escapes_with_leaves_the_deck() {
+        let strikes = vec![DeckCard::new("STRIKE_IRONCLAD"); 4];
+        let (mut run, setup, mut combat) = robbed([strikes.clone(), vec![inflame()]].concat(), Encounter::ThievingHopperWeak, MonsterId::ThievingHopper);
+        for _ in 0..10 {
+            if combat.is_over() {
+                break;
+            }
+            combat.step(crate::combat::Action::EndTurn);
+        }
+        assert!(combat.enemies[0].escaped, "the hopper fled");
+        let fought = run.end_fight(&setup, &combat);
+        assert_eq!(run.deck, strikes);
+        assert_eq!(fought.extra, vec![], "nothing given back");
+    }
+
+    /// Takes `card` where a card reward offers it, and nothing else.
+    struct Only(Option<crate::rewards::Offer>);
+
+    impl crate::rooms::Chooser for Only {
+        fn choose(&mut self, _: &RunState, decision: crate::rooms::Decision<'_>) -> usize {
+            match decision {
+                crate::rooms::Decision::Card(cards) => cards.iter().position(|c| Some(*c) == self.0).unwrap_or(cards.len()),
+                _ => 1,
+            }
+        }
+    }
+
+    /// `SwipePower.BeforeDeath`: a hopper killed gives the card back as it
+    /// was, as a reward to take or leave (`SpecialCardReward`). It is not
+    /// in the deck until taken.
+    #[test]
+    fn a_card_the_hopper_dies_with_comes_back_as_a_reward() {
+        let strikes = vec![DeckCard::new("STRIKE_IRONCLAD"); 4];
+        for take in [true, false] {
+            let (mut run, setup, mut combat) = robbed([strikes.clone(), vec![inflame()]].concat(), Encounter::ThievingHopperWeak, MonsterId::ThievingHopper);
+            strike_dead(&mut combat, 0);
+            let fought = run.end_fight(&setup, &combat);
+            assert!(fought.won);
+            assert_eq!(run.deck, strikes, "out of the deck until taken");
+            let rewards = run.fight_rewards(RoomType::Monster, fought.gold_proportion, None, &fought.extra);
+            run.take_rewards(rewards, &mut Only(take.then(|| inflame().offer().unwrap())), &mut vec![]);
+            let expected = if take { [strikes.clone(), vec![inflame()]].concat() } else { strikes.clone() };
+            assert_eq!(run.deck, expected, "taken: {take}");
+        }
+    }
+
+    /// `HeistPower.BeforeDeath`: the gold Gremlin Merc stole comes back as a
+    /// reward when the Fat Gremlin carrying it dies.
+    #[test]
+    fn gold_the_fat_gremlin_dies_with_comes_back_as_a_reward() {
+        let (mut run, setup, mut combat) = robbed(vec![DeckCard::new("STRIKE_IRONCLAD"); 5], Encounter::GremlinMercNormal, MonsterId::GremlinMerc);
+        let stolen = 100 - combat.gold;
+        assert!(stolen > 0, "the merc stole");
+        // The merc, then the Sneaky and Fat Gremlins its Surprise brings in.
+        for i in 0..3 {
+            strike_dead(&mut combat, i);
+        }
+        assert_eq!(combat.enemies[2].monster.id, MonsterId::FatGremlin);
+        let fought = run.end_fight(&setup, &combat);
+        assert!(fought.won);
+        assert_eq!(run.gold, 100 - stolen);
+        let rewards = run.fight_rewards(RoomType::Monster, fought.gold_proportion, None, &fought.extra);
+        assert_eq!(rewards.gold[1..], [stolen], "the room's gold, then the stolen gold");
     }
 }

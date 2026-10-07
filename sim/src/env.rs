@@ -459,7 +459,7 @@ impl Segment {
     fn replay(&self, run: &Run) -> Result<(Run, Next), RunObs> {
         let mut run = run.clone();
         let mut chooser = Replay { answers: &self.answers, next: 0 };
-        let played = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run.next(self.fought, &mut chooser)));
+        let played = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run.next(self.fought.clone(), &mut chooser)));
         match played {
             Ok(next) => Ok((run, next)),
             Err(payload) => match payload.downcast::<Unanswered>() {
@@ -784,11 +784,8 @@ impl RunSlot {
     /// finished fight's place in its run (none for the first fight of a
     /// slot's first run, which follows no fight).
     fn next_fight(&mut self, setup: &FightSetup, combat: &Combat, index: usize, n: usize) -> (Option<FightSetup>, Option<RunFight>) {
-        let fought = self.run.fighting().then(|| Fought {
-            won: combat.outcome == Some(Outcome::Won),
-            gold_proportion: self.run.state.end_fight(setup, combat),
-        });
-        let report = fought.map(|_| self.report(setup.deck.len()));
+        let fought = self.run.fighting().then(|| self.run.state.end_fight(setup, combat));
+        let report = fought.as_ref().map(|_| self.report(setup.deck.len()));
         self.advance(fought, report, index, n)
     }
 
@@ -814,7 +811,7 @@ impl RunSlot {
                 Choosing::Random(chooser) => self.run.next(fought.take(), chooser),
                 Choosing::First => self.run.next(fought.take(), &mut First),
                 Choosing::Caller(segment) => {
-                    segment.fought = fought.take().or(segment.fought);
+                    segment.fought = fought.take().or(segment.fought.take());
                     match segment.replay(&self.run) {
                         Err(decision) => {
                             segment.waiting = Some(decision);
@@ -1298,7 +1295,7 @@ impl VecEnv {
                 .map(|(row, option, sample)| {
                     let (run, seg) = segment(envs[row]);
                     let answer = seg.waiting.as_ref().expect("waiting").answers[option];
-                    let (tree, capped) = expand(caps, &seg.answers, answer, sample, |c| play_segment(run, seg.fought, c));
+                    let (tree, capped) = expand(caps, &seg.answers, answer, sample, |c| play_segment(run, seg.fought.clone(), c));
                     (row, option, sample, tree, capped)
                 })
                 .collect::<Vec<_>>()
@@ -2452,7 +2449,7 @@ pub(crate) mod tests {
             let forward = forward::play(&run_seed(run.seed), Ascension(10), &mut run_chooser(run.seed), &mut |state: &mut crate::run::RunState, setup: FightSetup| {
                 let (recorded, combat) = fights.next().expect("forward played more fights");
                 assert_eq!(format!("{setup:?}"), format!("{recorded:?}"), "seed {}: fight {}", run.seed, state.floor);
-                Fought { won: combat.outcome == Some(Outcome::Won), gold_proportion: state.end_fight(&setup, combat) }
+                state.end_fight(&setup, combat)
             });
             assert_eq!(forward.end, run.end, "seed {}", run.seed);
             assert_eq!(forward.fights, run.fights.len(), "seed {}", run.seed);
@@ -2555,7 +2552,7 @@ pub(crate) mod tests {
         let forward = forward::play_on(start, &mut chooser, &mut |state: &mut RunState, setup: FightSetup| {
             let (fought, combat) = recorded.next().expect("forward played more fights");
             assert_eq!(format!("{setup:?}"), format!("{fought:?}"), "seed {seed}: fight on floor {}", state.floor);
-            Fought { won: combat.outcome == Some(Outcome::Won), gold_proportion: state.end_fight(&setup, &combat) }
+            state.end_fight(&setup, &combat)
         });
         assert_eq!(forward.end, run.end, "seed {seed}");
         assert!(recorded.next().is_none(), "seed {seed}: fights left over");

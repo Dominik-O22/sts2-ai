@@ -466,7 +466,8 @@ impl RunState {
                 }
                 Extra::Potion => rewards.potions.push(create_potion(self.rngs.player(PlayerStream::Rewards))),
                 Extra::NamedRelic(relic) => rewards.relics.push(relic.clone()),
-                Extra::Card(id) => rewards.cards.push(vec![Offer::new(id)]),
+                Extra::Card(offer) => rewards.cards.push(vec![*offer]),
+                Extra::Gold(gold) => rewards.gold.push(self.rngs.player(PlayerStream::Rewards).next_int_in(*gold, gold + 1)),
             }
         }
 

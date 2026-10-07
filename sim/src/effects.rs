@@ -15,7 +15,7 @@
 use crate::card::{def, Card};
 use crate::enchant::Enchantment;
 use crate::game_rng::{GameRng, PlayerStream, RunStream};
-use crate::pools::{sim_card, sim_enchantment, PoolCard, Rarity, COLORLESS_CARDS, IRONCLAD_CARDS};
+use crate::pools::{sim_card, sim_enchantment, static_card_id, static_enchantment_id, PoolCard, Rarity, COLORLESS_CARDS, IRONCLAD_CARDS};
 use crate::rewards::{create_cards, create_potion, create_potions, CardOptions, Offer, UNPORTED_RELICS};
 use crate::run::{DeckCard, Enchant, Room, RoomType, RunRelic, RunState};
 use crate::types::{AscensionLevel, CardType};
@@ -195,6 +195,16 @@ impl From<Offer> for DeckCard {
 }
 
 impl DeckCard {
+    /// The card as a reward offers it, upgrade and enchantment kept, if the
+    /// sim knows its ids.
+    pub fn offer(&self) -> Option<Offer> {
+        let enchantment = match &self.enchantment {
+            Some(e) => Some((static_enchantment_id(&e.id)?, e.amount)),
+            None => None,
+        };
+        Some(Offer { id: static_card_id(&self.id)?, upgraded: self.upgraded, enchantment })
+    }
+
     /// Its `CardType`, if the combat sim knows the card.
     pub fn kind(&self) -> Option<CardType> {
         sim_card(&self.id).map(|c| def(c).ty)
