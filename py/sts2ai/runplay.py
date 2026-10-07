@@ -243,7 +243,7 @@ def play(
     envs.sim.log_fights(fights_out is not None, easy_fights)
     envs.sim.trace_runs(runs_out is not None)
     total = per_env * envs.n
-    envs.use_runs(seed, choices="caller" if run_policy else choices, last=seed + total, static_seeds=True)
+    envs.use_runs(seed, choices="caller" if run_policy else choices, last=seed + total)
     fights: list[End] = []
     runs: list[RunFight] = []
     L = RunLayout.load()
@@ -311,7 +311,7 @@ def play(
                 if easy_fights or KINDS[fight["encounter"]] in ("Elite", "Boss"):
                     fights_out.write(json.dumps(as_setup(fight)) + "\n")
         fights += taken.ends
-        runs += taken.runs
+        runs += [run for _, run in taken.ended]
         for e in taken.ends:
             if fight_ends is not None and e.run is not None:
                 outcome = {"seed": e.run.seed, "floor": e.run.floor, "act": e.run.act, "encounter": e.encounter, "kind": e.kind}

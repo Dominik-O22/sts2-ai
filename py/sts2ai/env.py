@@ -192,9 +192,9 @@ def pinned(shape: tuple[int, ...], dtype: torch.dtype) -> np.ndarray:
 class Taken(NamedTuple):
     """One `Envs.take`: the envs at a combat decision and their rows
     (`floats[k]` is `combat[k]`'s), the envs at a run decision and theirs,
-    the fights and runs that ended since the last take, the fight starts
-    logged (`log_fights`) and the trace lines written (`trace_runs`), and
-    how many envs are still in the batch."""
+    the fights that ended since the last take and the runs that ended
+    (by env), the fight starts logged (`log_fights`) and the trace lines
+    written (`trace_runs`), and how many envs are still in the batch."""
 
     combat: list[int]
     decision: list[int]
@@ -204,7 +204,7 @@ class Taken(NamedTuple):
     run_floats: np.ndarray
     run_ids: np.ndarray
     ends: list[End]
-    runs: list[RunFight]
+    ended: list[tuple[int, RunFight]]
     starts: list[str]
     traces: list[str]
     active: int
@@ -258,14 +258,14 @@ class Envs:
         self.sim.observe(self.floats, self.ids, self.mask)
         return n
 
-    def use_runs(self, seed: int = 0, asc: int = 10, choices: str = "random", last: int | None = None, static_seeds: bool = False) -> None:
+    def use_runs(self, seed: int = 0, asc: int = 10, choices: str = "random", last: int | None = None) -> None:
         """Play whole runs, fight after fight, on the seeds `seed..last`
         (`sim::env::Seeds`; no `last`: without end): env `i` starts on
-        `seed + i`, and a run that ends takes the next unplayed seed, or,
-        with `static_seeds`, env `i`'s `k`-th run is `seed + i + k * n`.
-        `choices` makes the run decisions: "random", "first", or "caller",
-        where each run stops at its decisions until they are answered."""
-        self.sim.use_runs(seed, asc, choices, last, static_seeds)
+        `seed + i`, and a run that ends takes the next unplayed seed; a
+        seed plays the same run in any env. `choices` makes the run
+        decisions: "random", "first", or "caller", where each run stops at
+        its decisions until they are answered."""
+        self.sim.use_runs(seed, asc, choices, last)
         self.run_layout = RunLayout.load()
         self.run_floats = pinned((self.n, self.run_layout.run_floats), torch.float32)
         self.run_ids = pinned((self.n, self.run_layout.run_ids), torch.int64)
@@ -291,7 +291,7 @@ class Envs:
             self.run_floats[:m],
             self.run_ids[:m],
             [End(*e[:-1], RunFight(*e[-1]) if e[-1] else None) for e in t.ends],
-            [RunFight(*r) for r in t.runs],
+            [(env, RunFight(*r)) for env, r in t.ended],
             t.starts,
             t.traces,
             t.active,

@@ -238,10 +238,16 @@ point. `Run::next` plays the run to its next fight and hands the
 `FightSetup` out, so `forward::play` is a loop over it with a `Fights`, and
 a slot is the same loop spread over many steps. In `Slot::reset` the slot
 writes the finished fight back (`end_fight`), calls `next` with how it
-went, and starts the fight it gets. A run that ends starts a fresh one: a
-slot's `k`-th run is seed index `base + slot + k * n`, game seed
-`SIM<index>`. `observe`, `step`, `fork`, `fight` and `combat(i)` carry over
-unchanged, so the combat policy, search and PPO code keep working.
+went, and starts the fight it gets. A run that ends starts a fresh one
+on the next unplayed seed index of the batch's range (`env::Seeds`, `base
++ slot` first, then a shared counter up to `last`), game seed
+`SIM<index>`; a slot with no index left leaves the batch, so an
+evaluation ends with its last counted run and no slot plays filler runs.
+Everything a run draws outside its streams (where it starts, each fight's
+combat dice) comes from the index too, so the run an index names does not
+depend on the slot that plays it or on how many slots there are, which is
+what pairing two arms by seed (`sts2ai.paired`) relies on. `fork`, `fight`
+and `combat(i)` carry over unchanged, so the search code keeps working.
 
 `set_runs` takes who makes the run decisions (`RunChoices`, `use_runs(
 choices=...)` in Python). `Random` is `rooms::Random` in Rust, on an RNG
@@ -253,17 +259,25 @@ carries the run's seed index, act, floor, deck size and, on the fight that
 ended the run, how it ended (won, died, or stuck on a fight the sim cannot
 build). `End.floor` is the run's floor in run mode.
 
-Under `Caller` the run waits at its decisions. `run_waiting` lists the
-envs waiting, `observe_run` encodes their decisions (below), and
-`step_run(envs, options)` answers them, playing each run on to its next
-decision or fight without combat work; a fight reached starts and writes
-its combat row, and a run that ends is returned. Python answers until no
-env waits, then makes one combat step for the whole batch
-(`sts2ai.runtrain.RunLoop`). A reward screen is several run decisions in a
-row (relic, potion, card, map step, rest, which card to smith), and none
-of them costs an idle combat step or changes the combat batch's shape. An
-env that still waits sits a combat step out (reward 0, not done), so the
-loop may also answer one round per step (`--no-drain`).
+Under `Caller` the run waits at its decisions. The threaded loop
+(`env::runloop`, `sts2ai.runloop.Loop` on the Python side) plays the
+batch: worker threads step each slot on its own, each behind its own
+lock, until it needs the network, at a combat decision with more than one
+legal action (a lone one, End Turn with nothing to play, is taken by the
+worker) or at a run decision, and put it in a ready set. Python's loop
+`take`s the ready envs, their combat rows and run rows packed at the front
+of the pinned buffers, runs the combat net over the one batch and the run
+policy over the other, and `post`s the answers, which the workers apply
+while the next rows go through the network: the sim and the GPU overlap
+instead of taking turns, nothing waits for a whole batch, and a reward
+screen's several decisions in a row cost no idle combat step. `take`
+waits for a quarter of the batch to be ready, or for every posted env to
+come back, so the two halves settle wherever the slower side lets them.
+What happened on the way comes back with each take: the fights that
+ended, the runs that ended, the fight starts logged and, with
+`trace_runs`, each ended run's trace line (`runtrace`, the file
+`runplay --runs-out` writes), all written in Rust, so Python holds no
+per-env state.
 
 `Run::next` plays a whole segment between fights and cannot stop halfway:
 the rooms call the chooser from deep inside their flows. So a `Caller`

@@ -305,16 +305,16 @@ impl VecEnv {
     }
 
     /// Run mode over seed indices `seed..last` (`sim::env::Seeds`; None:
-    /// unbounded). With `static_seeds` env `i` plays `seed + i + k * n`.
-    #[pyo3(signature = (seed=0, asc=10, choices="random", last=None, static_seeds=false))]
-    fn use_runs(&mut self, py: Python<'_>, seed: u64, asc: u8, choices: &str, last: Option<u64>, static_seeds: bool) -> PyResult<()> {
+    /// unbounded).
+    #[pyo3(signature = (seed=0, asc=10, choices="random", last=None))]
+    fn use_runs(&mut self, py: Python<'_>, seed: u64, asc: u8, choices: &str, last: Option<u64>) -> PyResult<()> {
         let choices = match choices {
             "random" => RunChoices::Random,
             "first" => RunChoices::First,
             "caller" => RunChoices::Caller,
             other => return Err(pyo3::exceptions::PyValueError::new_err(format!("unknown run choices {other:?}: random, first or caller"))),
         };
-        py.detach(|| self.inner.set_runs(Ascension(asc), seed, last.unwrap_or(u64::MAX), choices, static_seeds));
+        py.detach(|| self.inner.set_runs(Ascension(asc), seed, last.unwrap_or(u64::MAX), choices));
         Ok(())
     }
 
@@ -361,7 +361,7 @@ impl VecEnv {
             combat: taken.combat,
             decision: taken.decision,
             ends: ends.into_iter().map(episode_end).collect(),
-            runs: runs.into_iter().map(run_fight).collect(),
+            ended: runs.into_iter().map(|(env, r)| (env, run_fight(r))).collect(),
             starts,
             traces,
             active: taken.active,
@@ -553,15 +553,16 @@ impl VecEnv {
 
 /// What one `take` handed out (`sim::runloop::Taken`): the envs at a
 /// combat decision (row k of the combat buffers is `combat[k]`), the envs
-/// at a run decision (row k of the run buffers), the fights and runs that
-/// ended since the last take, the fight starts logged and the trace lines
-/// written, and how many envs are still in the batch.
+/// at a run decision (row k of the run buffers), the fights that ended
+/// since the last take and the runs that ended (by env), the fight starts
+/// logged and the trace lines written, and how many envs are still in
+/// the batch.
 #[pyclass(get_all)]
 struct Taken {
     combat: Vec<usize>,
     decision: Vec<usize>,
     ends: Vec<End>,
-    runs: Vec<RunFight>,
+    ended: Vec<(usize, RunFight)>,
     starts: Vec<String>,
     traces: Vec<String>,
     active: usize,
