@@ -345,9 +345,13 @@ fixed-width tokens with a presence flag, so a batch is one array
   step the point's type, its map column, the fewest and most of each
   point type on paths through it to the boss, the rows to the nearest
   rest site and shop, and the fewest and most elites on its paths before
-  the next rest site. An event option carries its event, page and key
-  hashed into 1024 buckets, which stays stable as events are ported, and
-  the items its layout drew;
+  the next rest site. An event option carries its own id (event, page and
+  key, `runobs::EVENT_OPTIONS`, append-only and pinned in `sim/vocab.txt`),
+  the items its layout drew, and what its text says it does
+  (`events::Shown`): HP, max HP and gold, the cards it adds (how many,
+  among how many, type, rarity, colorless, upgraded), deck cards removed,
+  transformed, upgraded, downgraded, enchanted and duplicated and whether
+  the game picks them, curses, relics and potions gained, and a fight;
 - at a map step, the map ahead (ids only, after the tokens): every point
   the options reach short of the boss, on a grid of 15 rows from the
   options' row by the map's 7 columns, each with the type the map shows
@@ -692,8 +696,8 @@ The winners' clone wins about 4% of A10 runs, and forcing winners'
 majority event picks on it moved nothing (76 against 84 wins of 2,048).
 A winner's pick is one sample of a high-variance game, the picks that
 killed people are not in the data, and the clone cannot reason about
-what an option does: an event option reaches it as a hashed key, a card
-as an id. Afterstates compute the consequence instead of learning it.
+what an option does: an event option reached it as a hashed key (its own
+id and what its text says since 2026-10-07), a card as an id. Afterstates compute the consequence instead of learning it.
 
 For every decision but a map step, `VecEnv::afterstates` applies each
 option in the sim and scores the player it leaves with the forecast: the

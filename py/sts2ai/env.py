@@ -136,7 +136,7 @@ class RunLayout:
     act_vocab: int
     event_vocab: int
     boss_vocab: int
-    event_key_vocab: int
+    event_option_vocab: int
 
     @classmethod
     def load(cls) -> RunLayout:

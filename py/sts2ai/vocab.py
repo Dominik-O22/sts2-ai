@@ -219,7 +219,7 @@ if __name__ == "__main__":
 
     RL = RunLayout.load()
     run_grown = {k: list(names) for k, names in v.items()}
-    for kind in ("card", "relic", "runrelic", "event", "option"):
+    for kind in ("card", "relic", "runrelic", "event", "option", "eventoption"):
         run_grown[kind].append(f"NEW_{kind}")
     GRL = replace(RL, **{size: 1 + sum(len(run_grown[k]) for k in kinds) for size, kinds in EMBEDDINGS.values()})
     text = lambda vocab: "\n".join(f"{k} {n}" for k, names in vocab.items() for n in names)

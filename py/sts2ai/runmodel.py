@@ -50,7 +50,7 @@ class RunPolicy(nn.Module):
         self.boss = nn.Embedding(L.boss_vocab, 16, padding_idx=0)
         self.event = nn.Embedding(L.event_vocab, 16, padding_idx=0)
         self.option = nn.Embedding(L.option_vocab, 16, padding_idx=0)
-        self.event_key = nn.Embedding(L.event_key_vocab, 16, padding_idx=0)
+        self.event_option = nn.Embedding(L.event_option_vocab, 16, padding_idx=0)
         # One projection per token kind; their biases tell the kinds apart.
         self.global_in = nn.Linear(16 + 8 + 8 + 16 + 16 + 16 + L.global_floats, d)
         self.deck_in = nn.Linear(card_dim + 8 + L.deck_floats, d)
@@ -121,7 +121,7 @@ class RunPolicy(nn.Module):
                     self.relic(o_ids[..., 2 + C]),
                     self.potion(o_ids[..., 3 + C]),
                     self.room(o_ids[..., 4 + C]),
-                    self.event_key(o_ids[..., 5 + C]),
+                    self.event_option(o_ids[..., 5 + C]),
                     o_f,
                 ],
                 dim=2,
@@ -238,16 +238,20 @@ EMBEDDINGS = {
     "act": ("act_vocab", ("act",)),
     "event": ("event_vocab", ("event",)),
     "boss": ("boss_vocab", ("boss",)),
+    "event_option": ("event_option_vocab", ("eventoption",)),
 }
 
 
 def remap_run_state(state: dict[str, Tensor], old_text: str, new_text: str, fresh: dict[str, Tensor]) -> dict[str, Tensor]:
     """`state` for the vocabulary `new_text`: each embedding row moves to
-    its name's new index, and names new since keep their rows in `fresh`."""
+    its name's new index, and names new since keep their rows in `fresh`.
+    A table the checkpoint does not have is left to `event_options_from_buckets`."""
     old_v, new_v = parse(old_text), parse(new_text)
     out = dict(state)
     for table, (_, kinds) in EMBEDDINGS.items():
         key = f"{table}.weight"
+        if key not in state:
+            continue
         old_names = [n for k in kinds for n in old_v.get(k, [])]
         index = {n: i for i, n in enumerate(n for k in kinds for n in new_v.get(k, []))}
         rows = fresh[key].clone()
@@ -279,11 +283,32 @@ def grow_floats(state: dict[str, Tensor], old: dict[str, int], new: RunLayout) -
     return out
 
 
+def event_options_from_buckets(state: dict[str, Tensor]) -> dict[str, Tensor]:
+    """`state` from before event options had ids, when an option read the
+    row of `event_key`, 1,024 buckets of an FNV-1a hash of "event.page.key":
+    each option's row starts as its bucket's, so the policy reads every
+    option as it did, two options that shared a bucket still alike."""
+    out = dict(state)
+    buckets = out.pop("event_key.weight")
+    rows = [buckets[0]]
+    for name in parse(current_text())["eventoption"]:
+        event, rest = name.split(" ", 1)
+        page, key = rest.split(".", 1) if "." in rest else ("", rest)
+        h = 0x811C9DC5
+        for b in f"{event}.{page}.{key}".encode():
+            h = ((h ^ b) * 0x01000193) & 0xFFFFFFFF
+        rows.append(buckets[h % 1024 + 1])
+    out["event_option.weight"] = torch.stack(rows)
+    return out
+
+
 def load_run_policy(path: Path, device: torch.device) -> tuple[RunPolicy, dict]:
     """The run policy a checkpoint holds, and the checkpoint. Ids the sim
     gained since move to their new rows (`remap_run_state`), and float
-    columns appended since read at zero weight (`grow_floats`); a layout
-    that moved otherwise is refused."""
+    columns appended since read at zero weight (`grow_floats`), and a
+    checkpoint from before event option ids reads them by their old hash
+    buckets (`event_options_from_buckets`); a layout that moved otherwise is
+    refused."""
     ck = torch.load(path, map_location=device, weights_only=False)
     layout = RunLayout.load()
     vocab_sizes = {size for size, _ in EMBEDDINGS.values()}
@@ -297,5 +322,7 @@ def load_run_policy(path: Path, device: torch.device) -> tuple[RunPolicy, dict]:
         state = grow_floats(state, ck["layout"], layout)
     if ck["vocab"] != current_text():
         state = remap_run_state(state, ck["vocab"], current_text(), policy.state_dict())
+    if "event_key.weight" in state:
+        state = event_options_from_buckets(state)
     policy.load_state_dict(state)
     return policy, ck
