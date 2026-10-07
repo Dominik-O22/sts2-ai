@@ -129,7 +129,7 @@ impl VecEnv {
     fn fork(&self, envs: Vec<usize>, n: usize, groups: usize, seed: u64, depth: u32) -> Forks {
         let guards: Vec<_> = envs.iter().map(|&i| self.inner.combat(i)).collect();
         let roots: Vec<&sim::combat::Combat> = guards.iter().map(|g| &**g).collect();
-        let bases: Vec<_> = envs.iter().map(|&i| self.inner.base(i)).collect();
+        let bases: Vec<_> = guards.iter().map(|g| g.base()).collect();
         Forks { inner: InnerForks::of(&roots, &bases, n, groups, seed, depth) }
     }
 
@@ -834,7 +834,7 @@ impl TurnPlanner {
             .unzip();
         let guards: Vec<_> = fresh.iter().map(|&i| inner.combat(i)).collect();
         let roots: Vec<&sim::combat::Combat> = guards.iter().map(|g| &**g).collect();
-        let bases: Vec<Baseline> = fresh.iter().map(|&i| inner.base(i)).collect();
+        let bases: Vec<Baseline> = guards.iter().map(|g| g.base()).collect();
         let p: Vec<Option<&[f32]>> = rows.iter().map(|&r| Some(&priors[r * N_ACTIONS..][..N_ACTIONS])).collect();
         let cfg = self.cfg;
         let done = py.detach(|| sim::turnsearch::Search::run_all(&roots, &bases, &p, &cfg));
@@ -1334,7 +1334,8 @@ impl TreeSearch {
     /// Start a fresh search from each of `envs`' current states.
     fn start(&mut self, env: PyRef<'_, VecEnv>, envs: Vec<usize>) {
         for i in envs {
-            self.trees[i] = Some(sim::mcts::Tree::new(&env.inner.combat(i), env.inner.base(i), self.cfg));
+            let root = env.inner.combat(i);
+            self.trees[i] = Some(sim::mcts::Tree::new(&root, root.base(), self.cfg));
         }
     }
 

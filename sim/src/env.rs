@@ -1405,7 +1405,7 @@ impl VecEnv {
         let cfg = self.cfg;
         let pools = Pools { fixed: &self.fixed, hard: &self.hard, real: &self.real, restarts: &[] };
         for (i, m) in self.slots.iter().enumerate() {
-            let mut s = m.lock().expect("slot");
+            let mut s = lock_slot(m, i);
             s.resets = 0;
             s.run = None;
             s.reset(i, n, &cfg, pools);
@@ -1419,8 +1419,8 @@ impl VecEnv {
     /// Log each run elite and boss fight as it starts (`take_fights`), or
     /// stop and drop the log.
     pub fn log_fights(&mut self, on: bool, easy: bool) {
-        for m in self.slots.iter() {
-            let mut s = m.lock().expect("slot");
+        for (i, m) in self.slots.iter().enumerate() {
+            let mut s = lock_slot(m, i);
             s.fights = on.then(Vec::new);
             s.log_easy = easy;
         }
@@ -1429,14 +1429,14 @@ impl VecEnv {
     /// Trace each run (`runtrace::Tracer`), or stop. Set before the runs
     /// start, so each trace holds the run from its first fight.
     pub fn trace_runs(&mut self, on: bool) {
-        for m in self.slots.iter() {
-            m.lock().expect("slot").trace = on.then(Tracer::default);
+        for (i, m) in self.slots.iter().enumerate() {
+            lock_slot(m, i).trace = on.then(Tracer::default);
         }
     }
 
     /// The fights logged since the last call, drained.
     pub fn take_fights(&mut self) -> Vec<String> {
-        self.slots.iter().flat_map(|m| m.lock().expect("slot").fights.as_mut().map(std::mem::take).unwrap_or_default()).collect()
+        self.slots.iter().enumerate().flat_map(|(i, m)| lock_slot(m, i).fights.as_mut().map(std::mem::take).unwrap_or_default()).collect()
     }
 
     /// Run mode: every env plays runs at `asc`, fight after fight, its run
@@ -1449,7 +1449,7 @@ impl VecEnv {
         let seeds = Arc::new(Seeds::new(base, last, n));
         let (cfg, hard, starts) = (self.cfg, &self.hard, &self.starts);
         self.slots.par_iter().enumerate().for_each(|(i, m)| {
-            let mut s = m.lock().expect("slot");
+            let mut s = lock_slot(m, i);
             s.resets = 0;
             s.run = Some(RunSlot::new(asc, seeds.clone(), i, choices, starts.clone()));
             s.reset(i, n, &cfg, Pools { fixed: &[], hard, real: &[], restarts: &[] });
@@ -1472,10 +1472,11 @@ impl VecEnv {
         self.run_loop.as_ref().expect("no run loop started")
     }
 
-    /// Env `i`'s slot, locked. Only for an env no worker is stepping: one
-    /// the loop handed out (`runloop::Loop::take`) or when no loop runs.
+    /// Env `i`'s slot, locked (`lock_slot`). Only for an env no worker is
+    /// stepping: one the loop handed out (`runloop::Loop::take`) or when no
+    /// loop runs.
     pub fn slot(&self, i: usize) -> std::sync::MutexGuard<'_, Slot> {
-        self.slots[i].lock().expect("slot")
+        lock_slot(&self.slots[i], i)
     }
 
     /// Where the runs that start from now on start (`Starts`).
@@ -1528,7 +1529,7 @@ impl VecEnv {
     pub fn afterstates(&mut self, envs: &[usize], samples: usize, caps: Caps, encode_rows: bool) -> AfterstateRows {
         let path = runobs::DECISIONS.iter().position(|&d| d == "Path").expect("the map step") as i64 + 1;
         let slots = &self.slots;
-        let guards: Vec<std::sync::MutexGuard<Slot>> = envs.iter().map(|&env| slots[env].lock().expect("slot")).collect();
+        let guards: Vec<std::sync::MutexGuard<Slot>> = envs.iter().map(|&env| lock_slot(&slots[env], env)).collect();
         let segment = |env: usize| {
             let row = envs.iter().position(|&e| e == env).expect("a row for the env");
             let slot = guards[row].run.as_ref().expect("run mode");
@@ -1758,10 +1759,11 @@ impl VecEnv {
         self.check_buffers(floats, ids, mask);
         self.slots
             .par_iter()
+            .enumerate()
             .zip(floats.par_chunks_mut(N_FLOATS))
             .zip(ids.par_chunks_mut(N_IDS))
             .zip(mask.par_chunks_mut(N_ACTIONS))
-            .for_each(|(((s, f), i), m)| encode::encode(&s.lock().expect("slot").combat, f, i, m));
+            .for_each(|((((env, s), f), i), m)| encode::encode(&lock_slot(s, env).combat, f, i, m));
     }
 
     /// Apply one action index per env, reset the envs whose fight ended,
@@ -1793,7 +1795,7 @@ impl VecEnv {
             .zip(rewards.par_iter_mut())
             .zip(dones.par_iter_mut())
             .map(|(((((((i, m_), &a), f), ids), m), r), d)| {
-                let mut s = m_.lock().expect("slot");
+                let mut s = lock_slot(m_, i);
                 // A run waiting at a decision sits the step out, as does an
                 // env the caller is done with.
                 if a < 0 || s.waiting() {
@@ -1807,7 +1809,7 @@ impl VecEnv {
             })
             .flatten()
             .collect();
-        for snap in self.slots.iter().filter_map(|m| m.lock().expect("slot").kept.take()) {
+        for snap in self.slots.iter().enumerate().filter_map(|(i, m)| lock_slot(m, i).kept.take()) {
             if self.restarts.len() < RESTART_POOL {
                 self.restarts.push(*snap);
             } else {
@@ -1827,8 +1829,29 @@ impl VecEnv {
     }
 }
 
+/// Locks env `env`'s slot, which nothing else may hold: an env is in one
+/// place at a time (stepped by a loop worker, or held by the caller), so a
+/// slot locked elsewhere is a bug, a second lock on this thread or a
+/// worker stepping an env the caller touches, and panics here naming the
+/// env instead of deadlocking.
+pub fn lock_slot(m: &Mutex<Slot>, env: usize) -> std::sync::MutexGuard<'_, Slot> {
+    match m.try_lock() {
+        Ok(s) => s,
+        Err(std::sync::TryLockError::WouldBlock) => panic!("env {env}: slot already locked (locked twice, or touched while a loop worker steps it)"),
+        Err(std::sync::TryLockError::Poisoned(_)) => panic!("env {env}: slot poisoned by an earlier panic"),
+    }
+}
+
 /// A locked slot's combat (`VecEnv::combat`).
 pub struct CombatRef<'a>(std::sync::MutexGuard<'a, Slot>);
+
+impl CombatRef<'_> {
+    /// Where the fight started (`VecEnv::base`), read under the same lock:
+    /// locking the slot again while this guard lives would panic.
+    pub fn base(&self) -> Baseline {
+        self.0.base
+    }
+}
 
 impl std::ops::Deref for CombatRef<'_> {
     type Target = Combat;
