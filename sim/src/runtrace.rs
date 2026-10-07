@@ -235,7 +235,10 @@ pub fn option_text(floats: &[f32], ids: &[i64], k: usize) -> String {
         parts.push(runobs::ROOMS[ids[i + 4 + C] as usize - 1].to_string());
     }
     if parts[0] == "Event" {
-        parts[0] = format!("Event#{}", ids[i + 5 + C]);
+        // The option's id is its `EVENT_OPTIONS` index + 1.
+        if let Some(&(event, page, key)) = (ids[i + 5 + C] as usize).checked_sub(1).and_then(|k| runobs::EVENT_OPTIONS.get(k)) {
+            parts[0] = format!("Event {}", runobs::event_option_name(event, page, key));
+        }
     }
     let price = floats[f + 2 + C];
     if price != 0.0 {
