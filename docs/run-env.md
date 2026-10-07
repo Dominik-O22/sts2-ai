@@ -614,7 +614,7 @@ before I can rest" against "I would win it X% of the time at this HP";
 the map encoder reads the forecast too, as part of the run state it
 mixes into every node, elites deeper in the map among them.
 
-One code path fills it: `Forecaster.fill`, which RunLoop calls before
+One code path fills it: `Forecaster.fill`, which the loop calls before
 every decision round (runtrain, runplay) and `imitation build --combat
 --forecast` calls on the winners' rows (their states, our combat's
 forecast). A run checkpoint keeps the calibration it was trained with,
@@ -893,10 +893,15 @@ the second they are worth nothing.
 
    `runplay --search N` plays the fights of `--search-kinds` (elites and
    bosses by default) as the live pilot does (`play --search N`: the same
-   `groups`, second action and margin, `search.choose`); the rest stay
-   greedy. Every env in such a fight is a root of one batch of copies per
-   combat step, and the copies reshuffle the draw pile and roll their own
-   dice, so the search sees no more than a player would. With `--search 0`
+   `groups`, second action and margin, `search.picks`); the rest stay
+   greedy. The copies reshuffle the draw pile and roll their own dice, so
+   the search sees no more than a player would. A search is a job the loop
+   carries (`runloop.Search`): the envs at such a decision in one round are
+   held as its roots, forked, and their copies' rollout (`search.Rollout`)
+   advances one step a round, every job's rows through the network
+   together after the live rows; the roots are posted once the job's picks
+   are in, and the other envs keep stepping meanwhile. Searches in flight
+   hold at most `MAX_COPIES` copies between them. With `--search 0`
    the runs are the ones greedy plays, line for line. gen5 plays the
    fights, run-7 (final) the run, 128 runs per seed set (0 and 128),
    2026-09-25, beside a combat training on the same GPU:
