@@ -491,6 +491,13 @@ uv run python -m sts2ai.runplay runs/ab-attn/latest.pt --choices first     # or 
 - `runplay --run-policy` prints what the policy picks at each kind of
   decision (paths by room type, heal or smith, take or skip a card, shop
   buys), and `--show N` prints N decisions with the odds for each option.
+- `runplay --runs-out FILE` writes a trace per run (`sts2ai.runtrace`):
+  every fight with HP in and lost and potions, every decision with the
+  options offered, and the deck and relics at each boss. `python -m
+  sts2ai.runreport A B ...` reads traces: outcomes paired by seed, fights
+  by act and kind, each boss, act 3 conversion, the decision mix and the
+  decks at the act 1 and act 3 bosses. About 0.35 KB a floor, 55-65 MB
+  per 8,192 greedy runs; no measurable cost in runs/s.
 
 ### Starting from winners' decisions
 

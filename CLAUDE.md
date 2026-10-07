@@ -101,6 +101,10 @@ combat checkpoint and search settings drift, and at a 4% win rate 2,048 runs
 only separate differences of about a point. An interval that spans zero is
 noise; say so rather than reading a trend into it.
 
+Each arm's runs file is a full trace (`sts2ai.runtrace`: fights, decisions,
+decks at the bosses). Answer questions about an A/B with `uv run python -m
+sts2ai.runreport a.jsonl b.jsonl` or a script over the traces, not a rerun.
+
 ## Judging a combat checkpoint
 
 `uv run python -m sts2ai.bench NEW.pt --base OLD.pt` plays both on about

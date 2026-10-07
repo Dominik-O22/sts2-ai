@@ -1116,6 +1116,13 @@ fn card_ids() -> Vec<String> {
     ALL_CARDS.iter().map(|c| sim::replay::slug(&format!("{c:?}"))).collect()
 }
 
+/// Every card's type (`Attack`, `Skill`, `Power`, `Status`, `Curse`), in
+/// `game_ids()["card"]` order.
+#[pyfunction]
+fn card_types() -> Vec<String> {
+    ALL_CARDS.iter().map(|&c| format!("{:?}", sim::card::def(c).ty)).collect()
+}
+
 /// Every card, relic, potion and enchantment's game id (`BODY_SLAM`), each
 /// in the sim's order: index i here is id i + 1 in the policy's embeddings.
 #[pyfunction]
@@ -1362,6 +1369,7 @@ fn _sim(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(start_points, m)?)?;
     m.add_function(wrap_pyfunction!(card_names, m)?)?;
     m.add_function(wrap_pyfunction!(card_ids, m)?)?;
+    m.add_function(wrap_pyfunction!(card_types, m)?)?;
     m.add_function(wrap_pyfunction!(game_ids, m)?)?;
     m.add_function(wrap_pyfunction!(generate_run, m)?)?;
     m.add_function(wrap_pyfunction!(unsupported_cards, m)?)?;
