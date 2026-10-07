@@ -698,4 +698,46 @@ mod tests {
             assert_eq!(potions, recorded.potions);
         }
     }
+
+    /// Inflame+ with Swift 2, the one uncommon card and so the one Thieving
+    /// Hopper steals, among four Strikes.
+    fn inflame() -> DeckCard {
+        DeckCard { id: "INFLAME".into(), upgraded: true, enchantment: Some(Enchant { id: "SWIFT".into(), amount: 2 }) }
+    }
+
+    /// A run with `deck`, 999 HP and 100 gold, and a fight against
+    /// `monster` built from it, with the first turn ended (the thief has
+    /// stolen).
+    fn robbed(deck: Vec<DeckCard>, encounter: Encounter, monster: MonsterId) -> (RunState, FightSetup, Combat) {
+        let mut run = RunState::new("SEED", [Act::Overgrowth, Act::Hive, Act::Glory], Ascension(0), &Unlocks::default());
+        (run.hp, run.max_hp, run.gold, run.deck) = (999, 999, 100, deck);
+        let setup = run.fight_setup(encounter, vec![EnemySpec { id: monster, flags: Default::default() }]).unwrap();
+        let mut combat = setup.combat(1);
+        combat.step(crate::combat::Action::EndTurn);
+        (run, setup, combat)
+    }
+
+    /// Kills enemy `i` with a Strike.
+    fn strike_dead(combat: &mut Combat, i: usize) {
+        combat.enemies[i].creature.hp = 1;
+        let hand_idx = combat.player.hand.iter().position(|c| c.id == crate::ids::CardId::StrikeIronclad).expect("a Strike in hand");
+        combat.step(crate::combat::Action::PlayCard { hand_idx, target: Some(i) });
+    }
+
+    /// `SwipePower.Steal` takes the card out of the deck, and a hopper that
+    /// escapes keeps it.
+    #[test]
+    fn a_card_the_hopper_escapes_with_leaves_the_deck() {
+        let strikes = vec![DeckCard::new("STRIKE_IRONCLAD"); 4];
+        let (mut run, setup, mut combat) = robbed([strikes.clone(), vec![inflame()]].concat(), Encounter::ThievingHopperWeak, MonsterId::ThievingHopper);
+        for _ in 0..10 {
+            if combat.is_over() {
+                break;
+            }
+            combat.step(crate::combat::Action::EndTurn);
+        }
+        assert!(combat.enemies[0].escaped, "the hopper fled");
+        run.end_fight(&setup, &combat);
+        assert_eq!(run.deck, strikes);
+    }
 }
