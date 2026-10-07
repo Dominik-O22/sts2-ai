@@ -17,7 +17,7 @@ use std::sync::Arc;
 use crate::card::UNSUPPORTED_CARDS;
 use crate::effects::Offered;
 use crate::encounter::{Act, Encounter};
-use crate::events::EventFight;
+use crate::events::{EventFight, Extra};
 use crate::gen::FightSetup;
 use crate::map::{ActMap, PointId};
 use crate::plan::{select_acts, Unlocks};
@@ -30,11 +30,14 @@ use crate::shop::{Item, Ware};
 use crate::types::Ascension;
 
 /// How a fight went, once `Fights::fight` has written it into the run.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Fought {
     pub won: bool,
     /// `CombatRoom.GoldProportion` (`RunState::end_fight`).
     pub gold_proportion: f32,
+    /// The rewards the fight itself added (`CombatRoom.ExtraRewards`): a
+    /// dead thief's loot.
+    pub extra: Vec<Extra>,
 }
 
 /// Plays a fight out and writes it back into the run (`end_fight` for a
@@ -53,7 +56,7 @@ impl<F: FnMut(&mut RunState, FightSetup) -> Fought> Fights for F {
 /// with nothing else changed.
 pub fn stub_fight(run: &mut RunState, _: FightSetup) -> Fought {
     run.hp = (run.hp * 7 + 9) / 10;
-    Fought { won: true, gold_proportion: 1.0 }
+    Fought { won: true, gold_proportion: 1.0, extra: vec![] }
 }
 
 /// Whether the combat sim can play a card.
@@ -267,7 +270,7 @@ impl Run {
             match fighting {
                 Fighting::Room(kind) => {
                     self.state.fight_won(kind);
-                    let rewards = self.state.combat_rewards(kind, fought.gold_proportion);
+                    let rewards = self.state.fight_rewards(kind, fought.gold_proportion, None, &fought.extra);
                     self.state.take_rewards(rewards, &mut chooser, &mut log);
                 }
                 Fighting::Event(fight) => drop(self.state.event_fight_won(&fight, fought.gold_proportion, &mut chooser, &mut log)),

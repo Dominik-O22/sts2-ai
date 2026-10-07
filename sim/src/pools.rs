@@ -297,6 +297,19 @@ pub fn sim_enchantment(id: &str) -> Option<EnchantmentId> {
     by_game_id(&ENCHANTMENTS, ALL_ENCHANTMENTS, id)
 }
 
+/// A card's game id as the lookup holds it, which lives as long as the
+/// program, as an `Offer` of a card from the deck needs it.
+pub fn static_card_id(id: &str) -> Option<&'static str> {
+    sim_card(id)?;
+    CARDS.get()?.get_key_value(id).map(|(k, _)| k.as_str())
+}
+
+/// `static_card_id` for an enchantment.
+pub fn static_enchantment_id(id: &str) -> Option<&'static str> {
+    sim_enchantment(id)?;
+    ENCHANTMENTS.get()?.get_key_value(id).map(|(k, _)| k.as_str())
+}
+
 static CARDS: OnceLock<HashMap<String, CardId>> = OnceLock::new();
 static POTIONS: OnceLock<HashMap<String, PotionId>> = OnceLock::new();
 static RELICS: OnceLock<HashMap<String, RelicId>> = OnceLock::new();

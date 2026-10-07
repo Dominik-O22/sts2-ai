@@ -118,7 +118,9 @@ pub enum Extra {
     /// A given relic as a reward.
     NamedRelic(String),
     /// `SpecialCardReward`: one given card to take or leave.
-    Card(&'static str),
+    Card(Offer),
+    /// `GoldReward(amount)`: a fixed amount, which still draws (`Populate`).
+    Gold(i32),
 }
 
 /// An event walked through: every page it laid out, in order, the fight
@@ -856,6 +858,7 @@ fn port_text(line: &str) -> String {
             Extra::Potion => "potion".to_string(),
             Extra::NamedRelic(id) => format!("relic:{id}"),
             Extra::Card(_) => "card".to_string(),
+            Extra::Gold(gold) => format!("gold:{gold}"),
         });
         let words: Vec<String> = std::iter::once(slug(&format!("{:?}", fight.encounter))).chain(extras).collect();
         out.push_str(&format!("fight {}\n", words.join(" ")));
@@ -1461,7 +1464,7 @@ fn the_lantern_key(run: &mut RunState, ev: &mut Ev) -> Option<EventFight> {
         return None;
     }
     ev.ask(run, vec![EventOption::on("KEEP_THE_KEY", "FIGHT")]);
-    Some(EventFight { created: true, extra: vec![Extra::Card("LANTERN_KEY")], ..EventFight::new(Encounter::MysteriousKnightEventEncounter) })
+    Some(EventFight { created: true, extra: vec![Extra::Card(Offer::new("LANTERN_KEY"))], ..EventFight::new(Encounter::MysteriousKnightEventEncounter) })
 }
 
 /// `TheLegendsWereTrue`: Nab the Map adds Spoils Map; Slowly Find an Exit
