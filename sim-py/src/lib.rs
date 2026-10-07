@@ -291,8 +291,8 @@ impl VecEnv {
     /// Switch to run mode: every env plays whole runs at `asc`, fight
     /// after fight; the envs' k-th runs are seed indices `seed + env + k *
     /// n` (`sim::env::VecEnv::set_runs`). `choices` makes the run
-    /// decisions: "random", "first", or "caller" (`run_waiting`,
-    /// `observe_run`, `step_run`).
+    /// decisions: "random", "first", or "caller" (the loop: `start_loop`,
+    /// `take`, `post`).
     /// Log each run elite and boss fight as it starts, as a recorder
     /// `start` record with the run's act (`take_fights` drains them).
     #[pyo3(signature = (on, easy=false))]
@@ -407,20 +407,6 @@ impl VecEnv {
         self.inner.start_pools().to_vec()
     }
 
-    /// The envs whose run waits at a decision for the caller.
-    fn run_waiting(&self) -> Vec<usize> {
-        self.inner.run_waiting()
-    }
-
-    /// Fill rows `0..len(envs)` of `floats [k, RUN_FLOATS]` and `ids [k,
-    /// RUN_IDS]` with the decision each env waits at (`sim::runobs`).
-    fn observe_run(&self, py: Python<'_>, envs: Vec<usize>, mut floats: PyReadwriteArray2<f32>, mut ids: PyReadwriteArray2<i64>) -> PyResult<()> {
-        let f = floats.as_slice_mut()?;
-        let i = ids.as_slice_mut()?;
-        py.detach(|| self.inner.observe_run(&envs, f, i));
-        Ok(())
-    }
-
     /// The forecast fights of the decisions `envs` wait at (`forecast_rows`).
     fn forecast<'py>(&self, py: Python<'py>, envs: Vec<usize>) -> Forecast<'py> {
         let fights = self.inner.forecast(&envs);
@@ -474,26 +460,6 @@ impl VecEnv {
     /// words, and the sub-decisions' options on its best path.
     fn afterstate_option(&self, row: usize, option: usize) -> (String, Vec<String>) {
         self.inner.afterstate_option(row, option)
-    }
-
-    /// Answer each of `envs`' run decision with its option token
-    /// `options[k]` and play on, writing the combat rows of the fights that
-    /// start. Returns the runs that ended: (env, run).
-    fn step_run(
-        &mut self,
-        py: Python<'_>,
-        envs: Vec<usize>,
-        options: PyReadonlyArray1<i64>,
-        mut floats: PyReadwriteArray2<f32>,
-        mut ids: PyReadwriteArray2<i64>,
-        mut mask: PyReadwriteArray2<bool>,
-    ) -> PyResult<Vec<(usize, RunFight)>> {
-        let o = options.as_slice()?;
-        let f = floats.as_slice_mut()?;
-        let i = ids.as_slice_mut()?;
-        let m = mask.as_slice_mut()?;
-        let ended = py.detach(|| self.inner.step_run(&envs, o, f, i, m));
-        Ok(ended.into_iter().map(|(env, r)| (env, run_fight(r))).collect())
     }
 
     /// Switch to cycling through the recordings in `dir` (the held-out

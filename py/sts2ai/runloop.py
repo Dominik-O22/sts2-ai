@@ -28,6 +28,8 @@ from sts2ai.search import choose
 
 # Picks options for the envs waiting at run decisions, given their rows.
 Decide = Callable[[list[int], np.ndarray, np.ndarray], np.ndarray]
+# Sees a round's events (`Taken.ends`, `Taken.ended`, ...) before its decisions.
+OnEvents = Callable[[Taken], None]
 
 
 class Loop:
@@ -90,13 +92,18 @@ class Loop:
         self.envs.sim.stop_loop()
 
     @torch.no_grad()
-    def step(self, decide: Decide) -> Taken:
+    def step(self, decide: Decide, events: OnEvents | None = None) -> Taken:
         """One round: take the ready envs, answer them, post. Returns what
         was taken, with the events since the last round; `active` 0 there
-        means every env has left and the last events are in."""
+        means every env has left and the last events are in. `events` sees
+        them before `decide` does: a worker plays an env whose run ended on
+        to the next run's first decision, so the end and that decision come
+        in the same round."""
         envs = self.envs
         t = envs.take(max(1, min(self.min_rows, self.active // 2)), self.timeout_ms)
         self.active = t.active
+        if events is not None:
+            events(t)
         actions = options = np.empty(0, dtype=np.int64)
         if t.combat:
             floats = torch.from_numpy(t.floats).to(self.device, non_blocking=True)

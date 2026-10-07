@@ -18,7 +18,7 @@ use crate::gen::{act_floor, encounter_of_kind, generate, generate_against, Fight
 use crate::rng::{CombatRngs, Rng};
 use crate::rooms::{Chooser, Decision, First, Random};
 use crate::run::{Carried, RunState};
-use crate::runobs::{self, RunObs, RUN_FLOATS, RUN_IDS};
+use crate::runobs::{self, RunObs};
 use crate::runtrace::Tracer;
 use crate::potion::PotionId;
 use crate::relic::RelicId;
@@ -85,8 +85,8 @@ pub struct EpisodeEnd {
     pub run: Option<RunFight>,
 }
 
-/// A run fight's place in its run, or, reported by `step_run`, where a
-/// run ended between fights.
+/// A run fight's place in its run, or, reported with a run decision's
+/// answer, where a run ended between fights.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RunFight {
     /// The run's seed index (`RunSlot`).
@@ -448,8 +448,8 @@ pub enum RunChoices {
     Random,
     /// `rooms::First`.
     First,
-    /// The caller: the run stops at each decision until `step_run`
-    /// answers it.
+    /// The caller: the run stops at each decision until the loop's answer
+    /// comes (`runloop`).
     Caller,
 }
 
@@ -983,7 +983,7 @@ impl Slot {
     /// (Whispering Earring can win turn 1 on its own) is skipped: there is
     /// nothing in it to act on. In run mode, returns the finished fight's
     /// place in its run; a run that waits at a decision for the caller
-    /// starts no fight until `step_run` answers it.
+    /// starts no fight until `answer` answers it.
     fn reset(&mut self, index: usize, n: usize, cfg: &EnvConfig, pools: Pools) -> Option<RunFight> {
         let mut report = None;
         loop {
@@ -1503,23 +1503,6 @@ impl VecEnv {
         self.starts.lock().expect("start pools").pool_sizes()
     }
 
-    /// The envs whose run waits at a decision for the caller.
-    pub fn run_waiting(&self) -> Vec<usize> {
-        (0..self.slots.len()).filter(|&i| self.slot(i).waiting()).collect()
-    }
-
-    /// Encode the run decision each of `envs` waits at, a row each, laid
-    /// out per `runobs`.
-    pub fn observe_run(&self, envs: &[usize], floats: &mut [f32], ids: &mut [i64]) {
-        assert!(floats.len() >= envs.len() * RUN_FLOATS && ids.len() >= envs.len() * RUN_IDS, "run buffers too small");
-        floats.par_chunks_mut(RUN_FLOATS).zip(ids.par_chunks_mut(RUN_IDS)).zip(envs.par_iter()).for_each(|((f, i), &env)| {
-            let s = self.slot(env);
-            let obs = s.run.as_ref().and_then(RunSlot::waiting).unwrap_or_else(|| panic!("env {env}: not at a run decision"));
-            f.copy_from_slice(&obs.floats);
-            i.copy_from_slice(&obs.ids);
-        });
-    }
-
     /// The forecast fights of the decisions `envs` wait at
     /// (`runobs::forecast_fights`, none but at map steps), in `envs` order.
     pub fn forecast(&self, envs: &[usize]) -> Vec<Vec<FightSetup>> {
@@ -1736,36 +1719,6 @@ impl VecEnv {
             }
         }
         (p.names[row][option].clone(), via)
-    }
-
-    /// Answer the run decision each of `envs` waits at with its option
-    /// token `options[k]`, and play each run on: to its next decision, or
-    /// to a fight, which starts and whose combat row is written to the
-    /// observation buffers. No combat steps. Returns the runs that ended,
-    /// by env.
-    pub fn step_run(&mut self, envs: &[usize], options: &[i64], floats: &mut [f32], ids: &mut [i64], mask: &mut [bool]) -> Vec<(usize, RunFight)> {
-        self.check_buffers(floats, ids, mask);
-        assert_eq!(envs.len(), options.len(), "an option per env");
-        let n = self.slots.len();
-        let mut chosen = vec![None; n];
-        for (&env, &option) in envs.iter().zip(options) {
-            assert!(chosen[env].replace(option as usize).is_none(), "env {env} answered twice");
-        }
-        let cfg = self.cfg;
-        self.slots
-            .par_iter()
-            .enumerate()
-            .zip(chosen.par_iter())
-            .zip(floats.par_chunks_mut(N_FLOATS))
-            .zip(ids.par_chunks_mut(N_IDS))
-            .zip(mask.par_chunks_mut(N_ACTIONS))
-            .filter_map(|(((((i, m_), option), f), ids), m)| {
-                let mut s = m_.lock().expect("slot");
-                let ended = s.answer((*option)?, i, n, &cfg);
-                encode::encode(&s.combat, f, ids, m);
-                ended.map(|r| (i, r))
-            })
-            .collect()
     }
 
     /// Pools of played runs' fights, each for its share of the resets from
@@ -2239,6 +2192,7 @@ impl Forks {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::runobs::{RUN_FLOATS, RUN_IDS};
 
     /// A seed index names one run whichever slot plays it and however
     /// many slots there are: the seeds `100..106` played by 2 slots and by
@@ -2782,57 +2736,67 @@ pub(crate) mod tests {
         end: forward::End,
     }
 
-    /// Plays `env` (run mode, `RunChoices::Caller`) until `runs` runs have
-    /// ended: random options answered through `step_run` until none wait,
-    /// then a combat step with the first legal action. Checks each row is
-    /// the decision its env waits at, with an option token per answer.
+    /// Plays `env` (run mode, `RunChoices::Caller`) on the threaded loop
+    /// until `runs` runs have ended: random options at the run decisions,
+    /// the first legal action at the combat decisions. Checks each run row
+    /// is the decision its env waits at, with an option token per answer,
+    /// and records each fight as it ends by stepping a copy of the
+    /// combat as the worker steps the slot's (the lone legal actions
+    /// after the posted one included).
     fn caller_runs(env: &mut VecEnv, runs: usize) -> Vec<CallerRun> {
         let n = env.len();
         let (mut floats, mut ids, mut mask) = (vec![0.0; n * N_FLOATS], vec![0; n * N_IDS], vec![false; n * N_ACTIONS]);
-        let (mut rewards, mut dones) = (vec![0.0; n], vec![false; n]);
         let (mut run_f, mut run_i) = (vec![0.0; n * RUN_FLOATS], vec![0; n * RUN_IDS]);
-        env.observe(&mut floats, &mut ids, &mut mask);
+        env.start_loop(2);
         let mut rng = Rng::new(3);
         let mut answers: std::collections::HashMap<u64, Vec<usize>> = Default::default();
         let mut fights: std::collections::HashMap<u64, Vec<(FightSetup, Combat)>> = Default::default();
         let mut ended: Vec<RunFight> = vec![];
         while ended.len() < runs {
-            loop {
-                let waiting = env.run_waiting();
-                if waiting.is_empty() {
-                    break;
-                }
-                env.observe_run(&waiting, &mut run_f, &mut run_i);
-                let options: Vec<i64> = waiting
-                    .iter()
-                    .enumerate()
-                    .map(|(k, &i)| {
-                        let guard = env.slot(i);
-                        let slot = guard.run.as_ref().unwrap();
-                        let obs = slot.waiting().unwrap();
-                        assert_eq!(obs.floats, run_f[k * RUN_FLOATS..][..RUN_FLOATS], "env {i}: the row is its decision");
-                        let present = (0..runobs::MAX_OPTIONS).filter(|&o| run_f[k * RUN_FLOATS + runobs::F_OPTIONS + o * runobs::OPTION_FLOATS] == 1.0).count();
-                        assert_eq!(present, obs.answers.len(), "env {i}: an option token per answer");
-                        assert!(present > 1, "env {i}: a decision with one option is taken without asking");
-                        let option = rng.next_int(present);
-                        answers.entry(slot.seed).or_default().push(obs.answers[option]);
-                        option as i64
-                    })
-                    .collect();
-                ended.extend(env.step_run(&waiting, &options, &mut floats, &mut ids, &mut mask).into_iter().map(|(_, run)| run));
-            }
-            let actions: Vec<i64> = (0..n).map(|i| mask[i * N_ACTIONS..][..N_ACTIONS].iter().position(|&m| m).unwrap() as i64).collect();
-            let before: Vec<(FightSetup, Combat)> = (0..n).map(|i| { let s = env.slot(i); (s.setup.clone(), s.combat.clone()) }).collect();
-            for e in env.step(&actions, &mut floats, &mut ids, &mut mask, &mut rewards, &mut dones) {
-                let (setup, mut combat) = before[e.env].clone();
-                combat.step(encode::decode(&combat, actions[e.env] as usize).unwrap());
-                let run = e.run.expect("a run fight");
-                fights.entry(run.seed).or_default().push((setup, combat));
-                if run.end.is_some() {
-                    ended.push(run);
-                }
-            }
+            let t = env.run_loop().take(1, std::time::Duration::from_secs(5), &mut floats, &mut ids, &mut mask, &mut run_f, &mut run_i);
+            let options: Vec<i64> = t
+                .decision
+                .iter()
+                .enumerate()
+                .map(|(k, &i)| {
+                    let guard = env.slot(i);
+                    let slot = guard.run.as_ref().unwrap();
+                    let obs = slot.waiting().unwrap();
+                    assert_eq!(obs.floats, run_f[k * RUN_FLOATS..][..RUN_FLOATS], "env {i}: the row is its decision");
+                    let present = (0..runobs::MAX_OPTIONS).filter(|&o| run_f[k * RUN_FLOATS + runobs::F_OPTIONS + o * runobs::OPTION_FLOATS] == 1.0).count();
+                    assert_eq!(present, obs.answers.len(), "env {i}: an option token per answer");
+                    assert!(present > 1, "env {i}: a decision with one option is taken without asking");
+                    let option = rng.next_int(present);
+                    answers.entry(slot.seed).or_default().push(obs.answers[option]);
+                    option as i64
+                })
+                .collect();
+            let actions: Vec<i64> = t
+                .combat
+                .iter()
+                .enumerate()
+                .map(|(k, &i)| {
+                    let a = mask[k * N_ACTIONS..][..N_ACTIONS].iter().position(|&m| m).unwrap();
+                    let s = env.slot(i);
+                    let (setup, mut combat, seed) = (s.setup.clone(), s.combat.clone(), s.run.as_ref().unwrap().seed);
+                    combat.step(encode::decode(&combat, a).unwrap());
+                    loop {
+                        let legal = combat.legal_actions();
+                        if legal.len() != 1 {
+                            break;
+                        }
+                        combat.step(legal[0]);
+                    }
+                    if combat.is_over() {
+                        fights.entry(seed).or_default().push((setup, combat));
+                    }
+                    a as i64
+                })
+                .collect();
+            ended.extend(t.events.runs.into_iter().map(|(_, run)| run));
+            env.run_loop().post(&t.combat, &actions, &t.decision, &options);
         }
+        env.stop_loop();
         ended
             .into_iter()
             .map(|run| CallerRun {
@@ -2987,9 +2951,11 @@ pub(crate) mod tests {
         let n = 8;
         let mut env = VecEnv::new(n, 5, EnvConfig::default());
         env.set_runs(Ascension(10), 300, u64::MAX, RunChoices::Caller);
+        env.start_loop(2);
         let (mut floats, mut ids, mut mask) = (vec![0.0; n * N_FLOATS], vec![0; n * N_IDS], vec![false; n * N_ACTIONS]);
-        env.observe(&mut floats, &mut ids, &mut mask);
-        let waiting = env.run_waiting();
+        let (mut run_f, mut run_i) = (vec![0.0; n * RUN_FLOATS], vec![0; n * RUN_IDS]);
+        let mut take = |env: &VecEnv| env.run_loop().take(n, std::time::Duration::from_secs(10), &mut floats, &mut ids, &mut mask, &mut run_f, &mut run_i);
+        let waiting = take(&env).decision;
         let options: Vec<usize> = waiting.iter().map(|&i| env.slot(i).run_obs().expect("waiting").answers.len()).collect();
         assert!(waiting.len() == n && options.iter().all(|&o| o > 1), "every run waits at its first ancient");
         let rows = env.afterstates(&waiting, 2, caps, true);
@@ -3018,13 +2984,13 @@ pub(crate) mod tests {
         }
         assert!(HashSet::<_>::from_iter((0..n).map(plan)).len() > 1, "the runs' acts differ, or the test means nothing");
         assert!(planned.values().all(|plans| plans.len() == 1), "a state shared by runs whose acts differ");
-        let zeros = vec![0; n];
-        env.step_run(&waiting, &zeros.iter().map(|&z| z as i64).collect::<Vec<_>>(), &mut floats, &mut ids, &mut mask);
-        let waiting = env.run_waiting();
+        env.run_loop().post(&[], &[], &waiting, &vec![0; n]);
+        let waiting = take(&env).decision;
         let at_path = |i: &usize| env.slot(*i).run_obs().is_some_and(|o| o.ids[0] == 1);
         let path: Vec<usize> = waiting.iter().copied().filter(at_path).collect();
         assert!(!path.is_empty(), "a map step follows the ancient's relic");
         assert_eq!(env.afterstates(&path, 2, caps, true).leaves, 0, "a map step is the policy's");
+        env.stop_loop();
     }
 
     /// A settled state scores its elites' mean calibrated win chance plus

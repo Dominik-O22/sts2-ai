@@ -145,7 +145,7 @@ class RunLayout:
 
 class RunFight(NamedTuple):
     """A run-mode fight's place in its run, or where a run ended between
-    fights (`Envs.step_run`)."""
+    fights (`Taken.ended`)."""
 
     seed: int
     act: int  # 0-based
@@ -320,17 +320,6 @@ class Envs:
         """States the runs have kept per start point."""
         return self.sim.start_pools()
 
-    def run_waiting(self) -> list[int]:
-        """The envs whose run waits at a decision. A combat `step` leaves
-        them where they are."""
-        return self.sim.run_waiting()
-
-    def observe_run(self, envs: list[int]) -> tuple[np.ndarray, np.ndarray]:
-        """The run decisions `envs` wait at, one row each, in the first
-        rows of `run_floats` and `run_ids`."""
-        self.sim.observe_run(envs, self.run_floats, self.run_ids)
-        return self.run_floats[: len(envs)], self.run_ids[: len(envs)]
-
     def forecast(self, envs: list[int]):
         """The forecast fights of the decisions `envs` wait at
         (`sts2ai.forecast.Fights`), their rows indexing `envs`."""
@@ -366,13 +355,6 @@ class Envs:
         """`afterstate_scores` from a score per distinct settled state."""
         score, capped = self.sim.afterstate_scores_given(np.asarray(scores, dtype=np.float64).tolist())
         return score.reshape(-1, self.run_layout.max_options), capped
-
-    def step_run(self, envs: list[int], options: np.ndarray) -> list[tuple[int, RunFight]]:
-        """Answer each env's decision with an option token and play on;
-        the fights that start fill their combat rows. Returns the runs
-        that ended, by env."""
-        ended = self.sim.step_run(envs, np.ascontiguousarray(options, dtype=np.int64), self.floats, self.ids, self.mask)
-        return [(env, RunFight(*r)) for env, r in ended]
 
     def use_setups(self, path: Path, repeats: int = 1, seed: int = 0) -> int:
         """Cycle through played runs' fights (`sts2ai.setups`), `repeats`
